@@ -18,6 +18,7 @@ services/api/api
 .vite/
 coverage/
 services/agent-runtime/data/memories.json
+services/agent-runtime/data/*.db
 
 # user-uploaded skills
 skills/users/
