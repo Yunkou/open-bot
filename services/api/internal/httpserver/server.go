@@ -28,6 +28,9 @@ type Server struct {
 	client     *http.Client
 	db         *db.DB
 	hub        *busHub
+	events     *chatHub
+	hosts      *hostHub
+	tasks      *taskControl
 	sbx        *sandbox.Manager
 	runs       *activeRuns
 }
@@ -41,6 +44,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 		client:     &http.Client{Timeout: 0},
 		db:         database,
 		hub:        newBusHub(),
+		events:     newChatHub(),
+		hosts:      newHostHub(),
+		tasks:      newTaskControl(),
 		sbx:        sandbox.NewManager(sandbox.LoadConfig()),
 		runs:       newActiveRuns(),
 	}
@@ -48,6 +54,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("ROUTINES_INPROCESS"))); v != "0" && v != "false" && v != "off" {
 		s.StartRoutineScheduler(context.Background())
 	}
+	s.StartConversationTaskRunner(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -74,6 +81,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/admin/members/{id}", s.requireOrgAdmin(s.handleAdminPatchMember))
 	mux.HandleFunc("GET /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminGetLLM))
 	mux.HandleFunc("PUT /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminPutLLM))
+	mux.HandleFunc("GET /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminGetDecision))
+	mux.HandleFunc("PUT /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminPutDecision))
+	mux.HandleFunc("POST /v1/admin/org/decision/test", s.requireOrgAdmin(s.handleAdminTestDecision))
 	mux.HandleFunc("GET /v1/admin/usage", s.requireOrgAdmin(s.handleAdminUsage))
 	mux.HandleFunc("GET /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
 	mux.HandleFunc("PUT /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
@@ -83,6 +93,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/admin/users", s.requireOrgAdmin(s.handleAdminCreateUser))
 	mux.HandleFunc("PATCH /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminPatchUser))
 	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminDeleteUser))
+	mux.HandleFunc("POST /v1/admin/users/batch-delete", s.requireOrgAdmin(s.handleAdminBatchDeleteUsers))
 
 	mux.HandleFunc("GET /v1/admin/bots", s.requireOrgAdmin(s.handleAdminListBots))
 	mux.HandleFunc("POST /v1/admin/bots", s.requireOrgAdmin(s.handleAdminCreateBot))
@@ -92,6 +103,12 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/admin/traces/status", s.requireOrgAdmin(s.handleAdminTracesStatus))
 	mux.HandleFunc("GET /v1/admin/traces", s.requireOrgAdmin(s.handleAdminListTraces))
 	mux.HandleFunc("GET /v1/admin/traces/{id}", s.requireOrgAdmin(s.handleAdminGetTrace))
+
+	mux.HandleFunc("GET /v1/admin/memories", s.requireOrgAdmin(s.handleAdminListMemories))
+	mux.HandleFunc("GET /v1/admin/memories/auto", s.requireOrgAdmin(s.handleAdminListAutoMemories))
+	mux.HandleFunc("GET /v1/admin/compactions", s.requireOrgAdmin(s.handleAdminListCompactions))
+	mux.HandleFunc("GET /v1/admin/channels", s.requireOrgAdmin(s.handleAdminListChannels))
+	mux.HandleFunc("GET /v1/admin/compact-config", s.requireOrgAdmin(s.handleCompactConfig))
 
 	mux.HandleFunc("GET /v1/llm-connections", s.requireAuth(s.handleListLLM))
 	mux.HandleFunc("POST /v1/llm-connections", s.requireAuth(s.handleCreateLLM))
@@ -116,6 +133,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/conversations", s.requireAuth(s.handleCreateConversation))
 	mux.HandleFunc("DELETE /v1/conversations/{id}", s.requireAuth(s.handleDeleteConversation))
 	mux.HandleFunc("GET /v1/conversations/{id}/messages", s.requireAuth(s.handleListMessages))
+	mux.HandleFunc("POST /v1/conversations/{id}/host-confirms", s.requireAuth(s.handleCreateHostConfirm))
+	mux.HandleFunc("POST /v1/conversations/{id}/host-confirms/{msgId}", s.requireAuth(s.handleDecideHostConfirm))
 	mux.HandleFunc("POST /v1/conversations/{id}/messages", s.requireAuth(s.handleSendMessage))
 	mux.HandleFunc("POST /v1/conversations/{id}/cancel", s.requireAuth(s.handleCancelConversationRun))
 	mux.HandleFunc("GET /v1/conversations/{id}/events", s.requireAuth(s.handleConversationEvents))
@@ -131,6 +150,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/agent-bus/inbox", s.requireAuth(s.handleAgentBusInbox))
 	mux.HandleFunc("POST /v1/agent-bus/messages/{id}/read", s.requireAuth(s.handleMarkAgentBusRead))
 	mux.HandleFunc("GET /v1/agent-bus/ws", s.handleAgentBusWS)
+	mux.HandleFunc("GET /v1/events/ws", s.handleChatEventsWS)
 	// Internal: runtime send_to_agent → same deliver path (priority wake + WS)
 	mux.HandleFunc("POST /internal/agent-bus/messages", s.requireInternal(s.handleInternalPostAgentBusMessage))
 	mux.HandleFunc("GET /v1/compact-config", s.requireAuth(s.handleCompactConfig))
@@ -156,6 +176,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/sandbox/reset", s.requireAuth(s.handleResetSandbox))
 	mux.HandleFunc("POST /v1/sandbox/exec", s.requireAuth(s.handleExecSandbox))
 	mux.HandleFunc("GET /v1/sandbox/files", s.requireAuth(s.handleReadSandboxFile))
+	mux.HandleFunc("GET /v1/sandbox/files/download", s.requireAuth(s.handleDownloadSandboxFile))
 	mux.HandleFunc("PUT /v1/sandbox/files", s.requireAuth(s.handleWriteSandboxFile))
 	mux.HandleFunc("GET /v1/sandbox/ls", s.requireAuth(s.handleListSandbox))
 	mux.HandleFunc("POST /internal/sandbox/ensure", s.requireInternal(s.handleInternalSandboxEnsure))
@@ -185,7 +206,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/machines/register", s.requireAuth(s.handleRegisterMachine))
 	mux.HandleFunc("POST /v1/machines/{id}/heartbeat", s.requireAuth(s.handleHeartbeatMachine))
 	mux.HandleFunc("DELETE /v1/machines/{id}", s.requireAuth(s.handleDeleteMachine))
+	mux.HandleFunc("GET /v1/machines/{id}/exec", s.handleHostExecWS)
 	mux.HandleFunc("POST /internal/machines/list", s.requireInternal(s.handleInternalListMachines))
+	mux.HandleFunc("POST /internal/machines/exec", s.requireInternal(s.handleInternalHostExec))
 
 	return http.ListenAndServe(addr, withCORS(mux))
 }
@@ -213,7 +236,17 @@ func withCORS(next http.Handler) http.Handler {
 }
 
 func isLocalDevOrigin(origin string) bool {
-	o := strings.ToLower(origin)
+	o := strings.ToLower(strings.TrimSpace(origin))
+	switch o {
+	case "tauri://localhost",
+		"http://tauri.localhost",
+		"https://tauri.localhost",
+		"capacitor://localhost",
+		"ionic://localhost":
+		// Packaged Tauri (macOS/Linux) and Capacitor shells. WKWebView reports a
+		// rejected preflight as "Load failed".
+		return true
+	}
 	return strings.HasPrefix(o, "http://localhost:") ||
 		strings.HasPrefix(o, "http://127.0.0.1:") ||
 		strings.HasPrefix(o, "http://[::1]:")
@@ -521,6 +554,10 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]map[string]any, 0, len(list))
+	activeTasks, _ := s.db.ActiveTaskConversationIDs(uid)
+	if activeTasks == nil {
+		activeTasks = map[string]struct{}{}
+	}
 	for _, a := range list {
 		item := map[string]any{
 			"id":            a.ID,
@@ -538,6 +575,9 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			item["last_message"] = prev.LastMessage
 			if !prev.UpdatedAt.IsZero() {
 				item["conversation_updated_at"] = prev.UpdatedAt.UTC().Format(time.RFC3339Nano)
+			}
+			if _, ok := activeTasks[prev.ConversationID]; ok {
+				item["task_active"] = true
 			}
 		}
 		out = append(out, item)
@@ -848,9 +888,11 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	taskActive, _ := s.db.ConversationHasOpenTask(id)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"messages":   msgs,
-		"run_active": s.runs.isActive(id),
+		"messages":    msgs,
+		"run_active":  s.runs.isActive(id),
+		"task_active": taskActive,
 	})
 }
 
@@ -870,11 +912,13 @@ type runtimeMsg struct {
 func (s *Server) handleCancelConversationRun(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
-	if _, err := s.db.EnsureConversation(uid, id, "", "会话 "+id); err != nil {
+	conv, err := s.db.EnsureConversation(uid, id, "", "会话 "+id)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	_ = s.runs.cancel(id)
+	_, _ = s.cancelTasksAndNotify(uid, conv, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -987,6 +1031,24 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"channel_id": conv.ChannelID,
 	})
 
+	if s.tryShortcutTurn(uid, conv, userMsg.ID, storedContent, targetAgents[0], emit) {
+		emit("done", map[string]any{"ok": true})
+		return
+	}
+
+	// This request's agent is running until proxyRuntimeRun returns. Other
+	// devices follow that, not the wording of the reply.
+	if len(targetAgents) > 0 {
+		s.publishTaskStatus(uid, conv.ID, targetAgents[0], conv.ChannelID, "running", "正在做，做好会发在这里")
+		defer func() {
+			open, err := s.db.OpenConversationTask(conv.ID)
+			if err == nil && open != nil {
+				return
+			}
+			s.publishTaskStatus(uid, conv.ID, targetAgents[0], conv.ChannelID, "idle", "")
+		}()
+	}
+
 	cancelled := false
 	for i, agentID := range targetAgents {
 		if err := runCtx.Err(); err != nil {
@@ -1020,6 +1082,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"content":         storedContent,
 			"agent_id":        agentID,
 			"user_id":         uid,
+			"channel_id":      conv.ChannelID,
 			"system_prompt":   systemPrompt,
 			"messages":        history,
 			"enabled_skills":  enabledSkills,
@@ -1027,6 +1090,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if llmPayload != nil {
 			payloadMap["llm"] = llmPayload
 		}
+		attachDecision(payloadMap, s.decisionRuntimePayload(uid))
 		if body.Client != nil {
 			payloadMap["client"] = body.Client
 		}
@@ -1040,7 +1104,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		// Empty cancel → keep a light UI/history marker so the next turn still
 		// sees the interrupted turn (keep-partial-next-turn).
 		if strings.TrimSpace(assistantText) != "" {
-			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", assistantText, agentID)
+			s.saveAssistant(uid, conv.ID, agentID, assistantText, emit)
 		} else if runCancelled {
 			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", "（已停止）", agentID)
 		}
@@ -1251,9 +1315,13 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	if list == nil {
 		list = []*db.Channel{}
 	}
+	activeTasks, _ := s.db.ActiveTaskConversationIDs(uid)
 	for _, ch := range list {
 		if conv, e := s.db.GetConversationByChannel(uid, ch.ID); e == nil && conv != nil {
 			ch.ConversationID = conv.ID
+			if _, ok := activeTasks[conv.ID]; ok {
+				ch.TaskActive = true
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": list})

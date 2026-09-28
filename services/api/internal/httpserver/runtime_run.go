@@ -91,6 +91,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		"content":         content,
 		"agent_id":        agentID,
 		"user_id":         userID,
+		"channel_id":      conv.ChannelID,
 		"system_prompt":   systemPrompt,
 		"messages":        history,
 		"enabled_skills":  enabledSkills,
@@ -98,6 +99,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	if llmPayload != nil {
 		payloadMap["llm"] = llmPayload
 	}
+	attachDecision(payloadMap, s.decisionRuntimePayload(userID))
 	payload, _ := json.Marshal(payloadMap)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))

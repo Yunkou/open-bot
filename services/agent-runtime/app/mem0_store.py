@@ -214,8 +214,106 @@ def _extract_memory_texts(raw: Any) -> list[str]:
     return texts
 
 
+def scope_metadata(
+    scope: str,
+    *,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
+) -> dict[str, str]:
+    return {
+        "scope": (scope or "user").strip() or "user",
+        "agent_id": (agent_id or "").strip(),
+        "channel_id": (channel_id or "").strip(),
+        "peer_agent_id": (peer_agent_id or "").strip(),
+    }
+
+
+def _row_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    md = row.get("metadata")
+    return md if isinstance(md, dict) else {}
+
+
+def _row_scope(row: dict[str, Any]) -> str:
+    scope = str(_row_metadata(row).get("scope") or "").strip().lower()
+    return scope or "user"
+
+
+def _row_field(row: dict[str, Any], key: str) -> str:
+    """Identity fields may sit on the row; everything else stays in metadata."""
+    top = row.get(key)
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    md = _row_metadata(row)
+    return str(md.get(key) or "").strip()
+
+
+def _row_matches_scope(
+    row: dict[str, Any],
+    *,
+    scope: str | None,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
+) -> bool:
+    want = (scope or "").strip().lower()
+    if not want:
+        return True
+    if _row_scope(row) != want:
+        return False
+    agent = (agent_id or "").strip()
+    channel = (channel_id or "").strip()
+    peer = (peer_agent_id or "").strip()
+    if want == "bot" and agent and _row_field(row, "agent_id") != agent:
+        return False
+    if want == "channel" and channel and _row_field(row, "channel_id") != channel:
+        return False
+    if want == "agent_pair" and (agent or peer):
+        from .memory import normalize_pair
+
+        left, right = normalize_pair(agent, peer)
+        if _row_field(row, "agent_id") != left or _row_field(row, "peer_agent_id") != right:
+            return False
+    return True
+
+
+def _extract_memory_rows(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    results = raw
+    if isinstance(raw, dict):
+        results = raw.get("results") or raw.get("memories") or []
+    if not isinstance(results, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for row in results:
+        if isinstance(row, str) and row.strip():
+            rows.append({"memory": row.strip(), "metadata": {}})
+            continue
+        if not isinstance(row, dict):
+            continue
+        mem = row.get("memory") or row.get("text") or row.get("content") or ""
+        if isinstance(mem, str) and mem.strip():
+            rows.append(row)
+    return rows
+
+
 def search_for_user(user_id: str, query: str, top_k: int | None = None) -> list[str]:
     """Semantic recall snippets for user_id. Empty on any failure."""
+    return search_for_scope(user_id, query, top_k=top_k)
+
+
+def search_for_scope(
+    user_id: str,
+    query: str,
+    *,
+    scope: str | None = None,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
+    top_k: int | None = None,
+) -> list[str]:
+    """Semantic recall for one user, optionally one memory scope. Empty on failure."""
     uid = (user_id or "").strip()
     q = (query or "").strip()
     if not uid or not q:
@@ -224,15 +322,92 @@ def search_for_user(user_id: str, query: str, top_k: int | None = None) -> list[
     if m is None:
         return []
     k = top_k if top_k is not None else mem0_top_k()
+    fetch = k if not (scope or "").strip() else min(50, max(k * 4, k))
     try:
-        raw = m.search(q, filters={"user_id": uid}, top_k=k)
-        return _extract_memory_texts(raw)
+        raw = m.search(q, filters={"user_id": uid}, top_k=fetch)
     except Exception as e:  # noqa: BLE001
         logger.warning("Mem0 search failed user_id=%s: %s", uid, e)
         return []
+    texts: list[str] = []
+    for row in _extract_memory_rows(raw):
+        if not _row_matches_scope(
+            row,
+            scope=scope,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            peer_agent_id=peer_agent_id,
+        ):
+            continue
+        mem = row.get("memory") or row.get("text") or row.get("content") or ""
+        if isinstance(mem, str) and mem.strip():
+            texts.append(mem.strip())
+        if len(texts) >= k:
+            break
+    return texts
 
 
-def add_conversation(user_id: str, messages: list[dict[str, str]] | str) -> None:
+def list_for_user(
+    user_id: str,
+    *,
+    scope: str | None = None,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
+    limit: int = 100,
+) -> dict[str, Any]:
+    """List Mem0 facts for one user. Disabled or failed calls return an empty list."""
+    uid = (user_id or "").strip()
+    limit = max(1, min(int(limit or 100), 200))
+    if not uid:
+        return {"enabled": False, "memories": [], "reason": "user_id required"}
+    m = get_mem0()
+    if m is None:
+        reason = _init_error or ("disabled" if not mem0_wanted() else "unavailable")
+        return {"enabled": False, "memories": [], "reason": reason}
+    try:
+        # mem0 >= 1.0 rejects user_id as a top-level arg; it must be inside filters.
+        raw = m.get_all(filters={"user_id": uid}, top_k=limit)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Mem0 list failed user_id=%s: %s", uid, e)
+        return {"enabled": True, "memories": [], "reason": str(e)}
+    out: list[dict[str, Any]] = []
+    for row in _extract_memory_rows(raw):
+        if not _row_matches_scope(
+            row,
+            scope=scope,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            peer_agent_id=peer_agent_id,
+        ):
+            continue
+        mem = row.get("memory") or row.get("text") or row.get("content") or ""
+        if not isinstance(mem, str) or not mem.strip():
+            continue
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "content": mem.strip(),
+                "scope": _row_scope(row),
+                "agent_id": _row_field(row, "agent_id"),
+                "channel_id": _row_field(row, "channel_id"),
+                "peer_agent_id": _row_field(row, "peer_agent_id"),
+                "created_at": row.get("created_at") or "",
+                "updated_at": row.get("updated_at") or "",
+            }
+        )
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    return {"enabled": True, "memories": out, "reason": ""}
+
+
+def add_conversation(
+    user_id: str,
+    messages: list[dict[str, str]] | str,
+    *,
+    metadata: dict[str, str] | None = None,
+    infer: bool = True,
+) -> None:
     """Extract/store facts from a turn. Swallows errors."""
     uid = (user_id or "").strip()
     if not uid or messages is None:
@@ -243,12 +418,25 @@ def add_conversation(user_id: str, messages: list[dict[str, str]] | str) -> None
     if m is None:
         return
     try:
-        m.add(messages, user_id=uid)
+        kwargs: dict[str, Any] = {"user_id": uid, "infer": infer}
+        meta = dict(metadata or {})
+        # mem0 treats agent_id as an identity field and drops it from metadata.
+        agent = str(meta.pop("agent_id", "") or "").strip()
+        if agent:
+            kwargs["agent_id"] = agent
+        if meta:
+            kwargs["metadata"] = meta
+        m.add(messages, **kwargs)
     except Exception as e:  # noqa: BLE001
         logger.warning("Mem0 add failed user_id=%s: %s", uid, e)
 
 
-def add_conversation_bg(user_id: str, messages: list[dict[str, str]] | str) -> None:
+def add_conversation_bg(
+    user_id: str,
+    messages: list[dict[str, str]] | str,
+    *,
+    metadata: dict[str, str] | None = None,
+) -> None:
     """Fire-and-forget add in a daemon thread (do not block SSE)."""
     uid = (user_id or "").strip()
     if not uid or not mem0_auto_add():
@@ -257,7 +445,7 @@ def add_conversation_bg(user_id: str, messages: list[dict[str, str]] | str) -> N
         return
 
     def _run() -> None:
-        add_conversation(uid, messages)
+        add_conversation(uid, messages, metadata=metadata)
 
     t = threading.Thread(target=_run, name="mem0-add", daemon=True)
     t.start()

@@ -1,9 +1,10 @@
 import { isValidElement, useCallback, useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { readSandboxFile } from "../api";
+import { downloadSandboxFile, downloadTextFile, readSandboxFile } from "../api";
 import {
   HtmlPreviewModal,
+  friendlyFileError,
   friendlyOpenError,
   looksLikeHtml,
   normalizeWorkspacePath,
@@ -39,6 +40,7 @@ const PREVIEWABLE_LANGS = new Set(["html", "htm", "svg", "xhtml"]);
 type PreviewState = {
   open: boolean;
   title: string;
+  path: string | null;
   html: string | null;
   loading: boolean;
   error: string | null;
@@ -47,6 +49,7 @@ type PreviewState = {
 const PREVIEW_CLOSED: PreviewState = {
   open: false,
   title: "",
+  path: null,
   html: null,
   loading: false,
   error: null,
@@ -99,18 +102,44 @@ function CodeBlock({
 export function MarkdownMessage({ content, streaming, agentId }: Props) {
   const text = content || (streaming ? "…" : "");
   const [preview, setPreview] = useState<PreviewState>(PREVIEW_CLOSED);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  const closePreview = useCallback(() => setPreview(PREVIEW_CLOSED), []);
+  const closePreview = useCallback(() => {
+    setPreview(PREVIEW_CLOSED);
+    setDownloadError(null);
+  }, []);
 
   const openHtmlPreview = useCallback((html: string, title: string) => {
-    setPreview({ open: true, title, html, loading: false, error: null });
+    setDownloadError(null);
+    setPreview({ open: true, title, path: null, html, loading: false, error: null });
   }, []);
+
+  const downloadPreview = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      if (preview.path) {
+        await downloadSandboxFile(preview.path, agentId ? { agent_id: agentId } : undefined);
+      } else if (preview.html) {
+        const name = preview.title && !preview.title.includes("/") ? preview.title : "preview.html";
+        const filename = /\.html?$/i.test(name) ? name : `${name}.html`;
+        downloadTextFile(filename, preview.html, "text/html;charset=utf-8");
+      }
+    } catch (err) {
+      setDownloadError(friendlyFileError(err, "下载"));
+    } finally {
+      setDownloading(false);
+    }
+  }, [agentId, preview.html, preview.path, preview.title]);
 
   const openSandboxLink = useCallback(async (path: string) => {
     const wp = normalizeWorkspacePath(path);
+    setDownloadError(null);
     setPreview({
       open: true,
       title: previewTitleFromPath(wp),
+      path: wp,
       html: null,
       loading: true,
       error: null,
@@ -129,6 +158,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
         setPreview({
           open: true,
           title: previewTitleFromPath(wp),
+          path: wp,
           html: wrapped,
           loading: false,
           error: null,
@@ -138,6 +168,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
       setPreview({
         open: true,
         title: previewTitleFromPath(wp),
+        path: wp,
         html: fileContent,
         loading: false,
         error: null,
@@ -146,6 +177,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
       setPreview({
         open: true,
         title: previewTitleFromPath(wp),
+        path: wp,
         html: null,
         loading: false,
         error: friendlyOpenError(err),
@@ -214,6 +246,9 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
         html={preview.html}
         loading={preview.loading}
         error={preview.error}
+        downloading={downloading}
+        downloadError={downloadError}
+        onDownload={preview.path || preview.html ? () => void downloadPreview() : undefined}
         onClose={closePreview}
       />
     </div>

@@ -78,6 +78,8 @@ export default function BotsPage() {
       dataIndex: "updated_at",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.updated_at || "").localeCompare(String(b.updated_at || "")),
     },
     {
       title: "操作",
@@ -100,13 +102,13 @@ export default function BotsPage() {
         ) : (
           <Popconfirm
             key="del"
-            title="确认删除该 Bot？"
+            title="确认软删除该 Bot？数据仍保留在库中。"
             okText="删除"
             okButtonProps={{ danger: true }}
             onConfirm={async () => {
               try {
                 await adminDeleteBot(row.id);
-                message.success("已删除");
+                message.success("已软删除");
                 reload();
               } catch (err) {
                 message.error(err instanceof Error ? err.message : String(err));

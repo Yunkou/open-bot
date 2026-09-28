@@ -10,19 +10,21 @@ import (
 )
 
 type Agent struct {
-	ID           string    `json:"id"`
-	UserID       string    `json:"user_id,omitempty"`
-	Name         string    `json:"name"`
-	Description  string    `json:"description"`
-	SystemPrompt string    `json:"system_prompt"`
-	IsBuiltin    bool      `json:"is_builtin"`
-	ComputerMode string    `json:"computer_mode"` // team|private
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID           string     `json:"id"`
+	UserID       string     `json:"user_id,omitempty"`
+	Name         string     `json:"name"`
+	Description  string     `json:"description"`
+	SystemPrompt string     `json:"system_prompt"`
+	IsBuiltin    bool       `json:"is_builtin"`
+	ComputerMode string     `json:"computer_mode"` // team|private
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
 }
 
-// PurgeBuiltinAgents deletes seeded built-in assistants (open-bot / general / any is_builtin).
+// PurgeBuiltinAgents removes seeded built-in assistants (open-bot / general / any is_builtin).
 // Called at API start so existing DBs drop builtins; new installs never re-seed them.
+// soft-delete: hard purge — startup cleanup of deprecated rows, not a product delete.
 func (d *DB) PurgeBuiltinAgents() error {
 	_, err := d.SQL.Exec(`DELETE FROM agents WHERE is_builtin = TRUE`)
 	return err
@@ -31,7 +33,7 @@ func (d *DB) PurgeBuiltinAgents() error {
 // FirstAgentID returns the user's oldest agent id, or an error if none exist.
 func (d *DB) FirstAgentID(userID string) (string, error) {
 	row := d.SQL.QueryRow(
-		`SELECT id FROM agents WHERE user_id = $1 ORDER BY created_at ASC LIMIT 1`,
+		`SELECT id FROM agents WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1`,
 		userID,
 	)
 	var id string
@@ -57,7 +59,7 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'), created_at, updated_at
 		 FROM agents
-		 WHERE user_id = $1
+		 WHERE user_id = $1 AND deleted_at IS NULL
 		 ORDER BY created_at ASC`,
 		userID,
 	)
@@ -81,7 +83,7 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 func (d *DB) GetAgent(userID, id string) (*Agent, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'), created_at, updated_at
-		 FROM agents WHERE id = $1 AND user_id = $2`,
+		 FROM agents WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		id, userID,
 	)
 	var a Agent
@@ -142,7 +144,7 @@ func (d *DB) UpdateAgent(userID, id, name, description, systemPrompt string) (*A
 	a.SystemPrompt = strings.TrimSpace(systemPrompt)
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(
-		`UPDATE agents SET name=$1, description=$2, system_prompt=$3, updated_at=$4 WHERE id=$5 AND user_id=$6`,
+		`UPDATE agents SET name=$1, description=$2, system_prompt=$3, updated_at=$4 WHERE id=$5 AND user_id=$6 AND deleted_at IS NULL`,
 		a.Name, a.Description, a.SystemPrompt, a.UpdatedAt, id, userID,
 	)
 	if err != nil {
@@ -163,7 +165,7 @@ func (d *DB) SetAgentComputerMode(userID, id, mode string) (*Agent, error) {
 	a.ComputerMode = mode
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(
-		`UPDATE agents SET computer_mode=$1, updated_at=$2 WHERE id=$3 AND user_id=$4`,
+		`UPDATE agents SET computer_mode=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
 		mode, a.UpdatedAt, id, userID,
 	)
 	if err != nil {
@@ -174,8 +176,9 @@ func (d *DB) SetAgentComputerMode(userID, id, mode string) (*Agent, error) {
 
 func (d *DB) DeleteAgent(userID, id string) error {
 	res, err := d.SQL.Exec(
-		`DELETE FROM agents WHERE id = $1 AND user_id = $2 AND is_builtin = FALSE`,
-		id, userID,
+		`UPDATE agents SET deleted_at = $3, updated_at = $3
+		 WHERE id = $1 AND user_id = $2 AND is_builtin = FALSE AND deleted_at IS NULL`,
+		id, userID, Now(),
 	)
 	if err != nil {
 		return err

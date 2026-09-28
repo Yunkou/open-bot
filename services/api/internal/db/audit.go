@@ -72,6 +72,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	return err
 }
 
+// soft-delete: include deleted — actor username stays visible after the user is soft-deleted.
 func (d *DB) ListAuditLogs(orgID string, limit int) ([]AuditLogPublic, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

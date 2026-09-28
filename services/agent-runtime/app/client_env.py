@@ -19,6 +19,7 @@ class ClientContext(BaseModel):
     arch: str = Field(default="")
     app_version: str = Field(default="")
     locale: str = Field(default="")
+    machine_id: str = Field(default="")
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
 
     @classmethod
@@ -44,6 +45,7 @@ class ClientContext(BaseModel):
                 arch=str(raw.get("arch") or "").strip(),
                 app_version=str(raw.get("app_version") or "").strip(),
                 locale=str(raw.get("locale") or "").strip(),
+                machine_id=str(raw.get("machine_id") or "").strip(),
                 capabilities=caps,
             )
         except Exception:  # noqa: BLE001
@@ -60,7 +62,10 @@ _PLATFORM_LABEL = {
 }
 
 
-def format_environment_block(client: ClientContext | None) -> str:
+def format_environment_block(
+    client: ClientContext | None,
+    machines: list[dict[str, Any]] | None = None,
+) -> str:
     """Build the 「环境」 system-prompt section (user-facing wording; no sandbox/Docker)."""
     lines = ["## 环境"]
     if client is None:
@@ -79,26 +84,21 @@ def format_environment_block(client: ClientContext | None) -> str:
             bits.append(f"version={client.app_version}")
         if client.locale:
             bits.append(f"locale={client.locale}")
+        if client.machine_id:
+            bits.append(f"machine_id={client.machine_id}")
         lines.append("，".join(bits) + "）。")
-        if client.platform == "web" or client.app == "browser":
-            lines.append(
-                "用户正在浏览器中使用；浏览器本身不是「主机电脑」。"
-                "「我的电脑 / Downloads / 桌面」需先 list_machines；"
-                "若没有已注册且在线的主机，请如实说明无法直接访问本机文件，"
-                "不要用内部运行环境目录假装成 Downloads。"
-            )
-        elif client.app in ("tauri", "capacitor"):
-            lines.append(
-                "用户正在桌面/移动客户端。capabilities.host_tools="
-                f"{str(client.capabilities.host_tools).lower()}："
-                "Phase 1 本机文件读写尚未接通；请用 list_machines 确认主机在线，"
-                "若用户要访问本机路径，诚实说明「本机文件访问尚未接通」。"
-            )
-        else:
-            lines.append(
-                "解释「我的电脑」时以 list_machines 结果为准；"
-                "未在线或未注册则不要假装能访问本机。"
-            )
+        lines.append(
+            "本机文件只在已连接的电脑上读写，范围是 Downloads、Desktop、Documents。"
+            "用户点名某台电脑时，用 list_machines 里对应且 connected 的 machine_id。"
+            "没点名、只说打开某个路径时，用最常用的工作设备；它没连接就说明要打开那台，不要改到当前手机。"
+            "还没有常用设备时才用当前 machine_id；当前是浏览器且只有一台已连接电脑时用那一台。"
+            "对不上或有多台都像时先问用户。打开软件用 host_open；"
+            "运行命令或 ssh 用 host_shell，交互式会话设 terminal=true，会打开终端。"
+            "覆盖已有文件、删除、移动，以及 host_shell，会在对话里等用户点允许或拒绝；"
+            "人在网页或手机上发起时，告诉用户直接在当前对话里确认，操作仍在目标电脑上执行。"
+            "不要用内部运行环境冒充本机 Downloads。"
+        )
+        lines.extend(_usual_machine_lines(machines))
 
     lines.append(
         "内部工具 sandbox_*（仅模型可见）：用于脚本、临时文件与安全执行。"
@@ -107,6 +107,37 @@ def format_environment_block(client: ClientContext | None) -> str:
         "该环境 ≠ 用户本机 Downloads/桌面；不要把内部路径说成用户的下载文件夹。"
     )
     return "\n".join(lines)
+
+
+def _usual_machine_lines(machines: list[dict[str, Any]] | None) -> list[str]:
+    if not machines:
+        return []
+    best: dict[str, Any] | None = None
+    best_count = 0
+    connected: list[str] = []
+    for m in machines:
+        if not isinstance(m, dict):
+            continue
+        label = str(m.get("label") or m.get("id") or "").strip()
+        if m.get("connected") or m.get("online"):
+            if label:
+                connected.append(label)
+        try:
+            count = int(m.get("file_op_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count > best_count:
+            best = m
+            best_count = count
+    lines: list[str] = []
+    if connected:
+        lines.append("当前已连接、可打开软件和运行命令的电脑：" + "、".join(connected) + "。")
+    if best is not None:
+        label = str(best.get("label") or "工作设备")
+        mid = str(best.get("id") or "")
+        state = "已连接" if (best.get("connected") or best.get("online")) else "未连接"
+        lines.append(f"最常用的工作设备：{label}（machine_id={mid}，{state}）。")
+    return lines
 
 
 def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: list[str] | None) -> str:
@@ -124,12 +155,16 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
             "sandbox_*（内部名）：读写/执行临时文件与脚本；"
             "用户要跑脚本、写文件、生成可预览内容时用它们；回复只谈结果，不提工具或路径。"
         )
-    if "list_machines" in names:
+    if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
-            "主机路径：「我的电脑 / Downloads / 桌面」→ 先调用 list_machines；"
-            "仅当有在线主机且 host 能力可用时才谈本机操作。"
-            "Phase 1：本机 shell/读写尚未接通；list_machines 仅列出已注册电脑。"
-            "若在网页且无注册主机，诚实告知，勿用内部运行环境冒充本机。"
+            "主机文件：先 list_machines 看 connected。"
+            "用户点名某台电脑就用那台的 machine_id；"
+            "没点名时用最常用的工作设备（环境块里的 machine_id），它未连接就说明要打开，不要改用当前手机；"
+            "还没有常用设备才用当前设备。浏览器且只有一台已连接电脑时用那一台。"
+            "host_open 打开本机软件。host_shell 运行命令；ssh 等交互命令设 terminal=true，在终端里打开。"
+            "host_ls / host_read / host_write 在 Downloads、Desktop、Documents 内执行；"
+            "覆盖、host_delete、host_move、host_shell 会在对话里等待确认，任意已登录端都能点。"
+            "没有已连接电脑时如实说明，勿用内部运行环境冒充本机。"
         )
     lines.append(
         "Skills：仍通过目录 + load_skill 加载全文；与桌面/本机相关的技能先 load_skill 再按说明执行。"
@@ -147,6 +182,11 @@ TOOL_DISPLAY_ALIASES: dict[str, str] = {
     "list_machines": "查看我的电脑",
     "host_ls": "列出本机目录",
     "host_read": "读取本机文件",
+    "host_write": "写入本机文件",
+    "host_delete": "删除本机文件",
+    "host_move": "移动本机文件",
+    "host_open": "打开软件",
+    "host_shell": "在本机运行命令",
     "get_current_time": "获取当前时间",
     "calculator": "计算",
     "http_fetch": "获取网页",

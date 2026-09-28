@@ -221,6 +221,56 @@ export async function adminPutOrgLLM(body: {
   return res.json();
 }
 
+export type DecisionSettings = {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_set: boolean;
+  api_key_hint?: string;
+  updated_at?: string;
+};
+
+export async function adminGetDecision(): Promise<DecisionSettings> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/decision`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminPutDecision(body: {
+  provider: string;
+  base_url: string;
+  api_key?: string;
+  model: string;
+}): Promise<DecisionSettings> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/decision`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminTestDecision(body: {
+  provider: string;
+  base_url: string;
+  api_key?: string;
+  model: string;
+}): Promise<{
+  enabled: boolean;
+  provider: string;
+  model?: string;
+  answers?: Record<string, { type?: string; noul?: number; choice?: string; score?: number }>;
+}> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/decision/test`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function adminGetUsage(): Promise<OrgUsage> {
   const res = await fetch(`${API_BASE}/v1/admin/usage`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
@@ -330,6 +380,19 @@ export async function adminDeleteUser(id: string): Promise<void> {
   if (!res.ok) throw new Error(await readError(res));
 }
 
+export async function adminBatchDeleteUsers(ids: string[]): Promise<{
+  deleted: { id: string; username: string; agent_ids: string[] }[];
+  failed: { id: string; error: string }[];
+}> {
+  const res = await fetch(`${API_BASE}/v1/admin/users/batch-delete`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ ids }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function adminListBots(): Promise<{ bots: AdminBot[] }> {
   const res = await fetch(`${API_BASE}/v1/admin/bots`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
@@ -411,6 +474,119 @@ export async function adminListTraces(params?: {
   const res = await fetch(`${API_BASE}/v1/admin/traces${qs ? `?${qs}` : ""}`, {
     headers: authHeaders(),
   });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export type AdminMemory = {
+  id: string;
+  user_id: string;
+  username?: string;
+  scope: string;
+  agent_id?: string;
+  agent_name?: string;
+  channel_id?: string;
+  channel_name?: string;
+  peer_agent_id?: string;
+  peer_agent_name?: string;
+  tier?: string;
+  content: string;
+  tags?: string[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type AdminAutoMemory = {
+  id?: string;
+  content: string;
+  scope?: string;
+  agent_id?: string;
+  channel_id?: string;
+  peer_agent_id?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type AdminCompaction = {
+  id: string;
+  content: string;
+  created_at?: string;
+  conversation_id?: string;
+  title?: string;
+  user_id?: string;
+  username?: string;
+  agent_id?: string;
+  agent_name?: string;
+  channel_id?: string;
+  channel_name?: string;
+  scope?: string;
+};
+
+export type AdminChannel = {
+  id: string;
+  user_id: string;
+  username?: string;
+  name: string;
+  created_at?: string;
+  member_ids?: string[];
+  member_names?: string;
+};
+
+export type MemoryQuery = {
+  scope?: string;
+  user_id?: string;
+  agent_id?: string;
+  channel_id?: string;
+  peer_agent_id?: string;
+  tier?: string;
+  limit?: number;
+};
+
+function memoryQuery(params: MemoryQuery): string {
+  const q = new URLSearchParams();
+  if (params.scope) q.set("scope", params.scope);
+  if (params.user_id) q.set("user_id", params.user_id);
+  if (params.agent_id) q.set("agent_id", params.agent_id);
+  if (params.channel_id) q.set("channel_id", params.channel_id);
+  if (params.peer_agent_id) q.set("peer_agent_id", params.peer_agent_id);
+  if (params.tier) q.set("tier", params.tier);
+  if (params.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export async function adminListMemories(params: MemoryQuery): Promise<{ memories: AdminMemory[] }> {
+  const res = await fetch(`${API_BASE}/v1/admin/memories${memoryQuery(params)}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminListAutoMemories(
+  params: MemoryQuery,
+): Promise<{ enabled: boolean; memories: AdminAutoMemory[]; reason?: string }> {
+  const res = await fetch(`${API_BASE}/v1/admin/memories/auto${memoryQuery(params)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminListCompactions(
+  params: MemoryQuery,
+): Promise<{ compactions: AdminCompaction[]; note?: string }> {
+  const res = await fetch(`${API_BASE}/v1/admin/compactions${memoryQuery(params)}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminListChannels(): Promise<{ channels: AdminChannel[] }> {
+  const res = await fetch(`${API_BASE}/v1/admin/channels`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminGetCompactConfig(): Promise<{ compact?: Record<string, unknown> }> {
+  const res = await fetch(`${API_BASE}/v1/admin/compact-config`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }

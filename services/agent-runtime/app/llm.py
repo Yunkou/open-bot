@@ -12,6 +12,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from .builtin_tools import BUILTIN_TOOL_DEFS
+from .deferral import CONTINUE_WORK, turn_unfinished
 from .client_env import (
     ClientContext,
     format_environment_block,
@@ -81,7 +82,12 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "memory_write",
-            "description": "Persist a memory item. tier: profile|log|note",
+            "description": (
+                "Persist a memory item. tier: profile|log|note. "
+                "scope defaults to the current bot, or the current group when this run is in a channel. "
+                "Use user for facts about the person, agent_pair for a fact shared by two bots "
+                "(requires peer_agent_id)."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -89,6 +95,14 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     "tier": {
                         "type": "string",
                         "enum": ["profile", "log", "note"],
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "bot", "channel", "agent_pair"],
+                    },
+                    "peer_agent_id": {
+                        "type": "string",
+                        "description": "The other bot when scope is agent_pair",
                     },
                     "tags": {
                         "type": "array",
@@ -103,7 +117,10 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "memory_recall",
-            "description": "Recall top-k memories by keyword query.",
+            "description": (
+                "Recall memories for this conversation. More specific scopes "
+                "(this pair, this group, this bot) are filled before the user's shared memories."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -270,9 +287,9 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "list_machines",
             "description": (
-                "List the user's registered host computers (labels, platforms, online/offline). "
-                "Call this first when the user asks about 「我的电脑 / Downloads / 桌面」 or which machines they have. "
-                "Browsers are not host machines. Phase 1: listing only; host file/shell tools are not connected yet."
+                "List the user's registered computers. Each row has id, label, platform, connected, "
+                "and file_op_count. connected means that desktop app can run file operations now. "
+                "Call this when the user names a computer or asks which machines they have."
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -282,15 +299,15 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_ls",
             "description": (
-                "Phase-1 stub: list a directory on a registered host machine. "
-                "Currently returns an honest message that host file access is not connected; "
-                "use list_machines to see registered devices."
+                "List a directory on a connected computer. Allowed roots: Downloads, Desktop, Documents. "
+                "Pass machine_id from list_machines. If the user did not name a computer, omit machine_id "
+                "so the most-used work computer is chosen. Empty path lists those three folders."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "machine_id": {"type": "string", "description": "Machine id from list_machines"},
-                    "path": {"type": "string", "description": "Path on the host (e.g. Downloads)"},
+                    "path": {"type": "string", "description": "Path such as Downloads or Downloads/report"},
                 },
             },
         },
@@ -300,8 +317,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_read",
             "description": (
-                "Phase-1 stub: read a file on a registered host machine. "
-                "Currently returns an honest message that host file access is not connected."
+                "Read a text file on a connected computer under Downloads, Desktop, or Documents. "
+                "Pass machine_id when the user named a computer; otherwise omit it to use the usual work computer."
             ),
             "parameters": {
                 "type": "object",
@@ -310,6 +327,108 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     "path": {"type": "string"},
                 },
                 "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_write",
+            "description": (
+                "Write a text file on a connected computer under Downloads, Desktop, or Documents. "
+                "Creating a new file runs immediately. Overwriting an existing file waits for confirmation "
+                "in the chat. Any logged-in device can allow or deny; the write still happens on the target computer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_delete",
+            "description": (
+                "Delete a file on a connected computer under Downloads, Desktop, or Documents. "
+                "Always waits for confirmation in the chat. Any logged-in device can allow or deny."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_move",
+            "description": (
+                "Move or rename a file on a connected computer. Both paths must stay under "
+                "Downloads, Desktop, or Documents. Always waits for confirmation in the chat. "
+                "Any logged-in device can allow or deny."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "path": {"type": "string"},
+                    "dest": {"type": "string"},
+                },
+                "required": ["path", "dest"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_open",
+            "description": (
+                "Open an application on a connected computer, such as 微信, Safari, or Visual Studio Code. "
+                "Pass the app name the user said. Runs immediately on that computer. "
+                "Pass machine_id when the user named a computer; otherwise omit it to use the usual work computer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "name": {"type": "string", "description": "Application name, for example 微信 or Terminal"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_shell",
+            "description": (
+                "Run a command on a connected computer. Use this for ssh and other shell commands. "
+                "Set terminal=true for interactive sessions such as ssh, so a Terminal window opens on that computer. "
+                "Always waits for confirmation in the chat before running. "
+                "Any logged-in device can allow or deny; the command still runs on the target computer. "
+                "Pass machine_id when the user named a computer; otherwise omit it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "command": {"type": "string", "description": "Exact command, for example ssh user@host"},
+                    "terminal": {
+                        "type": "boolean",
+                        "description": "True to open the command in a visible terminal. Use for ssh and other interactive commands.",
+                    },
+                },
+                "required": ["command"],
             },
         },
     },
@@ -343,11 +462,12 @@ def build_system_prompt(
     tools_enabled: bool = False,
     available_tool_names: list[str] | None = None,
     client: ClientContext | None = None,
+    machines: list[dict[str, Any]] | None = None,
 ) -> str:
     parts = [
         SYSTEM_PERSONA_BASE,
         f"当前 agent_id: {agent_id or 'open-bot'}。",
-        format_environment_block(client),
+        format_environment_block(client, machines),
     ]
     if tools_enabled:
         names = [n for n in (available_tool_names or []) if n]
@@ -384,6 +504,10 @@ def build_system_prompt(
     parts.append(skills_catalog or "（无）")
     if memory_snippets:
         parts.append("## 相关记忆（自动召回）")
+        parts.append(
+            "更具体的记忆档优先于更泛的档。"
+            "本会话近期消息和压缩摘要优先于长期记忆；冲突时以本会话为准。"
+        )
         parts.extend(f"- {s}" for s in memory_snippets)
     return "\n".join(parts)
 
@@ -616,6 +740,7 @@ async def run_tool_loop(
         tools.extend(extra_tools)
     choice: str | None = "auto" if profile.tool_choice_auto else None
     tools_fallback_done = False
+    continued = False
     for _ in range(max_rounds):
         await _checkpoint()
         try:
@@ -711,8 +836,23 @@ async def run_tool_loop(
                     }
                 )
             continue
-        # Final answer path: strip any leftover / unmatched tool markup.
+        # Text with no tool call. If this thread already has a file and this
+        # run has not written or executed anything, the agent is not done.
+        # Keep the same run going. Do not classify the sentence.
         final = postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
+        if not continued and turn_unfinished(used, msgs):
+            continued = True
+            if on_status is not None:
+                await on_status(
+                    {
+                        "phase": "thinking",
+                        "label": "正在做，做好会发在这里",
+                    }
+                )
+            msgs.append({"role": "assistant", "content": final or ""})
+            msgs.append({"role": "user", "content": CONTINUE_WORK})
+            final = ""
+            continue
         break
     if not final and msgs:
         data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)

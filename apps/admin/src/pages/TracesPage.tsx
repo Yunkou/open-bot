@@ -68,6 +68,8 @@ export default function TracesPage() {
       dataIndex: "timestamp",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")),
     },
     { title: "名称", dataIndex: "name", ellipsis: true },
     {

@@ -26,15 +26,19 @@ type Org struct {
 }
 
 type OrgSettings struct {
-	OrgID                 string    `json:"org_id"`
-	LLMName               string    `json:"llm_name"`
-	LLMBaseURL            string    `json:"llm_base_url"`
-	LLMAPIKey             string    `json:"-"`
-	LLMModel              string    `json:"llm_model"`
-	LLMEnableTools        bool      `json:"llm_enable_tools"`
-	LLMContextWindow      *int      `json:"llm_context_window,omitempty"`
-	FeatureFlagsJSON      string    `json:"feature_flags_json"`
-	UpdatedAt             time.Time `json:"updated_at"`
+	OrgID            string    `json:"org_id"`
+	LLMName          string    `json:"llm_name"`
+	LLMBaseURL       string    `json:"llm_base_url"`
+	LLMAPIKey        string    `json:"-"`
+	LLMModel         string    `json:"llm_model"`
+	LLMEnableTools   bool      `json:"llm_enable_tools"`
+	LLMContextWindow *int      `json:"llm_context_window,omitempty"`
+	FeatureFlagsJSON string    `json:"feature_flags_json"`
+	DecisionProvider string    `json:"decision_provider"`
+	DecisionBaseURL  string    `json:"decision_base_url"`
+	DecisionAPIKey   string    `json:"-"`
+	DecisionModel    string    `json:"decision_model"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type OrgSettingsPublic struct {
@@ -48,6 +52,15 @@ type OrgSettingsPublic struct {
 	APIKeyHint       string `json:"api_key_hint,omitempty"`
 	FeatureFlagsJSON string `json:"feature_flags_json"`
 	UpdatedAt        string `json:"updated_at"`
+}
+
+type DecisionSettingsPublic struct {
+	Provider   string `json:"provider"`
+	BaseURL    string `json:"base_url"`
+	Model      string `json:"model"`
+	APIKeySet  bool   `json:"api_key_set"`
+	APIKeyHint string `json:"api_key_hint,omitempty"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 func (s *OrgSettings) Public() OrgSettingsPublic {
@@ -74,13 +87,36 @@ func (s *OrgSettings) Public() OrgSettingsPublic {
 	}
 }
 
+func (s *OrgSettings) DecisionPublic() DecisionSettingsPublic {
+	hint, set := apiKeyHint(s.DecisionAPIKey)
+	return DecisionSettingsPublic{
+		Provider:   NormalizeDecisionProvider(s.DecisionProvider),
+		BaseURL:    s.DecisionBaseURL,
+		Model:      s.DecisionModel,
+		APIKeySet:  set,
+		APIKeyHint: hint,
+		UpdatedAt:  FormatTime(s.UpdatedAt),
+	}
+}
+
+func apiKeyHint(key string) (string, bool) {
+	if key == "" {
+		return "", false
+	}
+	if len(key) <= 4 {
+		return "****", true
+	}
+	return "****" + key[len(key)-4:], true
+}
+
 type OrgMember struct {
-	ID        string    `json:"id"`
-	Username  string    `json:"username"`
-	Email     string    `json:"email"`
-	Role      string    `json:"role"`
-	OrgID     string    `json:"org_id"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string     `json:"id"`
+	Username  string     `json:"username"`
+	Email     string     `json:"email"`
+	Role      string     `json:"role"`
+	OrgID     string     `json:"org_id"`
+	CreatedAt time.Time  `json:"created_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
 }
 
 type OrgInvite struct {
@@ -94,11 +130,40 @@ type OrgInvite struct {
 }
 
 type OrgUsage struct {
-	OrgID            string `json:"org_id"`
-	MemberCount      int    `json:"member_count"`
-	ConversationCount int   `json:"conversation_count"`
-	MessageCount     int    `json:"message_count"`
-	AgentCount       int    `json:"agent_count"`
+	OrgID             string `json:"org_id"`
+	MemberCount       int    `json:"member_count"`
+	ConversationCount int    `json:"conversation_count"`
+	MessageCount      int    `json:"message_count"`
+	AgentCount        int    `json:"agent_count"`
+}
+
+func NormalizeDecisionProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "jev", "laya":
+		return strings.ToLower(strings.TrimSpace(provider))
+	default:
+		return "off"
+	}
+}
+
+// ApplyDecisionDefaults fills vendor defaults only for an enabled provider.
+// An empty base URL on Laya means in-process weights, so it stays empty.
+func ApplyDecisionDefaults(provider, baseURL, model string) (string, string, string) {
+	provider = NormalizeDecisionProvider(provider)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	model = strings.TrimSpace(model)
+	if provider == "jev" {
+		if baseURL == "" {
+			baseURL = "https://api.typesafe.ai"
+		}
+		if model == "" {
+			model = "jev-latest"
+		}
+	}
+	if provider == "laya" && model == "" {
+		model = "convaiinnovations/laya"
+	}
+	return provider, baseURL, model
 }
 
 func NormalizeRole(role string) string {
@@ -149,6 +214,11 @@ CREATE TABLE IF NOT EXISTS org_settings (
   feature_flags_json TEXT NOT NULL DEFAULT '{}',
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS decision_provider TEXT NOT NULL DEFAULT 'off';
+ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS decision_base_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS decision_api_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE org_settings ADD COLUMN IF NOT EXISTS decision_model TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS org_invites (
   id TEXT PRIMARY KEY,
@@ -201,6 +271,7 @@ func (d *DB) EnsureDefaultOrg() (*Org, error) {
 	return o, nil
 }
 
+// soft-delete: backfill — repair null org_id/role on every row, including ones already soft-deleted.
 func (d *DB) backfillUsersOrg() error {
 	org, err := d.EnsureDefaultOrg()
 	if err != nil {
@@ -260,7 +331,8 @@ func (d *DB) GetOrgSettings(orgID string) (*OrgSettings, error) {
 	}
 	row := d.SQL.QueryRow(`
 SELECT org_id, llm_name, llm_base_url, llm_api_key, llm_model, llm_enable_tools,
-       llm_context_window, feature_flags_json, updated_at
+       llm_context_window, feature_flags_json, updated_at,
+       decision_provider, decision_base_url, decision_api_key, decision_model
 FROM org_settings WHERE org_id = $1
 `, orgID)
 	var s OrgSettings
@@ -268,6 +340,7 @@ FROM org_settings WHERE org_id = $1
 	if err := row.Scan(
 		&s.OrgID, &s.LLMName, &s.LLMBaseURL, &s.LLMAPIKey, &s.LLMModel, &s.LLMEnableTools,
 		&cw, &s.FeatureFlagsJSON, &s.UpdatedAt,
+		&s.DecisionProvider, &s.DecisionBaseURL, &s.DecisionAPIKey, &s.DecisionModel,
 	); err != nil {
 		return nil, err
 	}
@@ -310,6 +383,29 @@ WHERE org_id = $1
 	return d.GetOrgSettings(orgID)
 }
 
+func (d *DB) UpsertOrgDecision(orgID, provider, baseURL, apiKey, model string, keepAPIKey bool) (*OrgSettings, error) {
+	cur, err := d.GetOrgSettings(orgID)
+	if err != nil {
+		return nil, err
+	}
+	provider, baseURL, model = ApplyDecisionDefaults(provider, baseURL, model)
+	apiKey = strings.TrimSpace(apiKey)
+	key := apiKey
+	if keepAPIKey || apiKey == "" {
+		key = cur.DecisionAPIKey
+	}
+	_, err = d.SQL.Exec(`
+UPDATE org_settings SET
+  decision_provider = $2, decision_base_url = $3, decision_api_key = $4,
+  decision_model = $5, updated_at = $6
+WHERE org_id = $1
+`, orgID, provider, baseURL, key, model, Now())
+	if err != nil {
+		return nil, err
+	}
+	return d.GetOrgSettings(orgID)
+}
+
 func (d *DB) SetOrgFeatureFlags(orgID, flagsJSON string) (*OrgSettings, error) {
 	if strings.TrimSpace(flagsJSON) == "" {
 		flagsJSON = "{}"
@@ -324,12 +420,25 @@ UPDATE org_settings SET feature_flags_json = $2, updated_at = $3 WHERE org_id = 
 }
 
 func (d *DB) ListOrgMembers(orgID string) ([]OrgMember, error) {
-	rows, err := d.SQL.Query(`
-SELECT id, username, COALESCE(email, ''), role, COALESCE(org_id, ''), created_at
+	return d.listOrgMembers(orgID, false)
+}
+
+// ListOrgMembersIncludingDeleted also returns soft-deleted users (admin "show deleted" view).
+func (d *DB) ListOrgMembersIncludingDeleted(orgID string) ([]OrgMember, error) {
+	return d.listOrgMembers(orgID, true)
+}
+
+func (d *DB) listOrgMembers(orgID string, includeDeleted bool) ([]OrgMember, error) {
+	q := `
+SELECT id, username, COALESCE(email, ''), role, COALESCE(org_id, ''), created_at, deleted_at
 FROM users
 WHERE org_id = $1 AND LOWER(username) <> LOWER($2)
-ORDER BY created_at ASC
-`, orgID, A2ASystemUsername)
+`
+	if !includeDeleted {
+		q += ` AND deleted_at IS NULL`
+	}
+	q += ` ORDER BY created_at DESC`
+	rows, err := d.SQL.Query(q, orgID, A2ASystemUsername)
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +446,13 @@ ORDER BY created_at ASC
 	out := make([]OrgMember, 0)
 	for rows.Next() {
 		var m OrgMember
-		if err := rows.Scan(&m.ID, &m.Username, &m.Email, &m.Role, &m.OrgID, &m.CreatedAt); err != nil {
+		var deletedAt sql.NullTime
+		if err := rows.Scan(&m.ID, &m.Username, &m.Email, &m.Role, &m.OrgID, &m.CreatedAt, &deletedAt); err != nil {
 			return nil, err
+		}
+		if deletedAt.Valid {
+			t := deletedAt.Time
+			m.DeletedAt = &t
 		}
 		out = append(out, m)
 	}
@@ -348,7 +462,8 @@ ORDER BY created_at ASC
 func (d *DB) SetUserOrgRole(userID, orgID, role string) error {
 	role = NormalizeRole(role)
 	res, err := d.SQL.Exec(`
-UPDATE users SET org_id = $2, role = $3 WHERE id = $1 AND LOWER(username) <> LOWER($4)
+UPDATE users SET org_id = $2, role = $3
+WHERE id = $1 AND LOWER(username) <> LOWER($4) AND deleted_at IS NULL
 `, userID, orgID, role, A2ASystemUsername)
 	if err != nil {
 		return err
@@ -480,7 +595,7 @@ func (d *DB) HasPlatformAdmin() (bool, error) {
 	var n int
 	err := d.SQL.QueryRow(`
 SELECT COUNT(*) FROM users
-WHERE role = $1 AND LOWER(username) <> LOWER($2)
+WHERE role = $1 AND LOWER(username) <> LOWER($2) AND deleted_at IS NULL
 `, RolePlatformAdmin, A2ASystemUsername).Scan(&n)
 	if err != nil {
 		return false, err
@@ -538,23 +653,24 @@ func (d *DB) BootstrapPlatformAdmin(username, passwordHash, email string) (*User
 func (d *DB) GetOrgUsage(orgID string) (*OrgUsage, error) {
 	u := &OrgUsage{OrgID: orgID}
 	_ = d.SQL.QueryRow(`
-SELECT COUNT(*) FROM users WHERE org_id = $1 AND LOWER(username) <> LOWER($2)
+SELECT COUNT(*) FROM users
+WHERE org_id = $1 AND LOWER(username) <> LOWER($2) AND deleted_at IS NULL
 `, orgID, A2ASystemUsername).Scan(&u.MemberCount)
 	_ = d.SQL.QueryRow(`
 SELECT COUNT(*) FROM conversations c
 JOIN users u ON u.id = c.user_id
-WHERE u.org_id = $1
+WHERE u.org_id = $1 AND u.deleted_at IS NULL
 `, orgID).Scan(&u.ConversationCount)
 	_ = d.SQL.QueryRow(`
 SELECT COUNT(*) FROM messages m
 JOIN conversations c ON c.id = m.conversation_id
 JOIN users u ON u.id = c.user_id
-WHERE u.org_id = $1
+WHERE u.org_id = $1 AND u.deleted_at IS NULL
 `, orgID).Scan(&u.MessageCount)
 	_ = d.SQL.QueryRow(`
 SELECT COUNT(*) FROM agents a
 JOIN users u ON u.id = a.user_id
-WHERE u.org_id = $1
+WHERE u.org_id = $1 AND u.deleted_at IS NULL AND a.deleted_at IS NULL
 `, orgID).Scan(&u.AgentCount)
 	return u, nil
 }

@@ -543,17 +543,26 @@ button {
 /* Chat bubbles (OpenClaw-like) */
 .chat-row {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
   width: 100%;
   max-width: 860px;
   margin: 0 auto;
 }
 
 .chat-row-user {
-  justify-content: flex-end;
+  align-items: flex-end;
 }
 
 .chat-row-assistant {
-  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+.chat-time {
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  padding: 0 6px;
 }
 
 .bubble {
@@ -2123,8 +2132,17 @@ button.ghost {
   background: #f8fafc;
   border-radius: 10px;
   padding: 8px 10px;
-  cursor: pointer;
   max-width: 100%;
+}
+.artifact-actions {
+  display: flex;
+  gap: 12px;
+}
+.modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 .artifact-card:hover { border-color: #94a3b8; }
 .artifact-kind {
@@ -2140,6 +2158,19 @@ button.ghost {
 .artifact-action {
   font-size: 12px;
   color: #2563eb;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.artifact-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.artifact-download-error {
+  width: 100%;
+  font-size: 12px;
+  color: #b91c1c;
 }
 .tool-chip {
   border-radius: 999px;
@@ -2167,6 +2198,76 @@ button.ghost {
   margin-top: 12px;
 }
 .muted { color: #64748b; font-size: 13px; }
+
+.host-confirm-card {
+  width: min(100%, 420px);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.host-confirm-kicker {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+.host-confirm-title {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+}
+.host-confirm-path {
+  margin-top: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
+  color: var(--text);
+}
+.host-confirm-preview {
+  margin: 10px 0 0;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg-soft, #f4f5f7);
+  color: var(--text);
+}
+.host-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+.host-confirm-actions button {
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.host-confirm-actions button.ghost {
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+}
+.host-confirm-allow.danger {
+  border: none;
+  background: var(--danger);
+  color: #fff;
+  font-weight: 650;
+}
+.host-confirm-settled {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.host-confirm-settled.denied {
+  color: var(--danger);
+}
 
 
 /* --- Assistant-level sidebar + @mentions --- */

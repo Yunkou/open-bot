@@ -8,6 +8,7 @@ const pages: { path: string; title: string }[] = [
   { path: "/traces", title: "调用追踪" },
   { path: "/members", title: "成员与角色" },
   { path: "/llm", title: "默认模型" },
+  { path: "/decision", title: "决策模型" },
   { path: "/usage", title: "用量" },
   { path: "/flags", title: "功能开关" },
   { path: "/audit", title: "审计日志" },

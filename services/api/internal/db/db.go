@@ -237,6 +237,13 @@ ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS checkpoint_path TEXT NOT NULL DEF
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS computer_mode TEXT NOT NULL DEFAULT 'team';
 
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'user';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS channel_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS peer_agent_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_memories_scope_agent ON memories (user_id, scope, agent_id);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_channel ON memories (user_id, scope, channel_id);
+
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_user_channel
   ON conversations(user_id, channel_id) WHERE channel_id IS NOT NULL AND channel_id <> '';
@@ -303,6 +310,31 @@ CREATE TABLE IF NOT EXISTS user_machines (
 
 CREATE INDEX IF NOT EXISTS idx_user_machines_user ON user_machines(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_machines_last_seen ON user_machines(user_id, last_seen DESC);
+ALTER TABLE user_machines ADD COLUMN IF NOT EXISTS file_op_count BIGINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS conversation_tasks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL DEFAULT '',
+  goal TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempt INT NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  lease_until TIMESTAMPTZ,
+  source_message_id TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  started_at TIMESTAMPTZ,
+  finished_at TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_tasks_one_running
+  ON conversation_tasks(conversation_id) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_conversation_tasks_queued
+  ON conversation_tasks(status, created_at) WHERE status = 'queued';
+CREATE INDEX IF NOT EXISTS idx_conversation_tasks_conv
+  ON conversation_tasks(conversation_id, created_at);
 `)
 	if err != nil {
 		return err
@@ -313,7 +345,33 @@ CREATE INDEX IF NOT EXISTS idx_user_machines_last_seen ON user_machines(user_id,
 	if err := d.migrateAuditLogs(); err != nil {
 		return err
 	}
+	if err := d.migrateSoftDelete(); err != nil {
+		return err
+	}
 	return d.migrateVector()
+}
+
+// migrateSoftDelete adds deleted_at to users/agents and relaxes the global
+// username/casdoor_sub uniqueness to "unique among live rows only", so a
+// soft-deleted username can be registered again.
+// Must run after migrateOrgs (it owns idx_users_casdoor_sub).
+func (d *DB) migrateSoftDelete() error {
+	_, err := d.SQL.Exec(`
+ALTER TABLE users  ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_username_key;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_active
+  ON users (LOWER(username)) WHERE deleted_at IS NULL;
+
+DROP INDEX IF EXISTS idx_users_casdoor_sub;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_casdoor_sub_active
+  ON users (casdoor_sub) WHERE casdoor_sub IS NOT NULL AND casdoor_sub <> '' AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_users_org_active ON users (org_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_agents_user_active ON agents (user_id) WHERE deleted_at IS NULL;
+`)
+	return err
 }
 
 // migrateVector enables pgvector when available; otherwise memories stay keyword-only.

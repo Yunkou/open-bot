@@ -31,6 +31,7 @@ export type Agent = {
   /** Last user/assistant message snippet for sidebar. */
   last_message?: string;
   conversation_updated_at?: string;
+  task_active?: boolean;
 };
 
 export type AgentInput = {
@@ -51,6 +52,7 @@ export type Message = {
   role: "user" | "assistant" | string;
   content: string;
   agent_id?: string;
+  conversation_id?: string;
   created_at?: string;
 };
 
@@ -261,6 +263,7 @@ export async function deleteConversation(id: string): Promise<void> {
 export type ListMessagesResult = {
   messages: Message[];
   run_active?: boolean;
+  task_active?: boolean;
 };
 
 export async function listMessages(conversationId: string): Promise<Message[]> {
@@ -279,6 +282,7 @@ export async function listMessagesWithStatus(
   return {
     messages: data.messages ?? [],
     run_active: Boolean(data.run_active),
+    task_active: Boolean(data.task_active),
   };
 }
 
@@ -520,6 +524,7 @@ export type Channel = {
   created_at: string;
   members?: string[];
   conversation_id?: string;
+  task_active?: boolean;
 };
 
 export type AgentBusMessage = {
@@ -641,6 +646,97 @@ export function agentBusWebSocketUrl(token?: string | null): string {
   );
   const q = t ? `?token=${encodeURIComponent(t)}` : "";
   return `${wsBase}/v1/agent-bus/ws${q}`;
+}
+
+export function hostExecWebSocketUrl(machineId: string, token?: string | null): string {
+  const t = (token ?? getToken() ?? "").trim();
+  const wsBase = API_BASE.replace(/^http/i, (scheme) =>
+    scheme.toLowerCase() === "https" ? "wss" : "ws",
+  );
+  const q = t ? `?token=${encodeURIComponent(t)}` : "";
+  return `${wsBase}/v1/machines/${encodeURIComponent(machineId)}/exec${q}`;
+}
+
+export function chatEventsWebSocketUrl(token?: string | null): string {
+  const t = (token ?? getToken() ?? "").trim();
+  const wsBase = API_BASE.replace(/^http/i, (scheme) =>
+    scheme.toLowerCase() === "https" ? "wss" : "ws",
+  );
+  const q = t ? `?token=${encodeURIComponent(t)}` : "";
+  return `${wsBase}/v1/events/ws${q}`;
+}
+
+export type ChatTaskStatus = {
+  type: "task_status";
+  conversation_id: string;
+  agent_id?: string;
+  channel_id?: string;
+  status: string;
+  label?: string;
+};
+
+export type ChatServerEvent =
+  | { type: "conversation_message"; message: Message }
+  | ChatTaskStatus;
+
+export async function createHostConfirm(
+  conversationId: string,
+  body: { req_id: string; op: string; path: string; dest?: string; preview?: string },
+): Promise<Message> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/host-confirms`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Message;
+}
+
+export async function decideHostConfirm(
+  conversationId: string,
+  messageId: string,
+  status: "allowed" | "denied",
+): Promise<Message> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/host-confirms/${messageId}`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return (await res.json()) as Message;
+}
+
+/** Fold a server message into the local list. Same id updates in place; a local bubble with the same text takes the server id. */
+export function mergeIncomingMessage<T extends Message & { streaming?: boolean }>(
+  prev: T[],
+  msg: Message,
+): T[] {
+  if (!msg?.id) return prev;
+  if (prev.some((m) => m.id === msg.id)) {
+    return prev.map((m) => (m.id === msg.id ? ({ ...m, ...msg, streaming: false } as T) : m));
+  }
+  if (msg.role === "host_confirm") {
+    let at = prev.length;
+    while (at > 0 && prev[at - 1].streaming && prev[at - 1].role === "assistant") at -= 1;
+    const next = prev.slice();
+    next.splice(at, 0, { ...msg, streaming: false } as T);
+    return next;
+  }
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const m = prev[i];
+    if (m.role !== msg.role) continue;
+    const local = Boolean(m.streaming) || m.id.startsWith("local-");
+    if (!local) break;
+    const same =
+      m.content === msg.content ||
+      m.content === "" ||
+      (m.content !== "" && msg.content.startsWith(m.content));
+    if (!same) break;
+    return prev.map((item, j) =>
+      j === i ? ({ ...item, ...msg, streaming: false } as T) : item,
+    );
+  }
+  return [...prev, { ...msg, streaming: false } as T];
 }
 
 export type AgentBusWSEvent = {
@@ -958,6 +1054,37 @@ export async function execSandbox(body: {
   return res.json();
 }
 
+function triggerBrowserDownload(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || "download";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function downloadTextFile(filename: string, text: string, mime = "text/plain;charset=utf-8") {
+  triggerBrowserDownload(new Blob([text], { type: mime }), filename || "download");
+}
+
+export async function downloadSandboxFile(
+  path: string,
+  opts?: { agent_id?: string },
+): Promise<void> {
+  const q = new URLSearchParams({ path });
+  if (opts?.agent_id) q.set("agent_id", opts.agent_id);
+  const res = await fetch(`${API_BASE}/v1/sandbox/files/download?${q.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const blob = await res.blob();
+  const quoted = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "");
+  const name = quoted?.[1] || path.split("/").filter(Boolean).pop() || "download";
+  triggerBrowserDownload(blob, name);
+}
+
 export async function readSandboxFile(
   path: string,
   opts?: { agent_id?: string },
@@ -1095,6 +1222,8 @@ export type Machine = {
   app_version: string;
   status: "online" | "offline" | string;
   last_seen: string;
+  file_op_count?: number;
+  connected?: boolean;
   created_at: string;
   updated_at?: string;
 };

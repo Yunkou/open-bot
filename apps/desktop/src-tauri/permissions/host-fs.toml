@@ -1,0 +1,39 @@
+[[permission]]
+identifier = "allow-host-stat"
+description = "Enables the host_stat command."
+commands.allow = ["host_stat"]
+
+[[permission]]
+identifier = "allow-host-ls"
+description = "Enables the host_ls command."
+commands.allow = ["host_ls"]
+
+[[permission]]
+identifier = "allow-host-read"
+description = "Enables the host_read command."
+commands.allow = ["host_read"]
+
+[[permission]]
+identifier = "allow-host-write"
+description = "Enables the host_write command."
+commands.allow = ["host_write"]
+
+[[permission]]
+identifier = "allow-host-delete"
+description = "Enables the host_delete command."
+commands.allow = ["host_delete"]
+
+[[permission]]
+identifier = "allow-host-move"
+description = "Enables the host_move command."
+commands.allow = ["host_move"]
+
+[[permission]]
+identifier = "allow-host-open"
+description = "Enables the host_open command."
+commands.allow = ["host_open"]
+
+[[permission]]
+identifier = "allow-host-shell"
+description = "Enables the host_shell command."
+commands.allow = ["host_shell"]

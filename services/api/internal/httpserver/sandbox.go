@@ -1,14 +1,18 @@
 package httpserver
 
 import (
-	"time"
-	"fmt"
-	"net/url"
-	"net/http/httputil"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"mime"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tangxin/open-bot/services/api/internal/db"
 	"github.com/tangxin/open-bot/services/api/internal/sandbox"
@@ -318,6 +322,65 @@ func (s *Server) handleReadSandboxFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "content": content})
+}
+
+func (s *Server) handleDownloadSandboxFile(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	path := r.URL.Query().Get("path")
+	op := s.fileOpFrom(uid, r.URL.Query().Get("agent_id"), r.URL.Query().Get("mode"), path)
+	f, st, err := s.sandboxMgr().OpenWorkspaceFile(op)
+	if err != nil {
+		if writeSandboxDockerErr(w, err) {
+			return
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "file too large") {
+			msg = "文件过大，无法下载"
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+		return
+	}
+	defer f.Close()
+
+	name := downloadFileName(path)
+	ctype := mime.TypeByExtension(filepath.Ext(name))
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ctype)
+	w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
+	w.Header().Set("Content-Disposition", contentDispositionAttachment(name))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := io.Copy(w, f); err != nil {
+		return
+	}
+}
+
+func downloadFileName(path string) string {
+	base := filepath.Base(strings.ReplaceAll(strings.TrimSpace(path), "\\", "/"))
+	base = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == '"' || r == '\\' || r == '/' {
+			return -1
+		}
+		return r
+	}, base)
+	if base == "" || base == "." || base == ".." {
+		return "download"
+	}
+	return base
+}
+
+func contentDispositionAttachment(name string) string {
+	ascii := strings.Map(func(r rune) rune {
+		if r < 0x20 || r > 126 || r == '"' || r == '\\' {
+			return '_'
+		}
+		return r
+	}, name)
+	if strings.Trim(ascii, "._ ") == "" {
+		ascii = "download"
+	}
+	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, url.PathEscape(name))
 }
 
 func (s *Server) handleWriteSandboxFile(w http.ResponseWriter, r *http.Request) {

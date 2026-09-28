@@ -41,7 +41,9 @@ def test_from_any_and_env_block() -> None:
 def test_tool_defs_include_list_machines() -> None:
     names = {str((t.get("function") or {}).get("name") or "") for t in TOOL_DEFS}
     _ok("list_machines" in names, "list_machines in TOOL_DEFS")
-    _ok("host_ls" in names and "host_read" in names, "host stubs present")
+    _ok("host_ls" in names and "host_read" in names and "host_write" in names, "host file tools present")
+    _ok("host_delete" in names and "host_move" in names, "dangerous host tools present")
+    _ok("host_open" in names and "host_shell" in names, "host open and shell tools present")
     _ok(tool_display_label("sandbox_ls") == "列出目录", "sandbox_ls alias")
     _ok(tool_display_label("sandbox_write") == "写入文件", "sandbox_write alias")
 

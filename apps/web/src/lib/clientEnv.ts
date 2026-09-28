@@ -18,6 +18,7 @@ export type ClientContext = {
   arch: string;
   app_version: string;
   locale: string;
+  machine_id?: string;
   capabilities: ClientCapabilities;
 };
 
@@ -119,8 +120,7 @@ export function detectClientContext(): ClientContext {
       arch: arch || "arm64",
       app_version: APP_VERSION,
       locale,
-      // Phase 1: host file tools not wired; aspirational flag for prompt honesty.
-      capabilities: { host_tools: false, workspace_tools: true },
+      capabilities: { host_tools: true, workspace_tools: true },
     };
   }
 

@@ -11,6 +11,7 @@ import {
   type ProColumns,
 } from "@ant-design/pro-components";
 import {
+  adminBatchDeleteUsers,
   adminCreateUser,
   adminDeleteUser,
   adminInviteMember,
@@ -36,6 +37,7 @@ export default function UsersPage() {
   const invitesAction = useRef<ActionType>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<AdminUser | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
 
   const roleOptions =
     user?.role === "platform_admin"
@@ -69,6 +71,8 @@ export default function UsersPage() {
       dataIndex: "created_at",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
     },
     {
       title: "操作",
@@ -91,13 +95,13 @@ export default function UsersPage() {
         ) : (
           <Popconfirm
             key="del"
-            title="确认删除该用户？其会话与 Bot 等数据将一并删除。"
+            title="确认软删除该用户？其 Bot 也会一并软删除，数据仍保留在库中。"
             okText="删除"
             okButtonProps={{ danger: true }}
             onConfirm={async () => {
               try {
                 await adminDeleteUser(row.id);
-                message.success("已删除");
+                message.success("已软删除");
                 reload();
               } catch (err) {
                 message.error(err instanceof Error ? err.message : String(err));
@@ -123,7 +127,14 @@ export default function UsersPage() {
       },
     },
     { title: "状态", dataIndex: "status", width: 100 },
-    { title: "创建时间", dataIndex: "created_at", valueType: "dateTime", width: 180 },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
   ];
 
   return (
@@ -136,8 +147,8 @@ export default function UsersPage() {
             children: (
               <>
                 <Paragraph type="secondary">
-                  创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。删除用户会级联清理其 Bot
-                  与会话等数据。
+                  创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。删除为软删除：用户及其 Bot
+                  会从列表消失，行仍留在数据库里。
                 </Paragraph>
                 <ProTable<AdminUser>
                   headerTitle="用户"
@@ -146,7 +157,46 @@ export default function UsersPage() {
                   search={false}
                   options={{ reload: true }}
                   pagination={{ pageSize: 20 }}
+                  rowSelection={{
+                    selectedRowKeys: selectedKeys,
+                    onChange: (keys) => setSelectedKeys(keys as string[]),
+                    getCheckboxProps: (row) => ({ disabled: row.id === user?.id }),
+                  }}
                   toolBarRender={() => [
+                    <Popconfirm
+                      key="batch-delete"
+                      title={`确认软删除选中的 ${selectedKeys.length} 个用户？其 Bot 也会一并软删除。`}
+                      okText="删除"
+                      okButtonProps={{ danger: true }}
+                      disabled={selectedKeys.length === 0}
+                      onConfirm={async () => {
+                        try {
+                          const res = await adminBatchDeleteUsers(selectedKeys);
+                          setSelectedKeys([]);
+                          const failed = res.failed || [];
+                          const deleted = res.deleted || [];
+                          if (failed.length) {
+                            const detail = [...new Set(failed.map((f) => f.error))].join("；");
+                            if (deleted.length) {
+                              message.warning(
+                                `已软删除 ${deleted.length} 个用户，${failed.length} 个未删除：${detail}`,
+                              );
+                            } else {
+                              message.error(detail || "删除失败");
+                            }
+                          } else {
+                            message.success(`已软删除 ${deleted.length} 个用户`);
+                          }
+                          reload();
+                        } catch (err) {
+                          message.error(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                    >
+                      <Button danger disabled={selectedKeys.length === 0}>
+                        批量删除
+                      </Button>
+                    </Popconfirm>,
                     <ModalForm
                       key="create"
                       title="创建用户"

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -262,6 +263,11 @@ func (s *Server) handleAdminListTraces(w http.ResponseWriter, r *http.Request) {
 		}
 		traces = append(traces, normalizeRootObs(row, cfg))
 	}
+	sort.SliceStable(traces, func(i, j int) bool {
+		ti, _ := traces[i]["timestamp"].(string)
+		tj, _ := traces[j]["timestamp"].(string)
+		return ti > tj
+	})
 	meta, _ := raw["meta"].(map[string]any)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":       true,

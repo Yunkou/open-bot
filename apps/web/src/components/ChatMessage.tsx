@@ -1,5 +1,6 @@
 import type { AttachmentMeta } from "../api";
 import { ResultOrientedMessage } from "./ArtifactCards";
+import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
 
 export type ChatMessageData = {
   id: string;
@@ -9,13 +10,25 @@ export type ChatMessageData = {
   attachments?: AttachmentMeta[];
   agent_id?: string;
   agent_name?: string;
+  created_at?: string;
 };
 
 type Props = {
   message: ChatMessageData;
   /** Fallback selected bot when message.agent_id is missing. */
   agentId?: string;
+  onHostDecide?: (ok: boolean) => void;
 };
+
+export function formatMessageTime(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const hm = d.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`;
+}
 
 function formatSize(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -23,12 +36,29 @@ function formatSize(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function ChatMessage({ message, agentId }: Props) {
+export function ChatMessage({ message, agentId, onHostDecide }: Props) {
   const isUser = message.role === "user";
   const isSummary = message.role === "summary";
+  const time = formatMessageTime(message.created_at);
+  const timeEl = time ? (
+    <time className="chat-time" dateTime={message.created_at}>
+      {time}
+    </time>
+  ) : null;
 
   if (message.streaming && !message.content && !isUser) {
     return null;
+  }
+
+  if (message.role === "host_confirm") {
+    const item = parseHostConfirm(message.content);
+    if (!item) return null;
+    return (
+      <div className="chat-row chat-row-assistant">
+        <HostConfirmCard item={item} onDecide={item.status === "pending" ? onHostDecide : undefined} />
+        {timeEl}
+      </div>
+    );
   }
 
   if (isUser) {
@@ -47,6 +77,7 @@ export function ChatMessage({ message, agentId }: Props) {
           ) : null}
           {message.content ? <div className="bubble-text">{message.content}</div> : null}
         </div>
+        {timeEl}
       </div>
     );
   }
@@ -61,6 +92,7 @@ export function ChatMessage({ message, agentId }: Props) {
           agentId={message.agent_id || agentId}
         />
       </div>
+      {timeEl}
     </div>
   );
 }

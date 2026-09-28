@@ -28,10 +28,18 @@ from .llm import (
     tools_enabled,
 )
 from .tool_markup import strip_tool_markup
-from .memory import MemoryStore, get_store
+from .memory import (
+    MemoryStore,
+    get_store,
+    merge_scoped_snippets,
+    resolve_write_scope,
+    scene_kind,
+)
 from . import mem0_store
 from . import mcp_client
 from . import builtin_tools
+from .decision import DecisionSettings, bind_decision, build_client, reset_decision
+from .decision.protocol import DecisionError
 from .client_env import ClientContext
 from .skills import SkillRegistry, registry_for_user
 from . import langfuse_trace as lf
@@ -71,10 +79,14 @@ class RunRequest(BaseModel):
     messages: list[ChatMessage] = Field(default_factory=list)
     agent_id: str = Field(default="open-bot")
     user_id: str | None = None
+    channel_id: str | None = None
+    peer_agent_id: str | None = None
     system_prompt: str | None = None
     llm: LLMConfig | None = None
+    decision: DecisionSettings | None = None
     enabled_skills: list[str] | None = None
     client: dict[str, Any] | None = None
+    max_tool_rounds: int | None = None
 
 
 class MemoryCreate(BaseModel):
@@ -82,6 +94,10 @@ class MemoryCreate(BaseModel):
     tier: str = Field(default="note")
     tags: list[str] = Field(default_factory=list)
     user_id: str | None = None
+    scope: str = Field(default="user")
+    agent_id: str = ""
+    channel_id: str = ""
+    peer_agent_id: str = ""
 
 
 
@@ -113,6 +129,17 @@ class MCPCallToolRequest(BaseModel):
     tool: str = Field(..., min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     server: MCPServerBody | None = None
+
+
+def clamp_tool_rounds(n: int | None) -> int:
+    """Chat turns stay at 4. Background tasks may ask for up to 12."""
+    if n is None:
+        return 4
+    if n < 1:
+        return 1
+    if n > 12:
+        return 12
+    return n
 
 
 def _override_from_body(llm: LLMConfig | None) -> LLMOverride | None:
@@ -160,6 +187,27 @@ async def healthz() -> dict:
 @app.get("/v1/compact-config")
 async def compact_config() -> dict:
     return {"compact": compact_mod.compact_config()}
+
+
+class DecisionTestRequest(DecisionSettings):
+    state: Any = "ping"
+    questions: dict[str, Any] | None = None
+
+
+@app.post("/v1/decision/test")
+def decision_test(body: DecisionTestRequest) -> dict:
+    """Probe the org's decision provider without touching the chat loop."""
+    client = build_client(body)
+    if not client.enabled:
+        return {"enabled": False, "provider": "off", "answers": {}}
+    questions = body.questions or {
+        "ok": {"type": "noul", "instructions": "Is the state non-empty?"}
+    }
+    try:
+        result = client.decide(body.state, questions)
+    except DecisionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result.to_dict()
 
 @app.get("/v1/mcp/example")
 async def mcp_example() -> dict:
@@ -242,22 +290,68 @@ async def get_skill(name: str) -> dict:
 async def list_memories(
     q: str | None = None,
     tier: str | None = None,
+    scope: str | None = None,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
     limit: int = Query(default=20, ge=1, le=200),
     user_id: str | None = None,
 ) -> dict:
     store = get_store(user_id)
     if q:
-        items = store.recall(q, tier=tier, top_k=limit)
+        items = store.recall(
+            q,
+            tier=tier,
+            top_k=limit,
+            scope=scope,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            peer_agent_id=peer_agent_id,
+        )
     else:
-        items = store.list(tier=tier, limit=limit)
+        items = store.list(
+            tier=tier,
+            limit=limit,
+            scope=scope,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            peer_agent_id=peer_agent_id,
+        )
     return {"memories": [store.to_public(i) for i in items], "backend": store.backend_kind}
+
+
+@app.get("/v1/memories/auto")
+async def list_auto_memories(
+    user_id: str | None = None,
+    scope: str | None = None,
+    agent_id: str = "",
+    channel_id: str = "",
+    peer_agent_id: str = "",
+    limit: int = Query(default=100, ge=1, le=200),
+) -> dict:
+    return mem0_store.list_for_user(
+        user_id or "",
+        scope=scope,
+        agent_id=agent_id,
+        channel_id=channel_id,
+        peer_agent_id=peer_agent_id,
+        limit=limit,
+    )
 
 
 @app.post("/v1/memories")
 async def create_memory(body: MemoryCreate) -> dict:
     store = get_store(body.user_id)
     try:
-        item = store.write(body.content, tier=body.tier, tags=body.tags)
+        item = store.write(
+            body.content,
+            tier=body.tier,
+            tags=body.tags,
+            scope=body.scope,
+            agent_id=body.agent_id,
+            channel_id=body.channel_id,
+            peer_agent_id=body.peer_agent_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     out = store.to_public(item)
@@ -304,14 +398,35 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
         },
     )
     root_obs = _trace_cm.__enter__()
+    decision_token = bind_decision(body.decision)
     try:
-        recalled = mem.recall(user_text or "", top_k=5)
-        memory_snippets = [f"[{i.tier}] {i.content}" for i in recalled]
-
+        scene = scene_kind(body.channel_id, body.peer_agent_id)
+        recalled_buckets = mem.recall_buckets(
+            user_text or "",
+            agent_id=body.agent_id,
+            channel_id=body.channel_id or "",
+            peer_agent_id=body.peer_agent_id or "",
+        )
+        mem0_by_scope: dict[str, list[str]] = {}
         mem0_hits: list[str] = []
         if body.user_id and str(body.user_id).strip() and mem0_store.mem0_wanted():
-            mem0_hits = mem0_store.search_for_user(str(body.user_id).strip(), user_text or "")
-        memory_snippets = mem0_store.merge_snippets(memory_snippets, mem0_hits)
+            uid = str(body.user_id).strip()
+            for scope_name in recalled_buckets:
+                aid = body.agent_id if scope_name in ("bot", "agent_pair") else ""
+                cid = (body.channel_id or "") if scope_name == "channel" else ""
+                peer = (body.peer_agent_id or "") if scope_name == "agent_pair" else ""
+                hits = mem0_store.search_for_scope(
+                    uid,
+                    user_text or "",
+                    scope=scope_name,
+                    agent_id=aid,
+                    channel_id=cid,
+                    peer_agent_id=peer,
+                )
+                mem0_by_scope[scope_name] = hits
+                mem0_hits.extend(hits)
+        memory_snippets = merge_scoped_snippets(recalled_buckets, mem0_by_scope, scene)
+        recalled = [item for items in recalled_buckets.values() for item in items]
 
         # None = all skills (legacy); explicit list (incl. empty) = filter.
         enabled = body.enabled_skills
@@ -344,6 +459,13 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                     mcp_extra_tools = []
 
         client_ctx = ClientContext.from_any(body.client)
+        host_machines: list[dict[str, Any]] | None = None
+        if body.user_id:
+            from . import machines as machines_mod
+
+            listed = machines_mod.list_machines(str(body.user_id))
+            if isinstance(listed.get("machines"), list):
+                host_machines = listed["machines"]
         system = build_system_prompt(
             agent_id=body.agent_id,
             skills_catalog=skill_reg.catalog_for_prompt(enabled),
@@ -351,6 +473,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             tools_enabled=tools_on,
             available_tool_names=available_tool_names,
             client=client_ctx,
+            machines=host_machines,
         )
         if body.system_prompt and body.system_prompt.strip():
             system = body.system_prompt.strip() + "\n\n" + system
@@ -413,12 +536,17 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 enabled_skills=enabled,
                 user_id=body.user_id,
                 agent_id=body.agent_id,
+                channel_id=body.channel_id,
+                peer_agent_id=body.peer_agent_id,
                 conversation_id=body.conversation_id,
                 skill_reg=skill_reg,
                 mcp_servers=mcp_servers,
                 mcp_extra_tools=mcp_extra_tools,
                 root_obs=root_obs,
                 request=request,
+                max_tool_rounds=clamp_tool_rounds(body.max_tool_rounds),
+                client=client_ctx,
+                mem_store=mem,
             ):
                 yield chunk
         else:
@@ -447,6 +575,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             # Soft-fail: never convert GeneratorExit / body errors into a second exception
             pass
         lf.flush()
+        reset_decision(decision_token)
 
 
 async def echo_events(
@@ -492,12 +621,17 @@ async def openai_path(
     enabled_skills: list[str] | None = None,
     user_id: str | None = None,
     agent_id: str | None = None,
+    channel_id: str | None = None,
+    peer_agent_id: str | None = None,
     conversation_id: str | None = None,
     skill_reg: SkillRegistry | None = None,
     mcp_servers: list[mcp_client.MCPServerConfig] | None = None,
     mcp_extra_tools: list[dict[str, Any]] | None = None,
     root_obs: Any | None = None,
     request: Request | None = None,
+    max_tool_rounds: int = 4,
+    client: ClientContext | None = None,
+    mem_store: MemoryStore | None = None,
 ) -> AsyncIterator[str]:
     allow = set(enabled_skills) if enabled_skills is not None else None
     skill_reg = skill_reg or skills_for(user_id)
@@ -539,32 +673,58 @@ async def openai_path(
         if name == "memory_write":
             try:
                 content = str(args.get("content") or "")
+                scope_name, aid, cid, peer = resolve_write_scope(
+                    str(args.get("scope") or ""),
+                    agent_id=str(args.get("agent_id") or agent_id or ""),
+                    channel_id=str(args.get("channel_id") or channel_id or ""),
+                    peer_agent_id=str(args.get("peer_agent_id") or peer_agent_id or ""),
+                )
                 item = mem.write(
                     content,
                     tier=str(args.get("tier") or "note"),
                     tags=args.get("tags") or [],
+                    scope=scope_name,
+                    agent_id=aid,
+                    channel_id=cid,
+                    peer_agent_id=peer,
                 )
-                # Nice-to-have: mirror explicit writes into Mem0 as raw text.
                 if user_id and content.strip() and mem0_store.mem0_wanted():
-                    try:
-                        m0 = mem0_store.get_mem0()
-                        if m0 is not None:
-                            m0.add(content.strip(), user_id=str(user_id).strip(), infer=False)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    mem0_store.add_conversation(
+                        str(user_id).strip(),
+                        content.strip(),
+                        metadata=mem0_store.scope_metadata(
+                            scope_name,
+                            agent_id=aid,
+                            channel_id=cid,
+                            peer_agent_id=peer,
+                        ),
+                        infer=False,
+                    )
                 return json.dumps(mem.to_public(item), ensure_ascii=False)
             except ValueError as e:
                 return json.dumps({"error": str(e)})
         if name == "memory_recall":
-            items = mem.recall(
-                str(args.get("query") or ""),
+            query = str(args.get("query") or "")
+            buckets = mem.recall_buckets(
+                query,
+                agent_id=str(agent_id or ""),
+                channel_id=str(channel_id or ""),
+                peer_agent_id=str(peer_agent_id or ""),
                 tier=args.get("tier"),
-                top_k=int(args.get("top_k") or 5),
             )
-            return json.dumps(
-                [mem.to_public(i) for i in items],
-                ensure_ascii=False,
-            )
+            mem0_by: dict[str, list[str]] = {}
+            if user_id and mem0_store.mem0_wanted():
+                for scope_name in buckets:
+                    mem0_by[scope_name] = mem0_store.search_for_scope(
+                        str(user_id).strip(),
+                        query,
+                        scope=scope_name,
+                        agent_id=str(agent_id or "") if scope_name in ("bot", "agent_pair") else "",
+                        channel_id=str(channel_id or "") if scope_name == "channel" else "",
+                        peer_agent_id=str(peer_agent_id or "") if scope_name == "agent_pair" else "",
+                    )
+            snippets = merge_scoped_snippets(buckets, mem0_by, scene_kind(channel_id, peer_agent_id))
+            return json.dumps({"memories": snippets}, ensure_ascii=False)
         if name == "send_to_agent":
             from . import agent_bus
 
@@ -663,38 +823,47 @@ async def openai_path(
                 )
             except Exception as e:  # noqa: BLE001
                 return json.dumps({"error": str(e), "machines": [], "count": 0})
-        if name == "host_ls":
-            mid = str(args.get("machine_id") or "").strip()
-            path = str(args.get("path") or "").strip() or "~"
-            return json.dumps(
-                {
-                    "ok": False,
-                    "stub": True,
-                    "machine_id": mid or None,
-                    "path": path,
-                    "message": (
-                        "本机文件访问尚未接通；当前仅能 list_machines 查看已注册电脑。"
-                        "请勿把内部运行环境目录说成用户的 Downloads/桌面。"
-                    ),
-                },
-                ensure_ascii=False,
+        if name in (
+            "host_ls",
+            "host_read",
+            "host_write",
+            "host_delete",
+            "host_move",
+            "host_open",
+            "host_shell",
+        ):
+            from . import machines as machines_mod
+
+            op = name.removeprefix("host_")
+            listed = machines_mod.list_machines(str(user_id or ""))
+            rows = listed.get("machines") if isinstance(listed, dict) else None
+            if not isinstance(rows, list):
+                err = listed.get("error") if isinstance(listed, dict) else "machines unavailable"
+                return json.dumps({"ok": False, "error": err}, ensure_ascii=False)
+            chosen = machines_mod.select_machine(
+                rows,
+                explicit_id=str(args.get("machine_id") or ""),
+                current_id=(client.machine_id if client else ""),
             )
-        if name == "host_read":
-            mid = str(args.get("machine_id") or "").strip()
-            path = str(args.get("path") or "").strip()
-            return json.dumps(
-                {
-                    "ok": False,
-                    "stub": True,
-                    "machine_id": mid or None,
-                    "path": path,
-                    "message": (
-                        "本机文件读取尚未接通；当前仅能 list_machines。"
-                        "若需临时读写，请使用 sandbox_* 工具（对用户只谈结果，不提内部环境）。"
-                    ),
-                },
-                ensure_ascii=False,
+            if not chosen.get("ok"):
+                return json.dumps(chosen, ensure_ascii=False)
+            machine = chosen["machine"]
+            path = str(args.get("path") or args.get("name") or args.get("command") or "")
+            dest = str(args.get("dest") or "")
+            if name == "host_shell" and bool(args.get("terminal")):
+                dest = "terminal"
+            result = machines_mod.exec_host(
+                str(user_id or ""),
+                str(machine.get("id") or ""),
+                op,
+                path=path,
+                dest=dest,
+                content=str(args.get("content") or ""),
+                conversation_id=str(conversation_id or ""),
             )
+            if result.get("ok"):
+                machines_mod.remember_usual_device(mem_store or mem, result.get("usual"))
+            return json.dumps(result, ensure_ascii=False)
         if name == "request_secret":
             from . import sandbox as sbx
 
@@ -763,6 +932,7 @@ async def openai_path(
                     llm_messages,
                     api_key=api_key,
                     tool_handler=tool_handler,
+                    max_rounds=max_tool_rounds,
                     override=override,
                     extra_tools=mcp_extra_tools or None,
                     on_status=on_status,
@@ -832,7 +1002,9 @@ async def openai_path(
                 gen_update["usage_details"] = usage_details
             lf.update_obs(gen_obs, **gen_update)
             if root_obs is not None:
-                root_meta: dict[str, Any] = {"tools_used": used_tools or []}
+                root_meta: dict[str, Any] = {
+                    "tools_used": used_tools or [],
+                }
                 if usage_details:
                     root_meta["usage_tokens"] = usage_details
                 lf.update_obs(
@@ -843,8 +1015,23 @@ async def openai_path(
             if user_id and assistant_reply.strip() and mem0_store.mem0_auto_add():
                 history_for_mem0 = [m for m in llm_messages if m.get("role") in ("user", "assistant")]
                 turn = mem0_store.last_turn_messages(history_for_mem0, assistant_reply, window=4)
-                mem0_store.add_conversation_bg(str(user_id).strip(), turn)
-            yield sse("done", {"ok": True, "mode": "openai", "tools_used": used_tools})
+                try:
+                    scope_name, aid, cid, peer = resolve_write_scope(
+                        "",
+                        agent_id=str(agent_id or ""),
+                        channel_id=str(channel_id or ""),
+                        peer_agent_id=str(peer_agent_id or ""),
+                    )
+                    meta = mem0_store.scope_metadata(
+                        scope_name, agent_id=aid, channel_id=cid, peer_agent_id=peer
+                    )
+                except ValueError:
+                    meta = mem0_store.scope_metadata("user")
+                mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
+            yield sse(
+                "done",
+                {"ok": True, "mode": "openai", "tools_used": used_tools},
+            )
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001

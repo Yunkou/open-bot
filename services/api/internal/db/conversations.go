@@ -226,6 +226,54 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	return out, rows.Err()
 }
 
+func (d *DB) RecentHostConfirms(conversationID string) ([]Message, error) {
+	rows, err := d.SQL.Query(
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''), created_at
+		 FROM messages
+		 WHERE conversation_id = $1 AND role = 'host_confirm'
+		 ORDER BY created_at DESC
+		 LIMIT 40`,
+		conversationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) UpdateMessageContent(conversationID, messageID, content string) (*Message, error) {
+	res, err := d.SQL.Exec(
+		`UPDATE messages SET content = $1 WHERE id = $2 AND conversation_id = $3`,
+		content, messageID, conversationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, ErrNotFound
+	}
+	row := d.SQL.QueryRow(
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''), created_at
+		 FROM messages WHERE id = $1`,
+		messageID,
+	)
+	var m Message
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (d *DB) DeleteConversation(userID, id string) error {
 	res, err := d.SQL.Exec(`DELETE FROM conversations WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {

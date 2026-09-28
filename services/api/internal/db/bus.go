@@ -17,6 +17,7 @@ type Channel struct {
 	CreatedAt      time.Time `json:"created_at"`
 	Members        []string  `json:"members,omitempty"`
 	ConversationID string    `json:"conversation_id,omitempty"`
+	TaskActive     bool      `json:"task_active,omitempty"`
 }
 
 type AgentBusMessage struct {

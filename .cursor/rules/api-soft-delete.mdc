@@ -1,0 +1,28 @@
+---
+description: 用户与 Bot 的 SQL 软删除约定
+globs: services/api/**/*.go
+alwaysApply: false
+---
+
+# 用户与 Bot 软删除
+
+`users` 和 `agents` 用手写 SQL。不要为这两张表引入 ORM。
+
+- 查询和更新带 `deleted_at IS NULL`。
+- 删除只写 `deleted_at` 和 `updated_at`，不要 `DELETE FROM users` / `DELETE FROM agents`。
+- 删除用户调用 `SoftDeleteUser`。它在同一事务里软删除该用户的 Bot，并停用其定时任务。
+
+故意不带 `deleted_at IS NULL` 时，在函数注释里写下面之一：
+
+- `soft-delete: include deleted` — 管理端要看到已删除行，或审计要保留操作者姓名
+- `soft-delete: backfill` — 迁移回填，包含已删除行
+- `soft-delete: hard purge` — 仅用于启动时清理已废弃的内置 Bot
+
+```sql
+-- 查询
+SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL
+
+-- 删除用户的 Bot
+UPDATE agents SET deleted_at = $2, updated_at = $2
+WHERE user_id = $1 AND deleted_at IS NULL
+```

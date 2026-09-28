@@ -14,6 +14,8 @@ export default function AuditPage() {
       dataIndex: "created_at",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
     },
     {
       title: "操作者",

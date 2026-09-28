@@ -34,7 +34,8 @@ SELECT a.id, COALESCE(a.user_id,''), a.name, a.description, a.system_prompt, a.i
 FROM agents a
 JOIN users u ON u.id = a.user_id
 WHERE u.org_id = $1 AND LOWER(u.username) <> LOWER($2)
-ORDER BY a.created_at DESC
+  AND a.deleted_at IS NULL AND u.deleted_at IS NULL
+ORDER BY a.updated_at DESC
 `, orgID, A2ASystemUsername)
 	if err != nil {
 		return nil, err
@@ -55,7 +56,7 @@ ORDER BY a.created_at DESC
 
 // GetAgentByID loads an agent by id without user ownership filter.
 func (d *DB) GetAgentByID(id string) (*Agent, error) {
-	row := d.SQL.QueryRow(`SELECT `+agentSelectCols+` FROM agents WHERE id = $1`, id)
+	row := d.SQL.QueryRow(`SELECT `+agentSelectCols+` FROM agents WHERE id = $1 AND deleted_at IS NULL`, id)
 	a, err := scanAgentRow(row.Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -73,7 +74,7 @@ SELECT a.id, COALESCE(a.user_id,''), a.name, a.description, a.system_prompt, a.i
        COALESCE(a.computer_mode,'team'), a.created_at, a.updated_at, COALESCE(u.username, '')
 FROM agents a
 JOIN users u ON u.id = a.user_id
-WHERE a.id = $1 AND u.org_id = $2
+WHERE a.id = $1 AND u.org_id = $2 AND a.deleted_at IS NULL AND u.deleted_at IS NULL
 `, id, orgID)
 	var a Agent
 	var uid, owner string
@@ -143,7 +144,7 @@ func (d *DB) UpdateAgentAdmin(id, name, description, systemPrompt string, comput
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(`
 UPDATE agents SET name=$1, description=$2, system_prompt=$3, computer_mode=$4, updated_at=$5
-WHERE id=$6 AND is_builtin = FALSE
+WHERE id=$6 AND is_builtin = FALSE AND deleted_at IS NULL
 `, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.UpdatedAt, id)
 	if err != nil {
 		return nil, err
@@ -151,9 +152,12 @@ WHERE id=$6 AND is_builtin = FALSE
 	return a, nil
 }
 
-// DeleteAgentByID deletes a non-builtin agent by id (admin path).
+// DeleteAgentByID soft-deletes a non-builtin agent by id (admin path).
 func (d *DB) DeleteAgentByID(id string) error {
-	res, err := d.SQL.Exec(`DELETE FROM agents WHERE id = $1 AND is_builtin = FALSE`, id)
+	res, err := d.SQL.Exec(`
+UPDATE agents SET deleted_at = $2, updated_at = $2
+WHERE id = $1 AND is_builtin = FALSE AND deleted_at IS NULL
+`, id, Now())
 	if err != nil {
 		return err
 	}

@@ -43,6 +43,10 @@ import {
   sendMessageStream,
   subscribeConversationEvents,
   cancelConversationRun,
+  chatEventsWebSocketUrl,
+  mergeIncomingMessage,
+  createHostConfirm,
+  decideHostConfirm,
   uploadConversationAttachment,
   AttachmentMeta,
   setDefaultLLMConnection,
@@ -93,6 +97,8 @@ import {
   clearStoredMachineId,
   defaultMachineLabel,
 } from "./lib/clientEnv";
+import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, type HostExecRequest } from "./lib/hostExec";
+import { parseHostConfirm } from "./components/HostConfirmCard";
 import { AccountMenu } from "./components/AccountMenu";
 import { AgentAvatar } from "./components/AgentAvatar";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
@@ -269,6 +275,10 @@ export default function App() {
   const [convSearch, setConvSearch] = useState("");
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [sending, setSending] = useState(false);
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [taskConvIds, setTaskConvIds] = useState<Set<string>>(() => new Set());
+  const taskConvIdsRef = useRef(taskConvIds);
+  taskConvIdsRef.current = taskConvIds;
   const [, setStatus] = useState(""); // chat chrome status bar removed; keep setter for clear/error paths
   const [runLabel, setRunLabel] = useState("正在思考…");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -338,6 +348,12 @@ export default function App() {
   const [machines, setMachines] = useState<Machine[]>([]);
   const [machinesMsg, setMachinesMsg] = useState("");
   const [machinesBusy, setMachinesBusy] = useState(false);
+  const [hostMachineId, setHostMachineId] = useState<string | null>(() => getStoredMachineId());
+  const [hostWritesOn, setHostWritesOn] = useState(() => hostWritesEnabled());
+  const [hostActivity, setHostActivity] = useState("");
+  const hostConfirmResolvers = useRef(new Map<string, (ok: boolean) => void>());
+  const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
+  const applyRemoteHostDecisionRef = useRef<(msg: Message) => void>(() => {});
   const clientEnv = useMemo(() => detectClientContext(), []);
   const [botSecrets, setBotSecrets] = useState<BotSecretMeta[]>([]);
   const [secretRequests, setSecretRequests] = useState<BotSecretRequest[]>([]);
@@ -385,6 +401,7 @@ export default function App() {
         });
         if (cancelled) return;
         setStoredMachineId(m.id);
+        setHostMachineId(m.id);
         setMachines((prev) => {
           const others = prev.filter((x) => x.id !== m.id);
           return [m, ...others];
@@ -408,6 +425,20 @@ export default function App() {
       if (timer) clearInterval(timer);
     };
   }, [authed, clientEnv]);
+
+  useEffect(() => {
+    if (!authed || !token || clientEnv.app !== "tauri" || !hostMachineId) return;
+    const stop = startHostExecSession({
+      token,
+      machineId: hostMachineId,
+      confirm: (req) => askHostConfirmRef.current(req),
+    });
+    return () => {
+      stop();
+      for (const resolve of hostConfirmResolvers.current.values()) resolve(false);
+      hostConfirmResolvers.current.clear();
+    };
+  }, [authed, token, clientEnv.app, hostMachineId]);
 
 
   const refreshLLMs = useCallback(async () => {
@@ -451,14 +482,123 @@ export default function App() {
     messagesLiveRef.current = messages;
   }, [messages]);
 
+  useEffect(() => {
+    if (!token) return;
+    let stopped = false;
+    let socket: WebSocket | null = null;
+    let retry: number | undefined;
+    const pullOpen = () => {
+      const id = conversationRef.current?.id;
+      if (!id) return;
+      void listMessagesWithStatus(id)
+        .then((listed) => {
+          if (conversationRef.current?.id !== id) return;
+          patchConvMessages(id, (prev) => {
+            let next = prev;
+            for (const m of listed.messages) {
+              if (m.role === "summary") continue;
+              applyRemoteHostDecisionRef.current(m);
+              next = mergeIncomingMessage(next, m);
+            }
+            return next;
+          });
+          noteTask(id, Boolean(listed.task_active));
+        })
+        .catch(() => {});
+    };
+    const connect = () => {
+      if (stopped) return;
+      const ws = new WebSocket(chatEventsWebSocketUrl(token));
+      socket = ws;
+      ws.onopen = () => {
+        void refreshAgents().catch(() => {});
+        pullOpen();
+      };
+      ws.onmessage = (ev) => {
+        let data: { type?: string; message?: Message; conversation_id?: string; status?: string; label?: string };
+        try {
+          data = JSON.parse(String(ev.data));
+        } catch {
+          return;
+        }
+        if (data.type === "conversation_message" && data.message) {
+          acceptServerMessage(data.message);
+          void refreshAgents().catch(() => {});
+          return;
+        }
+        if (data.type === "task_status" && data.conversation_id) {
+          const active = data.status === "running" || data.status === "queued";
+          noteTask(data.conversation_id, active, data.label);
+          void refreshAgents().catch(() => {});
+          return;
+        }
+        if (data.type === "host_activity") {
+          const row = data as { active?: boolean; label?: string };
+          setHostActivity(row.active && row.label ? row.label : "");
+        }
+      };
+      ws.onclose = () => {
+        if (stopped) return;
+        retry = window.setTimeout(connect, 2000);
+      };
+    };
+    connect();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshAgents().catch(() => {});
+        pullOpen();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      stopped = true;
+      if (retry) window.clearTimeout(retry);
+      document.removeEventListener("visibilitychange", onVisible);
+      socket?.close();
+    };
+  }, [token, refreshAgents]);
+
+  useEffect(() => {
+    const id = conversation?.id;
+    if (!token || !id || !taskConvIds.has(id)) return;
+    const timer = window.setInterval(() => {
+      void listMessagesWithStatus(id)
+        .then((listed) => {
+          if (conversationRef.current?.id !== id) return;
+          patchConvMessages(id, (prev) => {
+            let next = prev;
+            for (const m of listed.messages) {
+              if (m.role === "summary") continue;
+              applyRemoteHostDecisionRef.current(m);
+              next = mergeIncomingMessage(next, m);
+            }
+            return next;
+          });
+          noteTask(id, Boolean(listed.task_active));
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [token, conversation?.id, taskConvIds]);
+
   const busySelectionKeys = useMemo(() => {
     void runBusyTick;
     const keys = new Set<string>();
     for (const run of runsRef.current.values()) {
       keys.add(run.selectionKey);
     }
+    for (const a of agents) {
+      if (a.task_active || (a.conversation_id && taskConvIds.has(a.conversation_id))) {
+        keys.add(`agent:${a.id}`);
+      }
+    }
+    for (const ch of channels) {
+      if (ch.task_active || (ch.conversation_id && taskConvIds.has(ch.conversation_id))) {
+        keys.add(`channel:${ch.id}`);
+      }
+    }
     return keys;
-  }, [runBusyTick]);
+  }, [runBusyTick, agents, channels, taskConvIds]);
 
   const messagesRef = useRef<HTMLDivElement | null>(null);
   /** When true, keep the message list pinned to the latest content. */
@@ -637,6 +777,8 @@ export default function App() {
     setConversation(null);
     setMessages([]);
     setSending(false);
+    setTaskBusy(false);
+    setTaskConvIds(new Set());
     setLlms([]);
     setStatus("");
     setRunBusyTick((n) => n + 1);
@@ -669,6 +811,113 @@ export default function App() {
     if (conversationRef.current?.id === convId) {
       messagesLiveRef.current = next;
       setMessages(next);
+    }
+  };
+
+  const noteTask = (convId: string, active: boolean, label?: string) => {
+    const cur = taskConvIdsRef.current;
+    const has = cur.has(convId);
+    if (active !== has) {
+      const next = new Set(cur);
+      if (active) next.add(convId);
+      else next.delete(convId);
+      taskConvIdsRef.current = next;
+      setTaskConvIds(next);
+    }
+    if (conversationRef.current?.id === convId) {
+      setTaskBusy(active);
+      if (active && label) setRunLabel(label);
+      if (!active) setRunLabel("正在思考…");
+    }
+  };
+
+  const releaseHostConfirm = (reqId: string, ok: boolean) => {
+    const resolve = hostConfirmResolvers.current.get(reqId);
+    if (!resolve) return;
+    hostConfirmResolvers.current.delete(reqId);
+    resolve(ok);
+  };
+
+  const applyRemoteHostDecision = (msg: Message) => {
+    if (msg.role !== "host_confirm") return;
+    const parsed = parseHostConfirm(msg.content);
+    if (!parsed || (parsed.status !== "allowed" && parsed.status !== "denied")) return;
+    releaseHostConfirm(parsed.req_id, parsed.status === "allowed");
+  };
+  applyRemoteHostDecisionRef.current = applyRemoteHostDecision;
+
+  const acceptServerMessage = (msg: Message) => {
+    applyRemoteHostDecision(msg);
+    const convId = msg.conversation_id;
+    if (!convId) return;
+    patchConvMessages(convId, (prev) => mergeIncomingMessage(prev, msg));
+  };
+
+  askHostConfirmRef.current = (req) => {
+    const conversationId = req.conversation_id || conversationRef.current?.id || "";
+    return new Promise<boolean>((resolve) => {
+      hostConfirmResolvers.current.set(req.req_id, resolve);
+      if (!conversationId) return;
+      const raw = req.content || "";
+      let preview = raw.length > 180 ? `${raw.slice(0, 180)}…` : raw;
+      if (req.op === "shell" && req.dest === "terminal" && !preview) {
+        preview = "会打开终端窗口，你可以在里面输入密码或继续操作";
+      }
+      void createHostConfirm(conversationId, {
+        req_id: req.req_id,
+        op: req.op,
+        path: req.path || "",
+        dest: req.dest || "",
+        preview,
+      })
+        .then((msg) => acceptServerMessage(msg))
+        .catch(() => {
+          acceptServerMessage({
+            id: `local-${req.req_id}`,
+            role: "host_confirm",
+            conversation_id: conversationId,
+            created_at: new Date().toISOString(),
+            content: JSON.stringify({
+              req_id: req.req_id,
+              op: req.op,
+              path: req.path || "",
+              dest: req.dest || "",
+              preview,
+              status: "pending",
+            }),
+          });
+        });
+    });
+  };
+
+  const settleHostConfirm = (message: Message, ok: boolean) => {
+    const parsed = parseHostConfirm(message.content);
+    if (!parsed?.req_id || parsed.status === "allowed" || parsed.status === "denied") return;
+    const status = ok ? "allowed" : "denied";
+    const content = JSON.stringify({ ...parsed, status });
+    const convId = message.conversation_id || conversationRef.current?.id || "";
+    if (convId) {
+      patchConvMessages(convId, (prev) => prev.map((m) => (m.id === message.id ? { ...m, content } : m)));
+      if (!message.id.startsWith("local-")) {
+        void decideHostConfirm(convId, message.id, status)
+          .then((saved) => acceptServerMessage(saved))
+          .catch(() => {});
+      }
+    }
+    releaseHostConfirm(parsed.req_id, ok);
+  };
+
+  const stampSavedMessage = (convId: string, messageId: string) => {
+    if (!messageId) return;
+    const run = runsRef.current.get(convId);
+    const localId = run?.assistantId;
+    patchConvMessages(convId, (prev) => {
+      if (prev.some((m) => m.id === messageId)) return prev;
+      if (!localId) return prev;
+      return prev.map((m) => (m.id === localId ? { ...m, id: messageId } : m));
+    });
+    if (run && localId && run.assistantId === localId) {
+      run.assistantId = messageId;
     }
   };
 
@@ -848,6 +1097,12 @@ export default function App() {
                 setRunLabel("正在思考…");
               }
             }
+            if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
+              stampSavedMessage(conv.id, meta.message_id);
+            }
+            if (meta.phase === "task_queued") {
+              noteTask(conv.id, true, "正在做，做好会发在这里");
+            }
           },
           onStatus: (data) => {
             if (!isRunCurrent()) return;
@@ -959,6 +1214,7 @@ export default function App() {
       try {
         const conv = await openPrimaryConversation(id);
         if (selectGen !== selectGenRef.current) return;
+        conversationRef.current = conv;
         const activeRun = runsRef.current.get(conv.id);
         let apiMsgs: Message[] | undefined;
         let runActive = false;
@@ -967,6 +1223,9 @@ export default function App() {
           if (selectGen !== selectGenRef.current) return;
           apiMsgs = listed.messages;
           runActive = Boolean(listed.run_active);
+          noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
+        } else {
+          setTaskBusy(taskConvIdsRef.current.has(conv.id));
         }
         applyConversationView(conv, apiMsgs, agents);
         saveLastActiveSelection({ kind: "agent", id });
@@ -993,6 +1252,7 @@ export default function App() {
       setRunLabel("正在思考…");
       const { conversation: conv } = await openChannelConversation(channelId);
       if (selectGen !== selectGenRef.current) return;
+      conversationRef.current = conv;
       setAgentId(conv.agent_id);
       setPendingFiles([]);
       setStatus("");
@@ -1004,6 +1264,9 @@ export default function App() {
         if (selectGen !== selectGenRef.current) return;
         apiMsgs = listed.messages;
         runActive = Boolean(listed.run_active);
+        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
+      } else {
+        setTaskBusy(taskConvIdsRef.current.has(conv.id));
       }
       applyConversationView(conv, apiMsgs, agentNameById);
       saveLastActiveSelection({ kind: "channel", id: channelId });
@@ -1189,6 +1452,12 @@ export default function App() {
                 setRunLabel("正在思考…");
               }
             }
+            if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
+              stampSavedMessage(streamConvId!, meta.message_id);
+            }
+            if (meta.phase === "task_queued") {
+              noteTask(streamConvId!, true, "正在做，做好会发在这里");
+            }
           },
           onStatus: (data) => {
             if (!isRunCurrent()) return;
@@ -1228,14 +1497,16 @@ export default function App() {
             patchConvMessages(streamConvId!, (prev) =>
               prev.map((m) => (m.id === curId ? { ...m, streaming: false } : m)),
             );
-            setRunLabelForStream("正在思考…");
+            if (!taskConvIdsRef.current.has(streamConvId!)) {
+              setRunLabelForStream("正在思考…");
+            }
             void refreshConversations();
           },
         },
         ac.signal,
         uploaded.length ? uploaded : undefined,
         mentionAgentIds,
-        clientEnv,
+        { ...clientEnv, machine_id: getStoredMachineId() || undefined },
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -2225,6 +2496,7 @@ export default function App() {
       />
 
       <main className="main">
+        {hostActivity ? <div className="status host-activity">{hostActivity}</div> : null}
         <header className="topbar">
           <div className="agent-pill">
             {activeChannel ? (
@@ -2279,14 +2551,20 @@ export default function App() {
             </div>
           ) : null}
           {messages.map((m) => (
-            <ChatMessage key={m.id} message={m} agentId={agentId} />
-          ))}
-          {sending &&
-          !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
-            <RunStatus
-              label={runLabel || "正在思考…"}
-              color={avatarColor(activeAgent?.id || activeAgent?.name || "open-bot")}
+            <ChatMessage
+              key={m.id}
+              message={m}
+              agentId={agentId}
+              onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
             />
+          ))}
+          {sending || taskBusy ? (
+            !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
+              <RunStatus
+                label={taskBusy && !sending ? runLabel || "正在做，做好会发在这里" : runLabel || "正在思考…"}
+                color={avatarColor(activeAgent?.id || activeAgent?.name || "open-bot")}
+              />
+            ) : null
           ) : null}
         </div>
 
@@ -2308,7 +2586,7 @@ export default function App() {
             onChange={setInput}
             onSubmit={onSubmit}
             onStop={() => stopCurrentRun({ markStopped: true })}
-            sending={sending}
+            sending={sending || taskBusy}
             agentName={activeChannel ? activeChannel.name : activeAgent?.name}
             files={pendingFiles}
             onFilesChange={setPendingFiles}
@@ -3181,11 +3459,25 @@ export default function App() {
             {settingsTab === "machines" && (
               <>
                 <p className="muted small">
-                  已注册的主机电脑（桌面 / 移动客户端登录后会自动登记并心跳）。
-                  网页浏览器通常不会登记为「电脑」。本机文件读写尚未接通（Phase 1 仅列表）。
+                  已注册的电脑。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。
+                  网页不会登记为电脑。可读写 Downloads、Desktop、Documents。
+                  覆盖、删除和移动会在那台电脑上请你确认。
                   当前客户端：{clientEnv.platform} / {clientEnv.app}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
                 </p>
+                {clientEnv.app === "tauri" ? (
+                  <label className="muted small">
+                    <input
+                      type="checkbox"
+                      checked={hostWritesOn}
+                      onChange={(e) => {
+                        setHostWritesEnabled(e.target.checked);
+                        setHostWritesOn(e.target.checked);
+                      }}
+                    />{" "}
+                    允许写入这台电脑
+                  </label>
+                ) : null}
                 <div className="llm-actions" style={{ marginBottom: 12 }}>
                   <button
                     type="button"
@@ -3218,6 +3510,7 @@ export default function App() {
                         })
                           .then((m) => {
                             setStoredMachineId(m.id);
+                            setHostMachineId(m.id);
                             setMachinesMsg(`已注册：${m.label}`);
                             return refreshMachines();
                           })
@@ -3240,7 +3533,7 @@ export default function App() {
                         <div>
                           <div className="agent-name">
                             {m.label}{" "}
-                            <span className="tag">{m.status === "online" ? "在线" : "离线"}</span>
+                            <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
                           </div>
                           <div className="agent-desc">
                             {m.platform}

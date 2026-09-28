@@ -72,6 +72,14 @@ export default function MembersPage() {
         />
       ),
     },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
   ];
 
   const inviteColumns: ProColumns<AdminInvite>[] = [
@@ -86,7 +94,14 @@ export default function MembersPage() {
       },
     },
     { title: "状态", dataIndex: "status", width: 100 },
-    { title: "创建时间", dataIndex: "created_at", valueType: "dateTime", width: 180 },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
   ];
 
   return (

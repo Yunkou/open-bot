@@ -13,19 +13,22 @@ import (
 const MachineOfflineAfter = 90 * time.Second
 
 type Machine struct {
-	ID         string    `json:"id"`
-	UserID     string    `json:"user_id"`
-	MachineKey string    `json:"machine_key"`
-	Label      string    `json:"label"`
-	Platform   string    `json:"platform"`
-	OS         string    `json:"os"`
-	Arch       string    `json:"arch"`
-	App        string    `json:"app"`
-	AppVersion string    `json:"app_version"`
-	Status     string    `json:"status"` // online | offline
-	LastSeen   time.Time `json:"last_seen"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	UserID      string    `json:"user_id"`
+	MachineKey  string    `json:"machine_key"`
+	Label       string    `json:"label"`
+	Platform    string    `json:"platform"`
+	OS          string    `json:"os"`
+	Arch        string    `json:"arch"`
+	App         string    `json:"app"`
+	AppVersion  string    `json:"app_version"`
+	Status      string    `json:"status"` // online | offline
+	LastSeen    time.Time `json:"last_seen"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	FileOpCount int64     `json:"file_op_count"`
+	// Connected is set by the API from the live exec socket, not stored.
+	Connected bool `json:"connected"`
 }
 
 type MachineRegisterInput struct {
@@ -44,10 +47,20 @@ func (m *Machine) ApplyOnlineStatus(now time.Time) {
 	}
 }
 
+func scanMachine(sc interface{ Scan(dest ...any) error }) (Machine, error) {
+	var m Machine
+	err := sc.Scan(
+		&m.ID, &m.UserID, &m.MachineKey, &m.Label, &m.Platform, &m.OS, &m.Arch,
+		&m.App, &m.AppVersion, &m.Status, &m.LastSeen, &m.CreatedAt, &m.UpdatedAt,
+		&m.FileOpCount,
+	)
+	return m, err
+}
+
 func (d *DB) ListMachines(userID string) ([]Machine, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
-		        status, last_seen, created_at, updated_at
+		        status, last_seen, created_at, updated_at, file_op_count
 		 FROM user_machines WHERE user_id = $1 ORDER BY last_seen DESC`,
 		userID,
 	)
@@ -58,11 +71,8 @@ func (d *DB) ListMachines(userID string) ([]Machine, error) {
 	now := Now()
 	out := make([]Machine, 0)
 	for rows.Next() {
-		var m Machine
-		if err := rows.Scan(
-			&m.ID, &m.UserID, &m.MachineKey, &m.Label, &m.Platform, &m.OS, &m.Arch,
-			&m.App, &m.AppVersion, &m.Status, &m.LastSeen, &m.CreatedAt, &m.UpdatedAt,
-		); err != nil {
+		m, err := scanMachine(rows)
+		if err != nil {
 			return nil, err
 		}
 		m.ApplyOnlineStatus(now)
@@ -74,15 +84,12 @@ func (d *DB) ListMachines(userID string) ([]Machine, error) {
 func (d *DB) GetMachine(userID, id string) (*Machine, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
-		        status, last_seen, created_at, updated_at
+		        status, last_seen, created_at, updated_at, file_op_count
 		 FROM user_machines WHERE user_id = $1 AND id = $2`,
 		userID, id,
 	)
-	var m Machine
-	if err := row.Scan(
-		&m.ID, &m.UserID, &m.MachineKey, &m.Label, &m.Platform, &m.OS, &m.Arch,
-		&m.App, &m.AppVersion, &m.Status, &m.LastSeen, &m.CreatedAt, &m.UpdatedAt,
-	); err != nil {
+	m, err := scanMachine(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -180,6 +187,41 @@ func (d *DB) HeartbeatMachine(userID, id string) (*Machine, error) {
 		return nil, ErrNotFound
 	}
 	return d.GetMachine(userID, id)
+}
+
+func (d *DB) IncrementMachineFileOps(userID, id string) (*Machine, error) {
+	now := Now()
+	res, err := d.SQL.Exec(
+		`UPDATE user_machines SET file_op_count = file_op_count + 1, updated_at = $1
+		 WHERE id = $2 AND user_id = $3`,
+		now, id, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, ErrNotFound
+	}
+	return d.GetMachine(userID, id)
+}
+
+func (d *DB) UsualWorkMachine(userID string) (*Machine, error) {
+	list, err := d.ListMachines(userID)
+	if err != nil {
+		return nil, err
+	}
+	var best *Machine
+	for i := range list {
+		m := &list[i]
+		if m.FileOpCount <= 0 {
+			continue
+		}
+		if best == nil || m.FileOpCount > best.FileOpCount {
+			best = m
+		}
+	}
+	return best, nil
 }
 
 func (d *DB) DeleteMachine(userID, id string) error {
