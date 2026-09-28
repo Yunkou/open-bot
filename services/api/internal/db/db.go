@@ -1,0 +1,340 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+const DefaultDatabaseURL = "postgres://openbot:openbot@127.0.0.1:5432/openbot?sslmode=disable"
+
+type DB struct {
+	SQL *sql.DB
+}
+
+func DatabaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("DATABASE_URL")); v != "" {
+		return v
+	}
+	return DefaultDatabaseURL
+}
+
+func Open(databaseURL string) (*DB, error) {
+	if databaseURL == "" {
+		databaseURL = DatabaseURL()
+	}
+	sqlDB, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(10)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+	if err := sqlDB.Ping(); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("ping postgres: %w", err)
+	}
+	d := &DB{SQL: sqlDB}
+	if err := d.migrate(); err != nil {
+		_ = sqlDB.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	return d, nil
+}
+
+func (d *DB) Close() error {
+	return d.SQL.Close()
+}
+
+func (d *DB) migrate() error {
+	_, err := d.SQL.Exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS llm_connections (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_key TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  enable_tools BOOLEAN NOT NULL DEFAULT FALSE,
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_connections_user ON llm_connections(user_id);
+
+ALTER TABLE llm_connections ADD COLUMN IF NOT EXISTS context_window INT;
+CREATE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(username));
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  is_builtin BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id);
+
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL DEFAULT 'open-bot',
+  title TEXT NOT NULL DEFAULT '新对话',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_skills (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  skill_name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  PRIMARY KEY (user_id, skill_name)
+);
+
+CREATE TABLE IF NOT EXISTS memories (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  tier TEXT NOT NULL DEFAULT 'note',
+  content TEXT NOT NULL DEFAULT '',
+  tags TEXT[] NOT NULL DEFAULT '{}',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id);
+CREATE INDEX IF NOT EXISTS idx_memories_user_tier ON memories(user_id, tier);
+
+CREATE TABLE IF NOT EXISTS channels (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_channels_user ON channels(user_id);
+
+CREATE TABLE IF NOT EXISTS channel_members (
+  channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  PRIMARY KEY (channel_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  from_agent_id TEXT NOT NULL,
+  to_agent_id TEXT,
+  channel_id TEXT REFERENCES channels(id) ON DELETE SET NULL,
+  priority BOOLEAN NOT NULL DEFAULT FALSE,
+  body TEXT NOT NULL DEFAULT '',
+  reply_to_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  read_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_messages_user ON agent_messages(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_unread ON agent_messages(user_id) WHERE read_at IS NULL;
+
+ALTER TABLE agent_messages ADD COLUMN IF NOT EXISTS reply_to_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_agent_messages_reply_to ON agent_messages(reply_to_id) WHERE reply_to_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  transport TEXT NOT NULL DEFAULT 'stdio',
+  command TEXT NOT NULL DEFAULT '',
+  args_json TEXT NOT NULL DEFAULT '[]',
+  url TEXT NOT NULL DEFAULT '',
+  env_json TEXT NOT NULL DEFAULT '{}',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_user ON mcp_servers(user_id);
+
+CREATE TABLE IF NOT EXISTS user_skill_files (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  skill_name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  body_markdown TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, skill_name)
+);
+
+CREATE TABLE IF NOT EXISTS routines (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  prompt TEXT NOT NULL DEFAULT '',
+  schedule_cron TEXT NOT NULL DEFAULT '0 9 * * *',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  last_run_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_routines_user ON routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_routines_enabled ON routines(enabled) WHERE enabled = TRUE;
+
+CREATE TABLE IF NOT EXISTS routine_runs (
+  id TEXT PRIMARY KEY,
+  routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  result_text TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS sandboxes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+  container_id TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'stopped',
+  image TEXT NOT NULL DEFAULT '',
+  workdir_host TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandboxes_user ON sandboxes(user_id);
+CREATE INDEX IF NOT EXISTS idx_sandboxes_status ON sandboxes(status);
+
+ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS computer_mode TEXT NOT NULL DEFAULT 'team';
+ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS desktop_port INT NOT NULL DEFAULT 0;
+ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS desktop_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS checkpoint_path TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS computer_mode TEXT NOT NULL DEFAULT 'team';
+
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS channel_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_user_channel
+  ON conversations(user_id, channel_id) WHERE channel_id IS NOT NULL AND channel_id <> '';
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(conversation_id, agent_id);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_user_agent
+  ON conversations(user_id, agent_id);
+
+
+ALTER TABLE routines ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT 'open-bot';
+ALTER TABLE routines ADD COLUMN IF NOT EXISTS next_run_at TIMESTAMPTZ;
+ALTER TABLE routines ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS bot_secrets (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT '',
+  auth_type TEXT NOT NULL DEFAULT 'bearer',
+  ciphertext TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, agent_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_secrets_user ON bot_secrets(user_id);
+CREATE INDEX IF NOT EXISTS idx_bot_secrets_agent ON bot_secrets(user_id, agent_id);
+
+CREATE TABLE IF NOT EXISTS bot_secret_requests (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL DEFAULT '',
+  conversation_id TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL DEFAULT '',
+  auth_type TEXT NOT NULL DEFAULT 'bearer',
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_secret_requests_user ON bot_secret_requests(user_id, status);
+
+CREATE TABLE IF NOT EXISTS user_machines (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  machine_key TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT '',
+  os TEXT NOT NULL DEFAULT '',
+  arch TEXT NOT NULL DEFAULT '',
+  app TEXT NOT NULL DEFAULT '',
+  app_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'offline',
+  last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, machine_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_machines_user ON user_machines(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_machines_last_seen ON user_machines(user_id, last_seen DESC);
+`)
+	if err != nil {
+		return err
+	}
+	if err := d.migrateOrgs(); err != nil {
+		return err
+	}
+	if err := d.migrateAuditLogs(); err != nil {
+		return err
+	}
+	return d.migrateVector()
+}
+
+// migrateVector enables pgvector when available; otherwise memories stay keyword-only.
+func (d *DB) migrateVector() error {
+	if _, err := d.SQL.Exec(`CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		fmt.Printf("warn: pgvector extension unavailable (%v); memory recall will use keywords\n", err)
+		return nil
+	}
+	// bge-m3 default dim=1024
+	if _, err := d.SQL.Exec(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding vector(1024)`); err != nil {
+		fmt.Printf("warn: memories.embedding column unavailable (%v)\n", err)
+		return nil
+	}
+	_, _ = d.SQL.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`)
+	return nil
+}
+
+func Now() time.Time {
+	return time.Now().UTC()
+}
+
+func FormatTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}

@@ -1,0 +1,1179 @@
+const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
+  /\/$/,
+  "",
+);
+
+const TOKEN_KEY = "openbot_token";
+const USER_KEY = "openbot_user";
+
+export type User = {
+  id: string;
+  username: string;
+  email?: string;
+  org_id?: string;
+  role?: "platform_admin" | "org_admin" | "member" | string;
+  created_at?: string;
+};
+
+
+export type Agent = {
+  id: string;
+  name: string;
+  description: string;
+  system_prompt?: string;
+  is_builtin?: boolean;
+  computer_mode?: "team" | "private" | string;
+  user_id?: string;
+  created_at?: string;
+  updated_at?: string;
+  /** Primary thread id (assistant-level). */
+  conversation_id?: string;
+  /** Last user/assistant message snippet for sidebar. */
+  last_message?: string;
+  conversation_updated_at?: string;
+};
+
+export type AgentInput = {
+  name: string;
+  description: string;
+  system_prompt: string;
+};
+
+export type Skill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  custom?: boolean;
+};
+
+export type Message = {
+  id: string;
+  role: "user" | "assistant" | string;
+  content: string;
+  agent_id?: string;
+  created_at?: string;
+};
+
+export type Conversation = {
+  id: string;
+  agent_id: string;
+  title: string;
+  channel_id?: string;
+  created_at: string;
+  updated_at?: string;
+  messages?: Message[];
+};
+
+export type LLMConnection = {
+  id: string;
+  user_id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  enable_tools: boolean;
+  is_default: boolean;
+  context_window?: number | null;
+  api_key_set: boolean;
+  api_key_hint?: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function getStoredUser(): User | null {
+  const raw = localStorage.getItem(USER_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as User;
+  } catch {
+    return null;
+  }
+}
+
+export function setSession(token: string, user: User) {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+export function clearSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const token = getToken();
+  return {
+    ...(extra || {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+async function readError(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  try {
+    const j = JSON.parse(text) as { error?: string; message?: string };
+    return j.error || j.message || text || `HTTP ${res.status}`;
+  } catch {
+    return text || `HTTP ${res.status}`;
+  }
+}
+
+export async function register(username: string, password: string): Promise<{ token: string; user: User }> {
+  const res = await fetch(`${API_BASE}/v1/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function login(username: string, password: string): Promise<{ token: string; user: User }> {
+  const res = await fetch(`${API_BASE}/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function fetchMe(): Promise<User> {
+  const res = await fetch(`${API_BASE}/v1/me`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function listAgents(): Promise<Agent[]> {
+  const res = await fetch(`${API_BASE}/v1/agents`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.agents ?? [];
+}
+
+export async function createAgent(body: AgentInput): Promise<Agent> {
+  const res = await fetch(`${API_BASE}/v1/agents`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateAgent(id: string, body: AgentInput): Promise<Agent> {
+  const res = await fetch(`${API_BASE}/v1/agents/${id}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteAgent(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/agents/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export async function listSkills(): Promise<Skill[]> {
+  const res = await fetch(`${API_BASE}/v1/skills`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.skills ?? [];
+}
+
+export async function setSkillEnabled(name: string, enabled: boolean): Promise<Skill> {
+  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+
+export async function uploadSkill(body: {
+  name: string;
+  description: string;
+  body_markdown: string;
+}): Promise<Skill> {
+  const res = await fetch(`${API_BASE}/v1/skills/upload`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteSkill(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+
+export async function createConversation(agentId: string): Promise<Conversation> {
+  const res = await fetch(`${API_BASE}/v1/conversations`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ agent_id: agentId, title: "新对话" }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** Get or create the single primary thread for (user, agent) — Grok-style bot-level chat. */
+export async function openPrimaryConversation(agentId: string): Promise<Conversation> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/conversation`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.conversation as Conversation;
+}
+
+export async function listConversations(): Promise<Conversation[]> {
+  const res = await fetch(`${API_BASE}/v1/conversations`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.conversations ?? [];
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export type ListMessagesResult = {
+  messages: Message[];
+  run_active?: boolean;
+};
+
+export async function listMessages(conversationId: string): Promise<Message[]> {
+  const res = await listMessagesWithStatus(conversationId);
+  return res.messages;
+}
+
+export async function listMessagesWithStatus(
+  conversationId: string,
+): Promise<ListMessagesResult> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return {
+    messages: data.messages ?? [],
+    run_active: Boolean(data.run_active),
+  };
+}
+
+export async function getConversationRunStatus(
+  conversationId: string,
+): Promise<{ active: boolean }> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/run`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return { active: Boolean(data.active) };
+}
+
+export async function listLLMConnections(): Promise<LLMConnection[]> {
+  const res = await fetch(`${API_BASE}/v1/llm-connections`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.connections ?? [];
+}
+
+export type LLMInput = {
+  name: string;
+  base_url: string;
+  api_key?: string;
+  model: string;
+  enable_tools?: boolean;
+  is_default?: boolean;
+  /** tokens; omit/null/empty = auto (model heuristic) */
+  context_window?: number | null;
+};
+
+export async function createLLMConnection(body: LLMInput): Promise<LLMConnection> {
+  const res = await fetch(`${API_BASE}/v1/llm-connections`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateLLMConnection(id: string, body: Partial<LLMInput>): Promise<LLMConnection> {
+  const res = await fetch(`${API_BASE}/v1/llm-connections/${id}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteLLMConnection(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/llm-connections/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export async function setDefaultLLMConnection(id: string): Promise<LLMConnection> {
+  const res = await fetch(`${API_BASE}/v1/llm-connections/${id}/default`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export type AttachmentMeta = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  path: string;
+};
+
+export type StatusEvent = {
+  phase?: string;
+  label?: string;
+  tool?: string;
+  [key: string]: unknown;
+};
+
+export type StreamHandlers = {
+  onToken: (text: string) => void;
+  onMeta?: (data: Record<string, unknown>) => void;
+  onStatus?: (data: StatusEvent) => void;
+  onError?: (message: string) => void;
+  onDone?: () => void;
+  /** Group multi-agent: called when a new bot starts streaming. */
+  onAgentStart?: (info: { agent_id: string; agent_name?: string; index?: number; total?: number }) => void;
+};
+
+export async function uploadConversationAttachment(
+  conversationId: string,
+  file: File,
+): Promise<AttachmentMeta> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/attachments`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function cancelConversationRun(conversationId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  // Idempotent: 204 even when no run is active; ignore 404 for older servers.
+  if (!res.ok && res.status !== 204 && res.status !== 404) {
+    throw new Error(await readError(res));
+  }
+}
+
+async function readSSEStream(
+  body: ReadableStream<Uint8Array>,
+  handlers: StreamHandlers,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName = "message";
+  let sawDone = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    for (const rawLine of parts) {
+      const line = rawLine.replace(/\r$/, "");
+      if (line.startsWith("event:")) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        const dataStr = line.slice(5).trim();
+        let data: Record<string, unknown> = {};
+        try {
+          data = JSON.parse(dataStr) as Record<string, unknown>;
+        } catch {
+          data = { raw: dataStr };
+        }
+        if (eventName === "token" && typeof data.text === "string") {
+          handlers.onToken(data.text);
+        } else if (eventName === "meta") {
+          if (data.phase === "agent_start" && typeof data.agent_id === "string") {
+            handlers.onAgentStart?.({
+              agent_id: data.agent_id,
+              agent_name: typeof data.agent_name === "string" ? data.agent_name : undefined,
+              index: typeof data.index === "number" ? data.index : undefined,
+              total: typeof data.total === "number" ? data.total : undefined,
+            });
+          }
+          handlers.onMeta?.(data);
+        } else if (eventName === "status") {
+          handlers.onStatus?.(data as StatusEvent);
+        } else if (eventName === "error") {
+          const msg =
+            typeof data.message === "string"
+              ? data.message
+              : typeof data.raw === "string"
+                ? data.raw
+                : JSON.stringify(data);
+          handlers.onError?.(msg);
+        } else if (eventName === "done") {
+          sawDone = true;
+          handlers.onDone?.();
+        }
+      } else if (line === "") {
+        eventName = "message";
+      }
+    }
+  }
+  if (!sawDone) handlers.onDone?.();
+}
+
+export async function sendMessageStream(
+  conversationId: string,
+  content: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+  attachments?: AttachmentMeta[],
+  agentIds?: string[],
+  client?: import("./lib/clientEnv").ClientContext,
+): Promise<void> {
+  const body: Record<string, unknown> = { content };
+  if (attachments && attachments.length > 0) {
+    body.attachments = attachments;
+  }
+  if (agentIds && agentIds.length > 0) {
+    body.agent_ids = agentIds;
+  }
+  if (client) {
+    body.client = client;
+  }
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
+    method: "POST",
+    headers: authHeaders({
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    }),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(await readError(res));
+  }
+  await readSSEStream(res.body, handlers);
+}
+
+/** Rejoin an in-flight server run after refresh / reconnect. Does not cancel on abort. */
+export async function subscribeConversationEvents(
+  conversationId: string,
+  handlers: StreamHandlers,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/events`, {
+    method: "GET",
+    headers: authHeaders({ Accept: "text/event-stream" }),
+    signal,
+  });
+  if (!res.ok || !res.body) {
+    throw new Error(await readError(res));
+  }
+  await readSSEStream(res.body, handlers);
+}
+
+
+export type Channel = {
+  id: string;
+  user_id: string;
+  name: string;
+  created_at: string;
+  members?: string[];
+  conversation_id?: string;
+};
+
+export type AgentBusMessage = {
+  id: string;
+  user_id: string;
+  from_agent_id: string;
+  to_agent_id?: string | null;
+  channel_id?: string | null;
+  priority: boolean;
+  body: string;
+  reply_to_id?: string | null;
+  created_at: string;
+  read_at?: string | null;
+};
+
+export type CompactConfig = {
+  max_messages: number;
+  max_chars: number;
+  keep_recent: number;
+  token_mode?: boolean;
+  default_context_window?: number;
+  context_window?: number;
+  reserve_output_tokens?: number;
+  budget_ratio?: number;
+  token_budget?: number;
+  min_context_window?: number;
+  max_context_window?: number;
+};
+
+export async function fetchCompactConfig(): Promise<CompactConfig | null> {
+  const res = await fetch(`${API_BASE}/v1/compact-config`, { headers: authHeaders() });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data.compact as CompactConfig) ?? null;
+}
+
+export async function listChannels(): Promise<Channel[]> {
+  const res = await fetch(`${API_BASE}/v1/channels`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.channels ?? [];
+}
+
+export async function createChannel(name: string, memberIds?: string[]): Promise<Channel> {
+  const res = await fetch(`${API_BASE}/v1/channels`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ name, member_ids: memberIds ?? [] }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteChannel(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/channels/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export async function openChannelConversation(channelId: string): Promise<{
+  channel: Channel;
+  conversation: Conversation;
+}> {
+  const res = await fetch(`${API_BASE}/v1/channels/${channelId}/conversation`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function addChannelMember(channelId: string, agentId: string): Promise<Channel> {
+  const res = await fetch(`${API_BASE}/v1/channels/${channelId}/members`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ agent_id: agentId }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function postAgentBusMessage(body: {
+  from_agent_id?: string;
+  to_agent_id?: string;
+  channel_id?: string;
+  priority?: boolean;
+  body: string;
+}): Promise<AgentBusMessage> {
+  const res = await fetch(`${API_BASE}/v1/agent-bus/messages`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function listAgentBusInbox(opts?: {
+  unread?: boolean;
+  agent_id?: string;
+}): Promise<AgentBusMessage[]> {
+  const q = new URLSearchParams();
+  if (opts?.unread) q.set("unread", "1");
+  if (opts?.agent_id) q.set("agent_id", opts.agent_id);
+  const qs = q.toString();
+  const res = await fetch(`${API_BASE}/v1/agent-bus/inbox${qs ? `?${qs}` : ""}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.messages ?? [];
+}
+
+export function agentBusWebSocketUrl(token?: string | null): string {
+  const t = (token ?? getToken() ?? "").trim();
+  const wsBase = API_BASE.replace(/^http/i, (scheme) =>
+    scheme.toLowerCase() === "https" ? "wss" : "ws",
+  );
+  const q = t ? `?token=${encodeURIComponent(t)}` : "";
+  return `${wsBase}/v1/agent-bus/ws${q}`;
+}
+
+export type AgentBusWSEvent = {
+  type: string;
+  message?: AgentBusMessage;
+};
+
+export async function markAgentBusRead(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/agent-bus/messages/${id}/read`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+
+export type MCPServer = {
+  id: string;
+  user_id: string;
+  name: string;
+  transport: "stdio" | "sse" | "http" | string;
+  command: string;
+  args: string[];
+  url: string;
+  env: Record<string, string>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MCPServerInput = {
+  name: string;
+  transport: "stdio" | "sse" | "http" | string;
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+  enabled?: boolean;
+};
+
+export type MCPToolSummary = {
+  name: string;
+  description?: string;
+};
+
+export async function listMCPServers(): Promise<MCPServer[]> {
+  const res = await fetch(`${API_BASE}/v1/mcp-servers`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.servers ?? [];
+}
+
+export async function createMCPServer(body: MCPServerInput): Promise<MCPServer> {
+  const res = await fetch(`${API_BASE}/v1/mcp-servers`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateMCPServer(
+  id: string,
+  body: Partial<MCPServerInput>,
+): Promise<MCPServer> {
+  const res = await fetch(`${API_BASE}/v1/mcp-servers/${id}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteMCPServer(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/mcp-servers/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export async function testMCPServer(
+  id: string,
+): Promise<{
+  ok: boolean;
+  tool_names?: string[];
+  tools?: MCPToolSummary[];
+  error?: string;
+  count?: number;
+}> {
+  const res = await fetch(`${API_BASE}/v1/mcp-servers/${id}/test`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function mcpListTools(serverId?: string): Promise<{
+  tools: Array<{
+    name: string;
+    description?: string;
+    server_id?: string;
+    server_name?: string;
+    qualified_name?: string;
+    error?: string;
+  }>;
+  count: number;
+}> {
+  const res = await fetch(`${API_BASE}/v1/mcp/list-tools`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(serverId ? { server_id: serverId } : {}),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function mcpCallTool(body: {
+  server_id: string;
+  tool: string;
+  arguments?: Record<string, unknown>;
+}): Promise<{
+  ok?: boolean;
+  text?: string;
+  error?: string;
+  content?: string[];
+}> {
+  const res = await fetch(`${API_BASE}/v1/mcp/call-tool`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+
+export type RoutineRun = {
+  id: string;
+  routine_id: string;
+  status: string;
+  result_text: string;
+  created_at: string;
+};
+
+export type Routine = {
+  id: string;
+  user_id: string;
+  name: string;
+  prompt: string;
+  schedule_cron: string;
+  enabled: boolean;
+  last_run_at?: string | null;
+  created_at: string;
+  updated_at: string;
+  last_run?: RoutineRun | null;
+};
+
+export type RoutineInput = {
+  name: string;
+  prompt: string;
+  schedule_cron: string;
+  enabled?: boolean;
+};
+
+export async function listRoutines(): Promise<Routine[]> {
+  const res = await fetch(`${API_BASE}/v1/routines`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.routines ?? [];
+}
+
+export async function createRoutine(body: RoutineInput): Promise<Routine> {
+  const res = await fetch(`${API_BASE}/v1/routines`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateRoutine(
+  id: string,
+  body: Partial<RoutineInput>,
+): Promise<Routine> {
+  const res = await fetch(`${API_BASE}/v1/routines/${id}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteRoutine(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/routines/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function runRoutine(
+  id: string,
+): Promise<{ routine: Routine; run: RoutineRun }> {
+  const res = await fetch(`${API_BASE}/v1/routines/${id}/run`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export { API_BASE };
+
+export type Sandbox = {
+  id: string;
+  user_id: string;
+  container_id: string;
+  status: string;
+  image: string;
+  workdir_host: string;
+  computer_mode?: string;
+  desktop_port?: number;
+  desktop_token?: string;
+  checkpoint_path?: string;
+  created_at: string;
+  updated_at: string;
+  last_error?: string;
+};
+
+export type SandboxExecResult = {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+};
+
+export type SandboxDirEntry = {
+  name: string;
+  is_dir: boolean;
+  size: number;
+};
+
+export async function getSandbox(ensure?: boolean): Promise<Sandbox> {
+  const q = ensure ? "?ensure=1" : "";
+  const res = await fetch(`${API_BASE}/v1/sandbox${q}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function ensureSandbox(opts?: {
+  desktop?: boolean;
+  agent_id?: string;
+  mode?: string;
+}): Promise<Sandbox> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/ensure`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      desktop: Boolean(opts?.desktop),
+      agent_id: opts?.agent_id || undefined,
+      mode: opts?.mode || undefined,
+    }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+/** Proxied noVNC URL (JWT via access_token query + cookie). */
+export function sandboxDesktopURL(extra?: { desktop_token?: string }): string {
+  const token = getToken() || "";
+  const q = new URLSearchParams();
+  if (token) q.set("access_token", token);
+  if (extra?.desktop_token) q.set("desktop_token", extra.desktop_token);
+  const qs = q.toString();
+  return `${API_BASE}/v1/sandbox/desktop${qs ? `?${qs}` : ""}`;
+}
+
+export async function stopSandbox(): Promise<Sandbox> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/stop`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function resetSandbox(): Promise<{ sandbox: Sandbox; warning?: string }> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/reset`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function execSandbox(body: {
+  cmd: string;
+  workdir?: string;
+  timeout_sec?: number;
+}): Promise<SandboxExecResult> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/exec`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function readSandboxFile(
+  path: string,
+  opts?: { agent_id?: string },
+): Promise<{ path: string; content: string }> {
+  const q = new URLSearchParams({ path });
+  if (opts?.agent_id) q.set("agent_id", opts.agent_id);
+  const res = await fetch(`${API_BASE}/v1/sandbox/files?${q.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function writeSandboxFile(path: string, content: string): Promise<{ ok: boolean; path: string }> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/files`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ path, content }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function listSandbox(path = "/workspace"): Promise<{
+  path: string;
+  entries: SandboxDirEntry[];
+}> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/ls?path=${encodeURIComponent(path)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+
+export type BotSecretMeta = {
+  id: string;
+  user_id: string;
+  agent_id: string;
+  name: string;
+  origin: string;
+  auth_type: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BotSecretRequest = {
+  id: string;
+  user_id: string;
+  agent_id: string;
+  conversation_id: string;
+  name: string;
+  origin: string;
+  auth_type: string;
+  reason: string;
+  status: string;
+  created_at: string;
+};
+
+export async function listBotSecrets(agentId?: string): Promise<BotSecretMeta[]> {
+  const q = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+  const res = await fetch(`${API_BASE}/v1/bot-secrets${q}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.secrets || [];
+}
+
+export async function createBotSecret(body: {
+  name: string;
+  value: string;
+  origin?: string;
+  auth_type?: string;
+  agent_id?: string;
+}): Promise<BotSecretMeta> {
+  const res = await fetch(`${API_BASE}/v1/bot-secrets`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteBotSecret(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/bot-secrets/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function listBotSecretRequests(): Promise<BotSecretRequest[]> {
+  const res = await fetch(`${API_BASE}/v1/bot-secret-requests`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.requests || [];
+}
+
+export async function resolveBotSecretRequest(
+  id: string,
+  body: { value?: string; name?: string; origin?: string; auth_type?: string; agent_id?: string; dismiss?: boolean },
+): Promise<unknown> {
+  const res = await fetch(`${API_BASE}/v1/bot-secret-requests/${encodeURIComponent(id)}/resolve`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function checkpointSandbox(): Promise<{ checkpoint_path: string; sandbox: Sandbox }> {
+  const res = await fetch(`${API_BASE}/v1/sandbox/checkpoint`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+
+// ---------------------------------------------------------------------------
+// Registered host machines (ListMachines-like)
+// ---------------------------------------------------------------------------
+
+export type Machine = {
+  id: string;
+  user_id: string;
+  machine_key: string;
+  label: string;
+  platform: string;
+  os: string;
+  arch: string;
+  app: string;
+  app_version: string;
+  status: "online" | "offline" | string;
+  last_seen: string;
+  created_at: string;
+  updated_at?: string;
+};
+
+export async function listMachines(): Promise<Machine[]> {
+  const res = await fetch(`${API_BASE}/v1/machines`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as { machines?: Machine[] };
+  return data.machines || [];
+}
+
+export async function registerMachine(input: {
+  machine_key: string;
+  label?: string;
+  platform?: string;
+  os?: string;
+  arch?: string;
+  app?: string;
+  app_version?: string;
+}): Promise<Machine> {
+  const res = await fetch(`${API_BASE}/v1/machines/register`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as { machine: Machine };
+  return data.machine;
+}
+
+export async function heartbeatMachine(id: string): Promise<Machine> {
+  const res = await fetch(`${API_BASE}/v1/machines/${encodeURIComponent(id)}/heartbeat`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as { machine: Machine };
+  return data.machine;
+}
+
+export async function deleteMachine(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/machines/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export async function fetchOIDCConfig(): Promise<{
+  enabled: boolean;
+  endpoint?: string;
+  client_id?: string;
+  redirect_uri?: string;
+}> {
+  const res = await fetch(`${API_BASE}/v1/auth/oidc/config`);
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function startOIDCLogin(): Promise<{ authorize_url: string; state: string }> {
+  const res = await fetch(`${API_BASE}/v1/auth/oidc/start?redirect=0`, {
+    headers: { Accept: "application/json" },
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function exchangeOIDCCode(
+  code: string,
+  state: string,
+): Promise<{ token: string; user: User }> {
+  const res = await fetch(`${API_BASE}/v1/auth/oidc/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ code, state }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+

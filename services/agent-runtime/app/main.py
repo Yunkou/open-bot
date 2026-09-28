@@ -1,0 +1,859 @@
+"""Phase 1 agent runtime: history, skills, memory, compaction, OpenAI or echo."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import sys
+from pathlib import Path
+from typing import Any, AsyncIterator
+
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from . import compact as compact_mod
+from .llm import (
+    LLMOverride,
+    TOOL_DEFS,
+    build_system_prompt,
+    chat_text,
+    normalize_messages,
+    openai_config,
+    run_tool_loop,
+    sanitize_fake_tool_narration,
+    stream_chat_tokens,
+    tools_enabled,
+)
+from .tool_markup import strip_tool_markup
+from .memory import MemoryStore, get_store
+from . import mem0_store
+from . import mcp_client
+from . import builtin_tools
+from .client_env import ClientContext
+from .skills import SkillRegistry, registry_for_user
+from . import langfuse_trace as lf
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+load_dotenv(_REPO_ROOT / ".env")
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+app = FastAPI(title="open-bot agent-runtime", version="0.2.0")
+skills = SkillRegistry()
+# default store resolved per-request via get_store(user_id)
+
+def skills_for(user_id: str | None) -> SkillRegistry:
+    """Global + per-user custom skills."""
+    if user_id and str(user_id).strip():
+        return registry_for_user(str(user_id).strip())
+    return skills
+
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class LLMConfig(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+    model: str | None = None
+    enable_tools: bool | None = None
+    context_window: int | None = None
+
+
+class RunRequest(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    content: str = Field(default="", min_length=0)
+    messages: list[ChatMessage] = Field(default_factory=list)
+    agent_id: str = Field(default="open-bot")
+    user_id: str | None = None
+    system_prompt: str | None = None
+    llm: LLMConfig | None = None
+    enabled_skills: list[str] | None = None
+    client: dict[str, Any] | None = None
+
+
+class MemoryCreate(BaseModel):
+    content: str = Field(..., min_length=1)
+    tier: str = Field(default="note")
+    tags: list[str] = Field(default_factory=list)
+    user_id: str | None = None
+
+
+
+class MCPServerBody(BaseModel):
+    id: str | None = None
+    name: str | None = None
+    transport: str = "stdio"
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    url: str | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class MCPTestRequest(BaseModel):
+    user_id: str | None = None
+    server: MCPServerBody
+
+
+class MCPListToolsRequest(BaseModel):
+    user_id: str | None = None
+    server_id: str | None = None
+    servers: list[MCPServerBody] | None = None
+
+
+class MCPCallToolRequest(BaseModel):
+    user_id: str | None = None
+    server_id: str | None = None
+    tool: str = Field(..., min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    server: MCPServerBody | None = None
+
+
+def _override_from_body(llm: LLMConfig | None) -> LLMOverride | None:
+    if llm is None:
+        return None
+    return LLMOverride(
+        base_url=llm.base_url,
+        api_key=llm.api_key,
+        model=llm.model,
+        enable_tools=llm.enable_tools,
+    )
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    skills.reload()
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    api_key, base, model = openai_config()
+    # Touch Mem0 lazily so health reflects init success/failure without crashing.
+    if mem0_store.mem0_wanted():
+        mem0_store.get_mem0()
+    mem0_status = mem0_store.status()
+    return {
+        "ok": True,
+        "service": "agent-runtime",
+        "has_openai_key": bool(api_key),
+        "model": model if api_key else None,
+        "base_url": base if api_key else None,
+        "skills": len(skills.list_meta()),
+        "memories_backend": get_store(None).backend_kind,
+        "memories_vector": get_store(None).vector_enabled,
+        "mem0_enabled": mem0_status.get("mem0_enabled"),
+        "mem0_collection": mem0_status.get("mem0_collection"),
+        "mem0_auto_add": mem0_status.get("mem0_auto_add"),
+        "mem0_init_error": mem0_status.get("mem0_init_error"),
+        "compact": compact_mod.compact_config(),
+        "mcp_example": "POST /v1/mcp/test | /v1/mcp/list-tools | /v1/mcp/call-tool",
+        **lf.status(),
+    }
+
+
+@app.get("/v1/compact-config")
+async def compact_config() -> dict:
+    return {"compact": compact_mod.compact_config()}
+
+@app.get("/v1/mcp/example")
+async def mcp_example() -> dict:
+    cmd, args = mcp_client.example_echo_command()
+    return {
+        "name": "echo",
+        "transport": "stdio",
+        "command": cmd,
+        "args": args,
+        "help": mcp_client.example_help_text(),
+    }
+
+
+@app.post("/v1/mcp/test")
+async def mcp_test(body: MCPTestRequest) -> dict:
+    cfg = mcp_client.MCPServerConfig.from_dict(body.server.model_dump())
+    return await mcp_client.test_server(cfg)
+
+
+@app.post("/v1/mcp/list-tools")
+async def mcp_list_tools(body: MCPListToolsRequest) -> dict:
+    servers: list[mcp_client.MCPServerConfig] = []
+    if body.servers:
+        servers = [mcp_client.MCPServerConfig.from_dict(s.model_dump()) for s in body.servers]
+    elif body.user_id:
+        servers = mcp_client.load_servers_from_pg(body.user_id, enabled_only=True)
+        if body.server_id:
+            servers = [s for s in servers if s.id == body.server_id]
+    tools = await mcp_client.list_tools_for_servers(servers)
+    return {
+        "tools": tools,
+        "count": len([t for t in tools if not t.get("error")]),
+        "servers": [{"id": s.id, "name": s.name, "transport": s.transport} for s in servers],
+    }
+
+
+@app.post("/v1/mcp/call-tool")
+async def mcp_call_tool(body: MCPCallToolRequest) -> dict:
+    servers: list[mcp_client.MCPServerConfig] = []
+    if body.server is not None:
+        servers = [mcp_client.MCPServerConfig.from_dict(body.server.model_dump())]
+    elif body.user_id:
+        servers = mcp_client.load_servers_from_pg(body.user_id, enabled_only=False)
+    if body.server_id:
+        servers = [s for s in servers if s.id == body.server_id] or servers
+    result = await mcp_client.resolve_and_call(
+        servers=servers,
+        qualified_or_tool=body.tool,
+        server_id=body.server_id,
+        arguments=body.arguments or {},
+    )
+    return result
+
+
+
+
+@app.get("/v1/skills")
+async def list_skills() -> dict:
+    return {
+        "skills": [
+            {"name": s.name, "description": s.description}
+            for s in skills.list_meta()
+        ]
+    }
+
+
+@app.get("/v1/skills/{name}")
+async def get_skill(name: str) -> dict:
+    full = skills.load(name)
+    if not full:
+        raise HTTPException(status_code=404, detail="skill not found")
+    return {
+        "name": full.name,
+        "description": full.description,
+        "body": full.body,
+    }
+
+
+@app.get("/v1/memories")
+async def list_memories(
+    q: str | None = None,
+    tier: str | None = None,
+    limit: int = Query(default=20, ge=1, le=200),
+    user_id: str | None = None,
+) -> dict:
+    store = get_store(user_id)
+    if q:
+        items = store.recall(q, tier=tier, top_k=limit)
+    else:
+        items = store.list(tier=tier, limit=limit)
+    return {"memories": [store.to_public(i) for i in items], "backend": store.backend_kind}
+
+
+@app.post("/v1/memories")
+async def create_memory(body: MemoryCreate) -> dict:
+    store = get_store(body.user_id)
+    try:
+        item = store.write(body.content, tier=body.tier, tags=body.tags)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    out = store.to_public(item)
+    out["backend"] = store.backend_kind
+    return out
+
+
+
+@app.post("/v1/runs")
+async def runs(body: RunRequest, request: Request) -> StreamingResponse:
+    return StreamingResponse(
+        run_events(body, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+async def run_events(body: RunRequest, request: Request | None = None) -> AsyncIterator[str]:
+    override = _override_from_body(body.llm)
+    api_key, base, model = openai_config(override)
+    mem = get_store(body.user_id)
+    history = normalize_messages(
+        [m.model_dump() for m in body.messages],
+        body.content,
+    )
+    history_count = len(history)
+    user_text = body.content.strip()
+    if not user_text and history:
+        for m in reversed(history):
+            if m["role"] == "user":
+                user_text = m["content"]
+                break
+
+    # Throw-safe enter/exit: helpers yield once, but avoid relying on `with`
+    # across async generator yields (GeneratorExit + cleanup raise).
+    _trace_cm = lf.trace_run(
+        body.conversation_id,
+        body.agent_id,
+        body.user_id,
+        user_text or body.content,
+        metadata={
+            "mode": "openai" if api_key else "echo",
+            "model": model if api_key else None,
+        },
+    )
+    root_obs = _trace_cm.__enter__()
+    try:
+        recalled = mem.recall(user_text or "", top_k=5)
+        memory_snippets = [f"[{i.tier}] {i.content}" for i in recalled]
+
+        mem0_hits: list[str] = []
+        if body.user_id and str(body.user_id).strip() and mem0_store.mem0_wanted():
+            mem0_hits = mem0_store.search_for_user(str(body.user_id).strip(), user_text or "")
+        memory_snippets = mem0_store.merge_snippets(memory_snippets, mem0_hits)
+
+        # None = all skills (legacy); explicit list (incl. empty) = filter.
+        enabled = body.enabled_skills
+        skill_reg = skills_for(body.user_id)
+        active_skills = skill_reg.filter_meta(enabled)
+
+        tools_on = tools_enabled(override)
+        mcp_servers: list[mcp_client.MCPServerConfig] = []
+        mcp_extra_tools: list[dict[str, Any]] = []
+        available_tool_names: list[str] | None = None
+        if tools_on:
+            available_tool_names = [
+                str((t.get("function") or {}).get("name") or "")
+                for t in TOOL_DEFS
+                if (t.get("function") or {}).get("name")
+            ]
+            if body.user_id and (override is None or override.enable_tools is not False):
+                try:
+                    mcp_servers = mcp_client.load_servers_from_pg(
+                        str(body.user_id).strip(), enabled_only=True
+                    )
+                    if mcp_servers:
+                        metas = await mcp_client.list_tools_for_servers(mcp_servers)
+                        mcp_extra_tools = mcp_client.openai_tools_from_mcp(metas)
+                        for t in mcp_extra_tools:
+                            n = str((t.get("function") or {}).get("name") or "")
+                            if n:
+                                available_tool_names.append(n)
+                except Exception:  # noqa: BLE001
+                    mcp_extra_tools = []
+
+        client_ctx = ClientContext.from_any(body.client)
+        system = build_system_prompt(
+            agent_id=body.agent_id,
+            skills_catalog=skill_reg.catalog_for_prompt(enabled),
+            memory_snippets=memory_snippets,
+            tools_enabled=tools_on,
+            available_tool_names=available_tool_names,
+            client=client_ctx,
+        )
+        if body.system_prompt and body.system_prompt.strip():
+            system = body.system_prompt.strip() + "\n\n" + system
+
+        dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
+
+        async def _summarize(msgs: list[dict[str, Any]]) -> str:
+            return await chat_text(msgs, api_key=api_key or "", override=override)
+
+        llm_cw = body.llm.context_window if body.llm else None
+        llm_model = (body.llm.model if body.llm else None) or model
+        compacted, compact_meta = await compact_mod.compact_messages(
+            dialog,
+            api_key=api_key or None,
+            chat_fn=_summarize if api_key else None,
+            context_window=llm_cw,
+            model=llm_model,
+        )
+
+        llm_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system},
+            *compacted,
+        ]
+
+        meta = {
+            "conversation_id": body.conversation_id,
+            "agent_id": body.agent_id,
+            "history_count": history_count,
+            "skills_count": len(active_skills),
+            "enabled_skills": [s.name for s in active_skills],
+            "memory_recalled": len(recalled),
+            "mem0_recalled": len(mem0_hits),
+            "compacted": compact_meta.get("compacted", False),
+            "compact_reason": compact_meta.get("compact_reason") or "",
+            "summary_new": bool(compact_meta.get("summary_new")),
+            "llm_override": override is not None,
+            "compact_thresholds": compact_meta.get("thresholds") or compact_mod.compact_config(context_window=llm_cw, model=llm_model),
+            "tools_enabled": tools_on,
+        }
+        if compact_meta.get("summary_new") and compact_meta.get("summary"):
+            meta["summary"] = compact_meta["summary"]
+
+        if api_key:
+            meta.update({"mode": "openai", "model": model, "base_url": base})
+            lf.update_obs(
+                root_obs,
+                metadata={
+                    "mode": "openai",
+                    "model": model,
+                    "tools_enabled": tools_on,
+                    "history_count": history_count,
+                },
+            )
+            yield sse("meta", meta)
+            async for chunk in openai_path(
+                llm_messages,
+                api_key,
+                override,
+                mem,
+                enabled_skills=enabled,
+                user_id=body.user_id,
+                agent_id=body.agent_id,
+                conversation_id=body.conversation_id,
+                skill_reg=skill_reg,
+                mcp_servers=mcp_servers,
+                mcp_extra_tools=mcp_extra_tools,
+                root_obs=root_obs,
+                request=request,
+            ):
+                yield chunk
+        else:
+            meta["mode"] = "echo"
+            lf.update_obs(root_obs, metadata={"mode": "echo"})
+            yield sse("meta", meta)
+            async for chunk in echo_events(
+                body,
+                history_count=history_count,
+                llm_messages=llm_messages,
+                skill_names=[s.name for s in active_skills],
+            ):
+                yield chunk
+            lf.update_obs(root_obs, output=lf.truncate("(echo mode)"))
+    except asyncio.CancelledError:
+        if root_obs is not None:
+            lf.update_obs(root_obs, metadata={"cancelled": True})
+        raise
+    except Exception as e:  # noqa: BLE001
+        lf.update_obs(root_obs, level="ERROR", status_message=str(e)[:500])
+        raise
+    finally:
+        try:
+            _trace_cm.__exit__(*sys.exc_info())
+        except Exception:  # noqa: BLE001
+            # Soft-fail: never convert GeneratorExit / body errors into a second exception
+            pass
+        lf.flush()
+
+
+async def echo_events(
+    body: RunRequest,
+    *,
+    history_count: int,
+    llm_messages: list[dict[str, Any]],
+    skill_names: list[str] | None = None,
+) -> AsyncIterator[str]:
+    if skill_names is None:
+        skill_names_s = ", ".join(s.name for s in skills.list_meta()) or "（无）"
+    else:
+        skill_names_s = ", ".join(skill_names) or "（无）"
+    preview = []
+    for m in llm_messages:
+        if m["role"] == "system":
+            continue
+        preview.append(f"{m['role']}:{str(m['content'])[:40]}")
+    preview_s = " → ".join(preview[-6:]) if preview else "(empty)"
+    reply = (
+        "（echo 模式）当前未配置可用的 API Key，因此不会调用真实模型。\n"
+        f"agent_id={body.agent_id} history_count={history_count}\n"
+        f"skills=[{skill_names_s}]\n"
+        f"LLM 输入侧对话预览：{preview_s}\n"
+        f"你刚才说：{body.content or '(见 messages)'}\n"
+        "请在设置中配置 LLM 连接，或在根目录 .env 设置 OPENAI_API_KEY。"
+    )
+    try:
+        for ch in reply:
+            yield sse("token", {"text": ch})
+            await asyncio.sleep(0.004)
+        yield sse("done", {"ok": True, "mode": "echo", "history_count": history_count})
+    except asyncio.CancelledError:
+        yield sse("done", {"ok": False, "mode": "echo", "cancelled": True})
+        raise
+
+
+async def openai_path(
+    llm_messages: list[dict[str, Any]],
+    api_key: str,
+    override: LLMOverride | None,
+    mem: MemoryStore,
+    enabled_skills: list[str] | None = None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    conversation_id: str | None = None,
+    skill_reg: SkillRegistry | None = None,
+    mcp_servers: list[mcp_client.MCPServerConfig] | None = None,
+    mcp_extra_tools: list[dict[str, Any]] | None = None,
+    root_obs: Any | None = None,
+    request: Request | None = None,
+) -> AsyncIterator[str]:
+    allow = set(enabled_skills) if enabled_skills is not None else None
+    skill_reg = skill_reg or skills_for(user_id)
+    mcp_servers = list(mcp_servers or [])
+    mcp_extra_tools = list(mcp_extra_tools or [])
+    tools_on = tools_enabled(override)
+    _, _, model_name = openai_config(override)
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        with lf.observation_tool(name, args) as tool_obs:
+            try:
+                out = await _tool_handler_impl(name, args)
+                lf.update_obs(tool_obs, output=lf.truncate(out))
+                return out
+            except Exception as e:  # noqa: BLE001
+                lf.update_obs(tool_obs, level="ERROR", status_message=str(e)[:500], output=str(e)[:500])
+                raise
+
+    async def _tool_handler_impl(name: str, args: dict[str, Any]) -> str:
+        if name in builtin_tools.BUILTIN_TOOL_NAMES:
+            out = await builtin_tools.dispatch(name, args)
+            if out is not None:
+                return out
+        if name == "load_skill":
+            skill_name = str(args.get("name") or "")
+            if allow is not None and skill_name not in allow:
+                return json.dumps({"error": "skill disabled", "name": skill_name})
+            full = skill_reg.load(skill_name)
+            if not full:
+                return json.dumps({"error": "skill not found", "name": skill_name})
+            return json.dumps(
+                {
+                    "name": full.name,
+                    "description": full.description,
+                    "body": full.body,
+                },
+                ensure_ascii=False,
+            )
+        if name == "memory_write":
+            try:
+                content = str(args.get("content") or "")
+                item = mem.write(
+                    content,
+                    tier=str(args.get("tier") or "note"),
+                    tags=args.get("tags") or [],
+                )
+                # Nice-to-have: mirror explicit writes into Mem0 as raw text.
+                if user_id and content.strip() and mem0_store.mem0_wanted():
+                    try:
+                        m0 = mem0_store.get_mem0()
+                        if m0 is not None:
+                            m0.add(content.strip(), user_id=str(user_id).strip(), infer=False)
+                    except Exception:  # noqa: BLE001
+                        pass
+                return json.dumps(mem.to_public(item), ensure_ascii=False)
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
+        if name == "memory_recall":
+            items = mem.recall(
+                str(args.get("query") or ""),
+                tier=args.get("tier"),
+                top_k=int(args.get("top_k") or 5),
+            )
+            return json.dumps(
+                [mem.to_public(i) for i in items],
+                ensure_ascii=False,
+            )
+        if name == "send_to_agent":
+            from . import agent_bus
+
+            try:
+                result = agent_bus.send_agent_message(
+                    user_id=str(user_id or ""),
+                    from_agent_id=str(agent_id or "open-bot"),
+                    body=str(args.get("body") or ""),
+                    to_agent_id=(str(args["to_agent_id"]) if args.get("to_agent_id") else None),
+                    channel_id=(str(args["channel_id"]) if args.get("channel_id") else None),
+                    priority=bool(args.get("priority") or False),
+                )
+                return json.dumps(result, ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+
+        if name == "sandbox_ensure":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.ensure(
+                        str(user_id or ""),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "sandbox_shell":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.shell(
+                        str(user_id or ""),
+                        str(args.get("cmd") or ""),
+                        workdir=(str(args["workdir"]) if args.get("workdir") else None),
+                        timeout_sec=(int(args["timeout_sec"]) if args.get("timeout_sec") is not None else None),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "sandbox_read":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.read_file(
+                        str(user_id or ""),
+                        str(args.get("path") or ""),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "sandbox_write":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.write_file(
+                        str(user_id or ""),
+                        str(args.get("path") or ""),
+                        str(args.get("content") or ""),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "sandbox_ls":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.list_dir(
+                        str(user_id or ""),
+                        str(args.get("path") or "/workspace"),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "list_machines":
+            from . import machines as machines_mod
+
+            try:
+                return json.dumps(
+                    machines_mod.list_machines(str(user_id or "")),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e), "machines": [], "count": 0})
+        if name == "host_ls":
+            mid = str(args.get("machine_id") or "").strip()
+            path = str(args.get("path") or "").strip() or "~"
+            return json.dumps(
+                {
+                    "ok": False,
+                    "stub": True,
+                    "machine_id": mid or None,
+                    "path": path,
+                    "message": (
+                        "本机文件访问尚未接通；当前仅能 list_machines 查看已注册电脑。"
+                        "请勿把内部运行环境目录说成用户的 Downloads/桌面。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        if name == "host_read":
+            mid = str(args.get("machine_id") or "").strip()
+            path = str(args.get("path") or "").strip()
+            return json.dumps(
+                {
+                    "ok": False,
+                    "stub": True,
+                    "machine_id": mid or None,
+                    "path": path,
+                    "message": (
+                        "本机文件读取尚未接通；当前仅能 list_machines。"
+                        "若需临时读写，请使用 sandbox_* 工具（对用户只谈结果，不提内部环境）。"
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        if name == "request_secret":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.request_secret(
+                        str(user_id or ""),
+                        agent_id=str(agent_id or "") or None,
+                        conversation_id=str(conversation_id or "") or None,
+                        name=str(args.get("name") or ""),
+                        origin=str(args.get("origin") or ""),
+                        auth_type=str(args.get("auth_type") or "bearer"),
+                        reason=str(args.get("reason") or ""),
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+        if name == "secret_http":
+            from . import sandbox as sbx
+
+            try:
+                return json.dumps(
+                    sbx.secret_http(
+                        str(user_id or ""),
+                        str(args.get("name") or ""),
+                        agent_id=str(agent_id or "") or None,
+                        method=str(args.get("method") or "GET"),
+                        url=str(args.get("url") or ""),
+                        body=str(args.get("body") or ""),
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)})
+
+        if name.startswith("mcp__") or mcp_client.parse_qualified_tool(name):
+            result = await mcp_client.resolve_and_call(
+                servers=mcp_servers,
+                qualified_or_tool=name,
+                arguments=args,
+            )
+            return json.dumps(result, ensure_ascii=False)
+        return json.dumps({"error": f"unknown tool {name}"})
+
+    try:
+        yield sse("status", {"phase": "thinking", "label": "正在思考…"})
+        lf.event_status("thinking", "正在思考…")
+
+        status_q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def on_status(payload: dict[str, Any]) -> None:
+            phase = str(payload.get("phase") or "")
+            if phase:
+                lf.event_status(phase, str(payload.get("label") or ""))
+            await status_q.put(payload)
+
+        with lf.observation_generation(
+            name="open-bot.llm",
+            model=model_name,
+            input_messages=llm_messages,
+            metadata={"tools_enabled": tools_on},
+        ) as gen_obs:
+            loop_task = asyncio.create_task(
+                run_tool_loop(
+                    llm_messages,
+                    api_key=api_key,
+                    tool_handler=tool_handler,
+                    override=override,
+                    extra_tools=mcp_extra_tools or None,
+                    on_status=on_status,
+                )
+            )
+            try:
+                while not loop_task.done():
+                    if request is not None and await request.is_disconnected():
+                        loop_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await loop_task
+                        raise asyncio.CancelledError()
+                    try:
+                        payload = await asyncio.wait_for(status_q.get(), timeout=0.08)
+                        yield sse("status", payload)
+                    except asyncio.TimeoutError:
+                        await asyncio.sleep(0)
+                while not status_q.empty():
+                    yield sse("status", status_q.get_nowait())
+                final, used_tools, usage_details = await loop_task
+            except asyncio.CancelledError:
+                if not loop_task.done():
+                    loop_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await loop_task
+                if root_obs is not None:
+                    lf.update_obs(root_obs, metadata={"cancelled": True})
+                with contextlib.suppress(Exception):
+                    yield sse("done", {"ok": False, "mode": "openai", "cancelled": True})
+                raise
+            if used_tools:
+                yield sse("meta", {"tools_used": used_tools})
+            assistant_parts: list[str] = []
+            if not final:
+                # Streaming fallback: most OpenAI-compatible gateways omit usage
+                # on SSE chunks unless stream_options.include_usage is set; we
+                # leave usage_details as returned from the (empty) tool loop.
+                async for text in stream_chat_tokens(
+                    llm_messages, api_key=api_key, override=override
+                ):
+                    if request is not None and await request.is_disconnected():
+                        raise asyncio.CancelledError()
+                    assistant_parts.append(text)
+                streamed = "".join(assistant_parts)
+                streamed = strip_tool_markup(streamed)
+                if not tools_on:
+                    streamed = sanitize_fake_tool_narration(streamed)
+                assistant_parts = [streamed] if streamed else []
+                for i in range(0, len(streamed), 24):
+                    yield sse("token", {"text": streamed[i : i + 24]})
+                    await asyncio.sleep(0.002)
+            else:
+                final = strip_tool_markup(final)
+                if not tools_on:
+                    final = sanitize_fake_tool_narration(final)
+                assistant_parts.append(final)
+                for i in range(0, len(final), 24):
+                    yield sse("token", {"text": final[i : i + 24]})
+                    await asyncio.sleep(0.002)
+            assistant_reply = "".join(assistant_parts)
+            # usage_details already Langfuse-shaped (or None) from run_tool_loop
+            gen_update: dict[str, Any] = {
+                "output": lf.truncate(assistant_reply),
+                "model": model_name,
+            }
+            if usage_details:
+                gen_update["usage_details"] = usage_details
+            lf.update_obs(gen_obs, **gen_update)
+            if root_obs is not None:
+                root_meta: dict[str, Any] = {"tools_used": used_tools or []}
+                if usage_details:
+                    root_meta["usage_tokens"] = usage_details
+                lf.update_obs(
+                    root_obs,
+                    output=lf.truncate(assistant_reply),
+                    metadata=root_meta,
+                )
+            if user_id and assistant_reply.strip() and mem0_store.mem0_auto_add():
+                history_for_mem0 = [m for m in llm_messages if m.get("role") in ("user", "assistant")]
+                turn = mem0_store.last_turn_messages(history_for_mem0, assistant_reply, window=4)
+                mem0_store.add_conversation_bg(str(user_id).strip(), turn)
+            yield sse("done", {"ok": True, "mode": "openai", "tools_used": used_tools})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        if root_obs is not None:
+            lf.update_obs(root_obs, level="ERROR", status_message=str(e)[:500])
+        yield sse("error", {"message": str(e)})
+        yield sse("done", {"ok": False, "mode": "openai"})
+
+
+
+def sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

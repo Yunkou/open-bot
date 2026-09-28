@@ -1,0 +1,39 @@
+# Casdoor IAM (OIDC) — profile: casdoor
+# Host ports: postgres 5434, UI/OIDC 8000
+# First login: http://localhost:8000 → built-in/admin / 123
+services:
+  casdoor-postgres:
+    profiles: [casdoor]
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: casdoor
+      POSTGRES_PASSWORD: casdoor
+      POSTGRES_DB: casdoor
+    ports:
+      - "5434:5432"
+    volumes:
+      - casdoor_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casdoor -d casdoor"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  casdoor:
+    profiles: [casdoor]
+    image: casbin/casdoor:latest
+    restart: unless-stopped
+    depends_on:
+      casdoor-postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      RUNNING_IN_DOCKER: "true"
+    volumes:
+      # Bind path is relative to this fragment (deploy/compose/), not --project-directory
+      - ../casdoor/conf:/conf
+
+volumes:
+  casdoor_pg:

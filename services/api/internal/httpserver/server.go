@@ -1,0 +1,1713 @@
+package httpserver
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/tangxin/open-bot/services/api/internal/auth"
+	"github.com/tangxin/open-bot/services/api/internal/db"
+	"github.com/tangxin/open-bot/services/api/internal/sandbox"
+)
+
+type ctxKey int
+
+const userIDKey ctxKey = 1
+
+type Server struct {
+	runtimeURL string
+	client     *http.Client
+	db         *db.DB
+	hub        *busHub
+	sbx        *sandbox.Manager
+	runs       *activeRuns
+}
+
+func Listen(addr, runtimeURL string, database *db.DB) error {
+	if err := database.PurgeBuiltinAgents(); err != nil {
+		return fmt.Errorf("purge builtin agents: %w", err)
+	}
+	s := &Server{
+		runtimeURL: strings.TrimRight(runtimeURL, "/"),
+		client:     &http.Client{Timeout: 0},
+		db:         database,
+		hub:        newBusHub(),
+		sbx:        sandbox.NewManager(sandbox.LoadConfig()),
+		runs:       newActiveRuns(),
+	}
+	// In-process routines scheduler (disable with ROUTINES_INPROCESS=0 when using make dev-worker).
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("ROUTINES_INPROCESS"))); v != "0" && v != "false" && v != "off" {
+		s.StartRoutineScheduler(context.Background())
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+
+	// A2A adapter (optional A2A_TOKEN; see docs)
+	mux.HandleFunc("GET /.well-known/agent-card.json", s.handleAgentCard)
+	mux.HandleFunc("POST /a2a/v1", s.handleA2AJSONRPC)
+
+	mux.HandleFunc("POST /v1/auth/register", s.handleRegister)
+	mux.HandleFunc("POST /v1/auth/login", s.handleLogin)
+	mux.HandleFunc("GET /v1/auth/oidc/config", s.handleOIDCConfig)
+	mux.HandleFunc("GET /v1/auth/oidc/start", s.handleOIDCStart)
+	mux.HandleFunc("POST /v1/auth/oidc/exchange", s.handleOIDCExchange)
+	mux.HandleFunc("GET /v1/me", s.requireAuth(s.handleMe))
+
+	// Admin auth (dedicated; members get 403 — chat users use /v1/auth/login)
+	mux.HandleFunc("POST /v1/admin/auth/login", s.handleAdminLogin)
+	mux.HandleFunc("POST /v1/admin/auth/oidc/exchange", s.handleAdminOIDCExchange)
+
+	// Admin (org_admin+)
+	mux.HandleFunc("GET /v1/admin/org", s.requireOrgAdmin(s.handleAdminOrg))
+	mux.HandleFunc("GET /v1/admin/members", s.requireOrgAdmin(s.handleAdminMembers))
+	mux.HandleFunc("POST /v1/admin/members/invite", s.requireOrgAdmin(s.handleAdminInvite))
+	mux.HandleFunc("PATCH /v1/admin/members/{id}", s.requireOrgAdmin(s.handleAdminPatchMember))
+	mux.HandleFunc("GET /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminGetLLM))
+	mux.HandleFunc("PUT /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminPutLLM))
+	mux.HandleFunc("GET /v1/admin/usage", s.requireOrgAdmin(s.handleAdminUsage))
+	mux.HandleFunc("GET /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
+	mux.HandleFunc("PUT /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
+	mux.HandleFunc("GET /v1/admin/audit-logs", s.requireOrgAdmin(s.handleAdminAuditLogs))
+
+	mux.HandleFunc("GET /v1/admin/users", s.requireOrgAdmin(s.handleAdminListUsers))
+	mux.HandleFunc("POST /v1/admin/users", s.requireOrgAdmin(s.handleAdminCreateUser))
+	mux.HandleFunc("PATCH /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminPatchUser))
+	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminDeleteUser))
+
+	mux.HandleFunc("GET /v1/admin/bots", s.requireOrgAdmin(s.handleAdminListBots))
+	mux.HandleFunc("POST /v1/admin/bots", s.requireOrgAdmin(s.handleAdminCreateBot))
+	mux.HandleFunc("PATCH /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminPatchBot))
+	mux.HandleFunc("DELETE /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminDeleteBot))
+
+	mux.HandleFunc("GET /v1/admin/traces/status", s.requireOrgAdmin(s.handleAdminTracesStatus))
+	mux.HandleFunc("GET /v1/admin/traces", s.requireOrgAdmin(s.handleAdminListTraces))
+	mux.HandleFunc("GET /v1/admin/traces/{id}", s.requireOrgAdmin(s.handleAdminGetTrace))
+
+	mux.HandleFunc("GET /v1/llm-connections", s.requireAuth(s.handleListLLM))
+	mux.HandleFunc("POST /v1/llm-connections", s.requireAuth(s.handleCreateLLM))
+	mux.HandleFunc("PATCH /v1/llm-connections/{id}", s.requireAuth(s.handlePatchLLM))
+	mux.HandleFunc("DELETE /v1/llm-connections/{id}", s.requireAuth(s.handleDeleteLLM))
+	mux.HandleFunc("POST /v1/llm-connections/{id}/default", s.requireAuth(s.handleDefaultLLM))
+
+	mux.HandleFunc("GET /v1/agents", s.requireAuth(s.handleListAgents))
+	mux.HandleFunc("GET /v1/agents/{id}/conversation", s.requireAuth(s.handlePrimaryAgentConversation))
+	mux.HandleFunc("POST /v1/agents", s.requireAuth(s.handleCreateAgent))
+	mux.HandleFunc("PATCH /v1/agents/{id}", s.requireAuth(s.handlePatchAgent))
+	mux.HandleFunc("DELETE /v1/agents/{id}", s.requireAuth(s.handleDeleteAgent))
+
+	mux.HandleFunc("GET /v1/skills", s.requireAuth(s.handleListSkills))
+	mux.HandleFunc("POST /v1/skills/upload", s.requireAuth(s.handleUploadSkill))
+	mux.HandleFunc("PUT /v1/skills/{name}", s.requireAuth(s.handlePutSkill))
+	mux.HandleFunc("DELETE /v1/skills/{name}", s.requireAuth(s.handleDeleteSkill))
+	mux.HandleFunc("GET /v1/memories", s.requireAuth(s.handleListMemories))
+	mux.HandleFunc("POST /v1/memories", s.requireAuth(s.handleCreateMemory))
+
+	mux.HandleFunc("GET /v1/conversations", s.requireAuth(s.handleListConversations))
+	mux.HandleFunc("POST /v1/conversations", s.requireAuth(s.handleCreateConversation))
+	mux.HandleFunc("DELETE /v1/conversations/{id}", s.requireAuth(s.handleDeleteConversation))
+	mux.HandleFunc("GET /v1/conversations/{id}/messages", s.requireAuth(s.handleListMessages))
+	mux.HandleFunc("POST /v1/conversations/{id}/messages", s.requireAuth(s.handleSendMessage))
+	mux.HandleFunc("POST /v1/conversations/{id}/cancel", s.requireAuth(s.handleCancelConversationRun))
+	mux.HandleFunc("GET /v1/conversations/{id}/events", s.requireAuth(s.handleConversationEvents))
+	mux.HandleFunc("GET /v1/conversations/{id}/run", s.requireAuth(s.handleConversationRunStatus))
+	mux.HandleFunc("POST /v1/conversations/{id}/attachments", s.requireAuth(s.handleUploadAttachment))
+
+	mux.HandleFunc("GET /v1/channels", s.requireAuth(s.handleListChannels))
+	mux.HandleFunc("POST /v1/channels", s.requireAuth(s.handleCreateChannel))
+	mux.HandleFunc("DELETE /v1/channels/{id}", s.requireAuth(s.handleDeleteChannel))
+	mux.HandleFunc("POST /v1/channels/{id}/members", s.requireAuth(s.handleAddChannelMember))
+	mux.HandleFunc("GET /v1/channels/{id}/conversation", s.requireAuth(s.handleChannelConversation))
+	mux.HandleFunc("POST /v1/agent-bus/messages", s.requireAuth(s.handlePostAgentBusMessage))
+	mux.HandleFunc("GET /v1/agent-bus/inbox", s.requireAuth(s.handleAgentBusInbox))
+	mux.HandleFunc("POST /v1/agent-bus/messages/{id}/read", s.requireAuth(s.handleMarkAgentBusRead))
+	mux.HandleFunc("GET /v1/agent-bus/ws", s.handleAgentBusWS)
+	// Internal: runtime send_to_agent → same deliver path (priority wake + WS)
+	mux.HandleFunc("POST /internal/agent-bus/messages", s.requireInternal(s.handleInternalPostAgentBusMessage))
+	mux.HandleFunc("GET /v1/compact-config", s.requireAuth(s.handleCompactConfig))
+
+	mux.HandleFunc("GET /v1/mcp-servers", s.requireAuth(s.handleListMCPServers))
+	mux.HandleFunc("POST /v1/mcp-servers", s.requireAuth(s.handleCreateMCPServer))
+	mux.HandleFunc("PATCH /v1/mcp-servers/{id}", s.requireAuth(s.handlePatchMCPServer))
+	mux.HandleFunc("DELETE /v1/mcp-servers/{id}", s.requireAuth(s.handleDeleteMCPServer))
+	mux.HandleFunc("POST /v1/mcp-servers/{id}/test", s.requireAuth(s.handleTestMCPServer))
+	mux.HandleFunc("POST /v1/mcp/list-tools", s.requireAuth(s.handleMCPListTools))
+	mux.HandleFunc("POST /v1/mcp/call-tool", s.requireAuth(s.handleMCPCallTool))
+
+	mux.HandleFunc("GET /v1/routines", s.requireAuth(s.handleListRoutines))
+	mux.HandleFunc("POST /v1/routines", s.requireAuth(s.handleCreateRoutine))
+	mux.HandleFunc("PATCH /v1/routines/{id}", s.requireAuth(s.handlePatchRoutine))
+	mux.HandleFunc("DELETE /v1/routines/{id}", s.requireAuth(s.handleDeleteRoutine))
+	mux.HandleFunc("POST /v1/routines/{id}/run", s.requireAuth(s.handleRunRoutine))
+
+	// Sandbox computer (Phase 1 MVP)
+	mux.HandleFunc("GET /v1/sandbox", s.requireAuth(s.handleGetSandbox))
+	mux.HandleFunc("POST /v1/sandbox/ensure", s.requireAuth(s.handleEnsureSandbox))
+	mux.HandleFunc("POST /v1/sandbox/stop", s.requireAuth(s.handleStopSandbox))
+	mux.HandleFunc("POST /v1/sandbox/reset", s.requireAuth(s.handleResetSandbox))
+	mux.HandleFunc("POST /v1/sandbox/exec", s.requireAuth(s.handleExecSandbox))
+	mux.HandleFunc("GET /v1/sandbox/files", s.requireAuth(s.handleReadSandboxFile))
+	mux.HandleFunc("PUT /v1/sandbox/files", s.requireAuth(s.handleWriteSandboxFile))
+	mux.HandleFunc("GET /v1/sandbox/ls", s.requireAuth(s.handleListSandbox))
+	mux.HandleFunc("POST /internal/sandbox/ensure", s.requireInternal(s.handleInternalSandboxEnsure))
+	mux.HandleFunc("POST /internal/sandbox/exec", s.requireInternal(s.handleInternalSandboxExec))
+	mux.HandleFunc("POST /internal/sandbox/read", s.requireInternal(s.handleInternalSandboxRead))
+	mux.HandleFunc("POST /internal/sandbox/write", s.requireInternal(s.handleInternalSandboxWrite))
+	mux.HandleFunc("POST /internal/sandbox/ls", s.requireInternal(s.handleInternalSandboxLS))
+	mux.HandleFunc("POST /v1/sandbox/checkpoint", s.requireAuth(s.handleCheckpointSandbox))
+	// Go ServeMux: trailing-slash patterns conflict with {path...} (empty path).
+	mux.HandleFunc("GET /v1/sandbox/desktop", s.requireAuth(s.handleSandboxDesktop))
+	mux.HandleFunc("GET /v1/sandbox/desktop/{path...}", s.requireAuth(s.handleSandboxDesktop))
+	mux.HandleFunc("POST /v1/sandbox/desktop/{path...}", s.requireAuth(s.handleSandboxDesktop))
+
+	// bot_secrets (JWT metadata only; never plaintext)
+	mux.HandleFunc("GET /v1/bot-secrets", s.requireAuth(s.handleListBotSecrets))
+	mux.HandleFunc("POST /v1/bot-secrets", s.requireAuth(s.handleCreateBotSecret))
+	mux.HandleFunc("DELETE /v1/bot-secrets/{id}", s.requireAuth(s.handleDeleteBotSecret))
+	mux.HandleFunc("GET /v1/bot-secret-requests", s.requireAuth(s.handleListSecretRequests))
+	mux.HandleFunc("POST /v1/bot-secret-requests/{id}/resolve", s.requireAuth(s.handleResolveSecretRequest))
+	mux.HandleFunc("POST /internal/bot-secrets/request", s.requireInternal(s.handleInternalRequestSecret))
+	mux.HandleFunc("POST /internal/bot-secrets/decrypt", s.requireInternal(s.handleInternalDecryptSecret))
+	mux.HandleFunc("POST /internal/bot-secrets/http", s.requireInternal(s.handleInternalSecretHTTP))
+	mux.HandleFunc("POST /internal/routines/run", s.requireInternal(s.handleInternalRunRoutine))
+
+	// Registered host machines (ListMachines-like)
+	mux.HandleFunc("GET /v1/machines", s.requireAuth(s.handleListMachines))
+	mux.HandleFunc("POST /v1/machines/register", s.requireAuth(s.handleRegisterMachine))
+	mux.HandleFunc("POST /v1/machines/{id}/heartbeat", s.requireAuth(s.handleHeartbeatMachine))
+	mux.HandleFunc("DELETE /v1/machines/{id}", s.requireAuth(s.handleDeleteMachine))
+	mux.HandleFunc("POST /internal/machines/list", s.requireInternal(s.handleInternalListMachines))
+
+	return http.ListenAndServe(addr, withCORS(mux))
+}
+
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin == "" || isLocalDevOrigin(origin) {
+			if origin == "" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Internal-Token")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isLocalDevOrigin(origin string) bool {
+	o := strings.ToLower(origin)
+	return strings.HasPrefix(o, "http://localhost:") ||
+		strings.HasPrefix(o, "http://127.0.0.1:") ||
+		strings.HasPrefix(o, "http://[::1]:")
+}
+
+func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tok := auth.BearerToken(r.Header.Get("Authorization"))
+		if tok == "" {
+			tok = strings.TrimSpace(r.URL.Query().Get("access_token"))
+		}
+		if tok == "" {
+			tok = strings.TrimSpace(r.URL.Query().Get("token"))
+		}
+		if tok == "" {
+			if c, err := r.Cookie("openbot_token"); err == nil {
+				tok = strings.TrimSpace(c.Value)
+			}
+		}
+		claims, err := auth.ParseToken(tok)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
+func userIDFrom(ctx context.Context) string {
+	v, _ := ctx.Value(userIDKey).(string)
+	return v
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	cfg := auth.LoadOIDCConfig()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"service":      "api",
+		"time":         time.Now().UTC().Format(time.RFC3339),
+		"oidc_enabled": cfg.Enabled,
+	})
+}
+
+type authBody struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	var body authBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	password := body.Password
+	if len(username) < 2 || len(password) < 4 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username (>=2) and password (>=4) required"})
+		return
+	}
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "hash failed"})
+		return
+	}
+	u, err := s.db.CreateUser(username, hash)
+	if err != nil {
+		if errors.Is(err, db.ErrUserExists) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "username already exists"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// seed default LLM from env
+	base := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
+	key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+	enableTools := false
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OPENAI_ENABLE_TOOLS"))) {
+	case "1", "true", "yes", "on":
+		enableTools = true
+	}
+	_, _ = s.db.CreateLLMConnection(u.ID, "默认连接", base, key, model, enableTools, true, nil)
+
+	// Refresh user after org bootstrap
+	if refreshed, err := s.db.GetUserByID(u.ID); err == nil {
+		u = refreshed
+	}
+	token, err := auth.IssueToken(u.ID, u.Username, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token failed"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token": token,
+		"user":  u.PublicMap(),
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body authBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	u, err := s.db.GetUserByUsername(body.Username)
+	if err != nil || !auth.CheckPassword(u.PasswordHash, body.Password) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		return
+	}
+	_ = s.db.ApplyPendingInviteIfAny(u)
+	if refreshed, err := s.db.GetUserByID(u.ID); err == nil {
+		u = refreshed
+	}
+	token, err := auth.IssueToken(u.ID, u.Username, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token failed"})
+		return
+	}
+	s.writeAudit(u.OrgID, u.ID, "auth.login", "user", u.ID, map[string]any{"method": "password"})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"token": token,
+		"user":  u.PublicMap(),
+	})
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	u, err := s.db.GetUserByID(uid)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	_ = s.db.ApplyPendingInviteIfAny(u)
+	if refreshed, err := s.db.GetUserByID(u.ID); err == nil {
+		u = refreshed
+	}
+	writeJSON(w, http.StatusOK, u.PublicMap())
+}
+
+func (s *Server) handleListLLM(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListLLMConnections(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	pub := make([]db.LLMConnectionPublic, 0, len(list))
+	for _, c := range list {
+		pub = append(pub, c.Public())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"connections": pub})
+}
+
+func llmRuntimePayload(conn *db.LLMConnection) map[string]any {
+	if conn == nil {
+		return nil
+	}
+	m := map[string]any{
+		"base_url":     conn.BaseURL,
+		"api_key":      conn.APIKey,
+		"model":        conn.Model,
+		"enable_tools": conn.EnableTools,
+	}
+	if conn.ContextWindow != nil && *conn.ContextWindow > 0 {
+		m["context_window"] = *conn.ContextWindow
+	}
+	return m
+}
+
+type llmBody struct {
+	Name          string `json:"name"`
+	BaseURL       string `json:"base_url"`
+	APIKey        string `json:"api_key"`
+	Model         string `json:"model"`
+	EnableTools   *bool  `json:"enable_tools"`
+	IsDefault     *bool  `json:"is_default"`
+	ContextWindow *int   `json:"context_window"`
+}
+
+func (s *Server) handleCreateLLM(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body llmBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	enable := false
+	if body.EnableTools != nil {
+		enable = *body.EnableTools
+	}
+	isDef := true
+	if body.IsDefault != nil {
+		isDef = *body.IsDefault
+	}
+	// if user already has connections and didn't set is_default, default false
+	existing, _ := s.db.ListLLMConnections(uid)
+	if len(existing) > 0 && body.IsDefault == nil {
+		isDef = false
+	}
+	c, err := s.db.CreateLLMConnection(uid, body.Name, body.BaseURL, body.APIKey, body.Model, enable, isDef, body.ContextWindow)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, c.Public())
+}
+
+func (s *Server) handlePatchLLM(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	upd := db.LLMUpdate{}
+	if raw, ok := body["name"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.Name = &v
+	}
+	if raw, ok := body["base_url"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.BaseURL = &v
+	}
+	if raw, ok := body["api_key"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.APIKey = &v
+	}
+	if raw, ok := body["model"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.Model = &v
+	}
+	if raw, ok := body["enable_tools"]; ok {
+		var v bool
+		_ = json.Unmarshal(raw, &v)
+		upd.EnableTools = &v
+	}
+	if raw, ok := body["is_default"]; ok {
+		var v bool
+		_ = json.Unmarshal(raw, &v)
+		upd.IsDefault = &v
+	}
+	if raw, ok := body["context_window"]; ok {
+		upd.SetContextWindow = true
+		if string(raw) != "null" {
+			var v int
+			if err := json.Unmarshal(raw, &v); err == nil {
+				upd.ContextWindow = &v
+			}
+		}
+	}
+	c, err := s.db.UpdateLLMConnection(uid, id, upd)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, c.Public())
+}
+
+func (s *Server) handleDeleteLLM(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.DeleteLLMConnection(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDefaultLLM(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	c, err := s.db.SetDefaultLLM(uid, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, c.Public())
+}
+
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListAgents(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, a := range list {
+		item := map[string]any{
+			"id":            a.ID,
+			"name":          a.Name,
+			"description":   a.Description,
+			"system_prompt": a.SystemPrompt,
+			"is_builtin":    a.IsBuiltin,
+			"computer_mode": a.ComputerMode,
+			"user_id":       a.UserID,
+			"created_at":    a.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"updated_at":    a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+		}
+		if prev, perr := s.db.GetAgentThreadPreview(uid, a.ID); perr == nil && prev != nil && prev.ConversationID != "" {
+			item["conversation_id"] = prev.ConversationID
+			item["last_message"] = prev.LastMessage
+			if !prev.UpdatedAt.IsZero() {
+				item["conversation_updated_at"] = prev.UpdatedAt.UTC().Format(time.RFC3339Nano)
+			}
+		}
+		out = append(out, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": out})
+}
+
+func (s *Server) handlePrimaryAgentConversation(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	agentID := strings.TrimSpace(r.PathValue("id"))
+	if agentID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent id required"})
+		return
+	}
+	if _, err := s.db.GetAgent(uid, agentID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	conv, err := s.db.GetOrCreatePrimaryConversation(uid, agentID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversation": conv})
+}
+
+type agentBody struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"system_prompt"`
+	ComputerMode string `json:"computer_mode"`
+}
+
+func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body agentBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	a, err := s.db.CreateAgent(uid, body.Name, body.Description, body.SystemPrompt)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, a)
+}
+
+func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body agentBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	a, err := s.db.UpdateAgent(uid, id, body.Name, body.Description, body.SystemPrompt)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if body.ComputerMode != "" {
+		if a2, e2 := s.db.SetAgentComputerMode(uid, id, body.ComputerMode); e2 == nil {
+			a = a2
+		}
+	}
+	writeJSON(w, http.StatusOK, a)
+}
+
+func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.DeleteAgent(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) proxyJSON(w http.ResponseWriter, method, path string, query url.Values, body io.Reader, contentType string) {
+	u := s.runtimeURL + path
+	if len(query) > 0 {
+		u = u + "?" + query.Encode()
+	}
+	req, err := http.NewRequest(method, u, body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("runtime unreachable: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(b)
+}
+
+func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListUserSkills(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": list})
+}
+
+func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	name := r.PathValue("name")
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled bool required"})
+		return
+	}
+	sk, err := s.db.SetUserSkillEnabled(uid, name, *body.Enabled)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sk)
+}
+
+func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var name, description, bodyMarkdown string
+
+	ct := r.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid multipart"})
+			return
+		}
+		name = strings.TrimSpace(r.FormValue("name"))
+		description = strings.TrimSpace(r.FormValue("description"))
+		bodyMarkdown = r.FormValue("body_markdown")
+		if bodyMarkdown == "" {
+			bodyMarkdown = r.FormValue("body")
+		}
+		if file, _, err := r.FormFile("file"); err == nil {
+			defer file.Close()
+			b, err := io.ReadAll(io.LimitReader(file, 2<<20))
+			if err == nil && len(b) > 0 {
+				bodyMarkdown = string(b)
+			}
+		}
+	} else {
+		var body struct {
+			Name         string `json:"name"`
+			Description  string `json:"description"`
+			BodyMarkdown string `json:"body_markdown"`
+			Body         string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+		name = strings.TrimSpace(body.Name)
+		description = strings.TrimSpace(body.Description)
+		bodyMarkdown = body.BodyMarkdown
+		if bodyMarkdown == "" {
+			bodyMarkdown = body.Body
+		}
+	}
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
+		return
+	}
+	sk, err := s.db.UploadUserSkill(uid, name, description, bodyMarkdown)
+	if err != nil {
+		msg := err.Error()
+		code := http.StatusBadRequest
+		if strings.Contains(msg, "conflicts") {
+			code = http.StatusConflict
+		}
+		writeJSON(w, code, map[string]string{"error": msg})
+		return
+	}
+	writeJSON(w, http.StatusCreated, sk)
+}
+
+func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	name := r.PathValue("name")
+	if err := s.db.DeleteUserSkill(uid, name); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "custom skill not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	q := r.URL.Query()
+	q.Set("user_id", uid)
+	s.proxyJSON(w, http.MethodGet, "/v1/memories", q, nil, "")
+}
+
+func (s *Server) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["user_id"] = uid
+	b, _ := json.Marshal(body)
+	s.proxyJSON(w, http.MethodPost, "/v1/memories", nil, bytes.NewReader(b), "application/json")
+}
+
+type createConversationBody struct {
+	AgentID string `json:"agent_id"`
+	Title   string `json:"title"`
+}
+
+func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListConversations(uid, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversations": list})
+}
+
+func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body createConversationBody
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	agentID := strings.TrimSpace(body.AgentID)
+	if agentID == "" {
+		var err error
+		agentID, err = s.db.FirstAgentID(uid)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if _, err := s.db.GetAgent(uid, agentID); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent_id"})
+		return
+	}
+	title := strings.TrimSpace(body.Title)
+	if title == "" {
+		title = "新对话"
+	}
+	conv, err := s.db.CreateConversation(uid, agentID, title)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, conv)
+}
+
+func (s *Server) handleDeleteConversation(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.DeleteConversation(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	msgs, err := s.db.ListMessages(uid, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"messages":   msgs,
+		"run_active": s.runs.isActive(id),
+	})
+}
+
+type sendBody struct {
+	Content         string          `json:"content"`
+	LLMConnectionID string          `json:"llm_connection_id"`
+	Attachments     []AttachmentRef `json:"attachments"`
+	AgentIDs        []string        `json:"agent_ids"` // group @targets; empty = first member / conv agent
+	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
+}
+
+type runtimeMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+func (s *Server) handleCancelConversationRun(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if _, err := s.db.EnsureConversation(uid, id, "", "会话 "+id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	_ = s.runs.cancel(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body sendBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	content := strings.TrimSpace(body.Content)
+	if content == "" && len(body.Attachments) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content or attachments required"})
+		return
+	}
+
+	conv, err := s.db.EnsureConversation(uid, id, "", "会话 "+id)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	storedContent := content
+	if len(body.Attachments) > 0 {
+		built, berr := buildUserContentWithAttachments(content, uid, conv.ID, body.Attachments)
+		if berr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": berr.Error()})
+			return
+		}
+		storedContent = built
+	}
+
+	userMsg, err := s.db.AddMessage(conv.ID, "user", storedContent)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Auto-title from first user message (20–30 chars, strip newlines).
+	if n, cerr := s.db.CountUserMessages(conv.ID); cerr == nil && n == 1 {
+		titleSrc := content
+		if titleSrc == "" && len(body.Attachments) > 0 {
+			titleSrc = body.Attachments[0].Name
+		}
+		title := autoTitleFromContent(titleSrc)
+		if title != "" {
+			_ = s.db.UpdateConversationTitle(uid, conv.ID, title)
+			conv.Title = title
+		}
+	}
+
+	targetAgents, terr := s.resolveSendTargets(uid, conv, body.AgentIDs, content)
+	if terr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": terr.Error()})
+		return
+	}
+	if len(targetAgents) == 0 {
+		targetAgents = []string{conv.AgentID}
+	}
+
+	var llmPayload map[string]any
+	var conn *db.LLMConnection
+	if strings.TrimSpace(body.LLMConnectionID) != "" {
+		conn, err = s.db.GetLLMConnection(uid, body.LLMConnectionID)
+	} else {
+		conn, err = s.db.ResolveEffectiveLLM(uid)
+	}
+	if err != nil && !errors.Is(err, db.ErrNotFound) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if conn != nil {
+		llmPayload = llmRuntimePayload(conn)
+	}
+
+	enabledSkills, _ := s.db.ListEnabledSkillNames(uid)
+	if enabledSkills == nil {
+		enabledSkills = []string{}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	// Run lifetime is server-owned (detached from the HTTP request). Client
+	// disconnect / refresh must NOT cancel; only POST .../cancel or a next-turn
+	// send (register) cancels. The initiating SSE client is one subscriber;
+	// reconnect via GET .../events.
+	runCtx, runCancel := context.WithCancel(context.Background())
+	handle := newRunHandle(runCancel)
+	s.runs.register(conv.ID, handle)
+	defer func() {
+		runCancel()
+		s.runs.unregister(conv.ID, handle)
+		handle.finish() // after persist above; unblocks cancel/register waiters
+	}()
+
+	emit := newSSEEmitter(w, flusher, r.Context(), handle)
+
+	// Announce targets so UI can attribute replies.
+	emit("meta", map[string]any{
+		"phase":      "targets",
+		"agent_ids":  targetAgents,
+		"channel_id": conv.ChannelID,
+	})
+
+	cancelled := false
+	for i, agentID := range targetAgents {
+		if err := runCtx.Err(); err != nil {
+			cancelled = true
+			// Cancelled before this agent produced tokens — keep a stop marker in history.
+			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", "（已停止）", agentID)
+			break
+		}
+		systemPrompt := ""
+		agentName := agentID
+		if agent, aerr := s.db.GetAgent(uid, agentID); aerr == nil {
+			systemPrompt = agent.SystemPrompt
+			agentName = agent.Name
+		}
+		emit("meta", map[string]any{
+			"phase":      "agent_start",
+			"agent_id":   agentID,
+			"agent_name": agentName,
+			"index":      i,
+			"total":      len(targetAgents),
+		})
+
+		msgs, lerr := s.db.ListMessages(uid, conv.ID)
+		if lerr != nil {
+			emit("error", map[string]string{"message": lerr.Error()})
+			return
+		}
+		history := historyForRuntime(msgs)
+		payloadMap := map[string]any{
+			"conversation_id": id,
+			"content":         storedContent,
+			"agent_id":        agentID,
+			"user_id":         uid,
+			"system_prompt":   systemPrompt,
+			"messages":        history,
+			"enabled_skills":  enabledSkills,
+		}
+		if llmPayload != nil {
+			payloadMap["llm"] = llmPayload
+		}
+		if body.Client != nil {
+			payloadMap["client"] = body.Client
+		}
+		assistantText, pendingSummary, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap)
+		if pendingSummary != "" {
+			sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
+			_, _ = s.db.AddMessageAt(conv.ID, "summary", pendingSummary, sumAt)
+		}
+		runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
+		// Persist partial assistant text even when cancelled mid-stream.
+		// Empty cancel → keep a light UI/history marker so the next turn still
+		// sees the interrupted turn (keep-partial-next-turn).
+		if strings.TrimSpace(assistantText) != "" {
+			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", assistantText, agentID)
+		} else if runCancelled {
+			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", "（已停止）", agentID)
+		}
+		if runErr != nil {
+			if runCancelled {
+				cancelled = true
+				break
+			}
+			emit("error", map[string]string{"message": runErr.Error()})
+			return
+		}
+		if runCancelled {
+			cancelled = true
+			break
+		}
+		emit("meta", map[string]any{
+			"phase":    "agent_done",
+			"agent_id": agentID,
+			"index":    i,
+		})
+	}
+	if cancelled {
+		emit("meta", map[string]any{"phase": "cancelled"})
+		emit("done", map[string]any{"ok": false, "cancelled": true})
+		return
+	}
+	emit("done", map[string]any{"ok": true})
+}
+
+// resolveSendTargets picks which agents should answer this turn.
+// DM: always the conversation's agent.
+// Group: explicit agent_ids and/or @mentions; if neither, first channel member (conv.AgentID).
+func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string) ([]string, error) {
+	if conv.ChannelID == "" {
+		return []string{conv.AgentID}, nil
+	}
+	ch, err := s.db.GetChannel(uid, conv.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	members := ch.Members
+	if len(members) == 0 {
+		return []string{conv.AgentID}, nil
+	}
+	agents, _ := s.db.ListAgents(uid)
+	var targets []string
+	targets = append(targets, dedupeStrings(explicit)...)
+	// Keep only members
+	memberSet := map[string]struct{}{}
+	for _, m := range members {
+		memberSet[m] = struct{}{}
+	}
+	filtered := make([]string, 0, len(targets))
+	for _, id := range targets {
+		if _, ok := memberSet[id]; ok {
+			filtered = append(filtered, id)
+		}
+	}
+	targets = filtered
+	mentioned := resolveMentionedAgents(parseMentionTokens(content), members, agents)
+	for _, id := range mentioned {
+		targets = append(targets, id)
+	}
+	targets = dedupeStrings(targets)
+	if len(targets) == 0 {
+		// No @: first member / conversation agent
+		if conv.AgentID != "" {
+			return []string{conv.AgentID}, nil
+		}
+		return []string{members[0]}, nil
+	}
+	return targets, nil
+}
+
+// proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text + optional summary.
+// emit must not cancel the run on client write failure — disconnect is not stop.
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any) (string, string, error) {
+	payload, _ := json.Marshal(payloadMap)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("runtime unreachable: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", "", fmt.Errorf("runtime error: %s", string(b))
+	}
+
+	var assistant strings.Builder
+	var eventName string
+	var pendingSummary string
+	reader := bufio.NewReader(resp.Body)
+	for {
+		if err := ctx.Err(); err != nil {
+			return assistant.String(), pendingSummary, err
+		}
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			trimmed := strings.TrimRight(string(line), "\r\n")
+			if strings.HasPrefix(trimmed, "event:") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(trimmed, "event:"))
+			} else if strings.HasPrefix(trimmed, "data:") {
+				raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+				var payload map[string]any
+				if json.Unmarshal([]byte(raw), &payload) == nil {
+					switch eventName {
+					case "token":
+						if text, ok := payload["text"].(string); ok {
+							assistant.WriteString(text)
+						}
+						if emit != nil {
+							emit("token", payload)
+						}
+					case "status":
+						if emit != nil {
+							emit("status", payload)
+						}
+					case "meta":
+						if summaryNew, _ := payload["summary_new"].(bool); summaryNew {
+							if sum, ok := payload["summary"].(string); ok && strings.TrimSpace(sum) != "" {
+								pendingSummary = sum
+							}
+						}
+						if emit != nil {
+							emit("meta", payload)
+						}
+					case "error":
+						if emit != nil {
+							emit("error", payload)
+						}
+					case "done":
+						// swallow per-agent done; outer handler emits final done
+					default:
+						if emit != nil && eventName != "" {
+							emit(eventName, payload)
+						}
+					}
+				}
+			} else if trimmed == "" {
+				eventName = ""
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				if ctx.Err() != nil {
+					return assistant.String(), pendingSummary, ctx.Err()
+				}
+				return assistant.String(), pendingSummary, err
+			}
+			break
+		}
+	}
+	return assistant.String(), pendingSummary, nil
+}
+
+func isCancelErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// net/http often wraps disconnect as url.Error / OpError with context canceled.
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "request canceled")
+}
+
+func historyForRuntime(msgs []db.Message) []runtimeMsg {
+	lastSummary := -1
+	for i, m := range msgs {
+		if m.Role == "summary" {
+			lastSummary = i
+		}
+	}
+	start := 0
+	if lastSummary >= 0 {
+		start = lastSummary
+	}
+	out := make([]runtimeMsg, 0, len(msgs)-start)
+	for _, m := range msgs[start:] {
+		switch m.Role {
+		case "user", "assistant", "summary", "system":
+			out = append(out, runtimeMsg{Role: m.Role, Content: m.Content})
+		}
+	}
+	return out
+}
+
+func (s *Server) handleCompactConfig(w http.ResponseWriter, r *http.Request) {
+	// Prefer runtime live config; fall back to local env.
+	s.proxyJSON(w, http.MethodGet, "/v1/compact-config", nil, nil, "")
+}
+
+func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListChannels(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []*db.Channel{}
+	}
+	for _, ch := range list {
+		if conv, e := s.db.GetConversationByChannel(uid, ch.ID); e == nil && conv != nil {
+			ch.ConversationID = conv.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"channels": list})
+}
+
+func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body struct {
+		Name      string   `json:"name"`
+		MemberIDs []string `json:"member_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	c, err := s.db.CreateChannel(uid, body.Name)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, aid := range body.MemberIDs {
+		aid = strings.TrimSpace(aid)
+		if aid == "" {
+			continue
+		}
+		_ = s.db.AddChannelMember(uid, c.ID, aid)
+	}
+	// Reload members and bind a real conversation so sidebar 群聊 opens like a thread.
+	c, _ = s.db.GetChannel(uid, c.ID)
+	if c == nil {
+		writeJSON(w, http.StatusCreated, body)
+		return
+	}
+	agentID := ""
+	if len(c.Members) > 0 {
+		agentID = c.Members[0]
+	}
+	if agentID == "" {
+		var aerr error
+		agentID, aerr = s.db.FirstAgentID(uid)
+		if aerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": aerr.Error()})
+			return
+		}
+	}
+	conv, err := s.db.EnsureChannelConversation(uid, c.ID, agentID, c.Name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	c.ConversationID = conv.ID
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.DeleteChannel(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if err := s.db.AddChannelMember(uid, id, body.AgentID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	c, err := s.db.GetChannel(uid, id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	agentID := strings.TrimSpace(body.AgentID)
+	if agentID == "" && len(c.Members) > 0 {
+		agentID = c.Members[0]
+	}
+	if agentID == "" {
+		agentID, _ = s.db.FirstAgentID(uid)
+	}
+	if agentID != "" {
+		if conv, e := s.db.EnsureChannelConversation(uid, c.ID, agentID, c.Name); e == nil {
+			c.ConversationID = conv.ID
+		}
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleChannelConversation(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	ch, err := s.db.GetChannel(uid, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "channel not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	agentID := ""
+	if len(ch.Members) > 0 {
+		agentID = ch.Members[0]
+	}
+	if agentID == "" {
+		var aerr error
+		agentID, aerr = s.db.FirstAgentID(uid)
+		if aerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": aerr.Error()})
+			return
+		}
+	}
+	conv, err := s.db.EnsureChannelConversation(uid, ch.ID, agentID, ch.Name)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"channel":      ch,
+		"conversation": conv,
+	})
+}
+
+func (s *Server) handlePostAgentBusMessage(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body struct {
+		FromAgentID string `json:"from_agent_id"`
+		ToAgentID   string `json:"to_agent_id"`
+		ChannelID   string `json:"channel_id"`
+		Priority    bool   `json:"priority"`
+		Body        string `json:"body"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	var toPtr, chPtr *string
+	if strings.TrimSpace(body.ToAgentID) != "" {
+		v := strings.TrimSpace(body.ToAgentID)
+		toPtr = &v
+	}
+	if strings.TrimSpace(body.ChannelID) != "" {
+		v := strings.TrimSpace(body.ChannelID)
+		chPtr = &v
+	}
+	from := strings.TrimSpace(body.FromAgentID)
+	if from == "" {
+		var ferr error
+		from, ferr = s.db.FirstAgentID(uid)
+		if ferr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": ferr.Error()})
+			return
+		}
+	}
+	m, err := s.deliverAgentMessage(uid, from, toPtr, chPtr, body.Priority, body.Body, nil)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, m)
+}
+
+func (s *Server) handleAgentBusInbox(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	q := r.URL.Query()
+	unread := q.Get("unread") == "1" || strings.EqualFold(q.Get("unread"), "true")
+	agentID := strings.TrimSpace(q.Get("agent_id"))
+	list, err := s.db.ListAgentInbox(uid, unread, agentID, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []*db.AgentBusMessage{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": list})
+}
+
+func (s *Server) handleMarkAgentBusRead(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.MarkAgentMessageRead(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	list, err := s.db.ListMCPServers(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	pub := make([]db.MCPServerPublic, 0, len(list))
+	for _, c := range list {
+		pub = append(pub, c.Public())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"servers": pub})
+}
+
+type mcpServerBody struct {
+	Name      string            `json:"name"`
+	Transport string            `json:"transport"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args"`
+	URL       string            `json:"url"`
+	Env       map[string]string `json:"env"`
+	Enabled   *bool             `json:"enabled"`
+}
+
+func (s *Server) handleCreateMCPServer(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body mcpServerBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	enabled := true
+	if body.Enabled != nil {
+		enabled = *body.Enabled
+	}
+	c, err := s.db.CreateMCPServer(uid, body.Name, body.Transport, body.Command, body.URL, body.Args, body.Env, enabled)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, c.Public())
+}
+
+func (s *Server) handlePatchMCPServer(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	upd := db.MCPUpdate{}
+	if raw, ok := body["name"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.Name = &v
+	}
+	if raw, ok := body["transport"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.Transport = &v
+	}
+	if raw, ok := body["command"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.Command = &v
+	}
+	if raw, ok := body["args"]; ok {
+		var v []string
+		_ = json.Unmarshal(raw, &v)
+		upd.Args = &v
+	}
+	if raw, ok := body["url"]; ok {
+		var v string
+		_ = json.Unmarshal(raw, &v)
+		upd.URL = &v
+	}
+	if raw, ok := body["env"]; ok {
+		var v map[string]string
+		_ = json.Unmarshal(raw, &v)
+		upd.Env = &v
+	}
+	if raw, ok := body["enabled"]; ok {
+		var v bool
+		_ = json.Unmarshal(raw, &v)
+		upd.Enabled = &v
+	}
+	c, err := s.db.UpdateMCPServer(uid, id, upd)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, c.Public())
+}
+
+func (s *Server) handleDeleteMCPServer(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	if err := s.db.DeleteMCPServer(uid, id); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func mcpServerToRuntime(c *db.MCPServer) map[string]any {
+	args := c.Args
+	if args == nil {
+		args = []string{}
+	}
+	env := c.Env
+	if env == nil {
+		env = map[string]string{}
+	}
+	return map[string]any{
+		"id":        c.ID,
+		"name":      c.Name,
+		"transport": c.Transport,
+		"command":   c.Command,
+		"args":      args,
+		"url":       c.URL,
+		"env":       env,
+		"enabled":   c.Enabled,
+	}
+}
+
+func (s *Server) handleTestMCPServer(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	c, err := s.db.GetMCPServer(uid, id)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"user_id": uid,
+		"server":  mcpServerToRuntime(c),
+	})
+	s.proxyJSON(w, http.MethodPost, "/v1/mcp/test", nil, bytes.NewReader(payload), "application/json")
+}
+
+func (s *Server) handleMCPListTools(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["user_id"] = uid
+	// Prefer DB configs for the user so runtime does not need direct auth.
+	list, err := s.db.ListMCPServers(uid)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	servers := make([]map[string]any, 0, len(list))
+	for _, c := range list {
+		if !c.Enabled {
+			continue
+		}
+		if sid, _ := body["server_id"].(string); strings.TrimSpace(sid) != "" && c.ID != sid {
+			continue
+		}
+		servers = append(servers, mcpServerToRuntime(c))
+	}
+	body["servers"] = servers
+	b, _ := json.Marshal(body)
+	s.proxyJSON(w, http.MethodPost, "/v1/mcp/list-tools", nil, bytes.NewReader(b), "application/json")
+}
+
+func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if body == nil {
+		body = map[string]any{}
+	}
+	body["user_id"] = uid
+	serverID, _ := body["server_id"].(string)
+	serverID = strings.TrimSpace(serverID)
+	if serverID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "server_id required"})
+		return
+	}
+	c, err := s.db.GetMCPServer(uid, serverID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "server not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	body["server"] = mcpServerToRuntime(c)
+	b, _ := json.Marshal(body)
+	s.proxyJSON(w, http.MethodPost, "/v1/mcp/call-tool", nil, bytes.NewReader(b), "application/json")
+}
+
+func autoTitleFromContent(content string) string {
+	s := strings.TrimSpace(content)
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) == 0 {
+		return ""
+	}
+	limit := 28
+	if len(runes) <= limit {
+		return string(runes)
+	}
+	return string(runes[:limit]) + "…"
+}
+
+func mustJSON(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}

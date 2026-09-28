@@ -1,0 +1,22 @@
+{
+  "name": "@open-bot/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Open Bot Capacitor 7 mobile shell (reuses @open-bot/web dist)",
+  "scripts": {
+    "sync": "npx cap sync",
+    "open:ios": "npx cap open ios",
+    "open:android": "npx cap open android",
+    "run:ios": "npx cap run ios",
+    "run:android": "npx cap run android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/core": "^7.6.9",
+    "@capacitor/ios": "^7.6.9"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.6.9",
+    "typescript": "^5.9.2"
+  }
+}

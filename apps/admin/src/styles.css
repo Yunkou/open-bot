@@ -1,0 +1,16 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: "Inter", "PingFang SC", "Noto Sans SC", system-ui, sans-serif;
+  background: #f5f5f5;
+}
+
+/* Keep ProLayout full viewport */
+.ant-pro-layout {
+  min-height: 100%;
+}

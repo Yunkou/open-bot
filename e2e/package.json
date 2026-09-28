@@ -1,0 +1,21 @@
+{
+  "name": "@open-bot/e2e",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui",
+    "e2e:web": "playwright test tests/web",
+    "e2e:admin": "playwright test tests/admin",
+    "e2e:headed": "playwright test --headed",
+    "e2e:report": "playwright show-report",
+    "mock-llm": "node mock-llm-server.mjs",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "dotenv": "^17.2.2",
+    "typescript": "^5.9.2"
+  }
+}

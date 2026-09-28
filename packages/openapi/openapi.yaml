@@ -1,0 +1,216 @@
+openapi: 3.1.0
+info:
+  title: open-bot API
+  version: 0.3.0
+  description: Product API (Go) with JWT auth, Postgres-backed users/LLM connections/conversations/agents. Runtime is internal (/v1/runs).
+servers:
+  - url: http://127.0.0.1:18080
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      responses:
+        "200":
+          description: OK
+
+  /v1/auth/register:
+    post:
+      summary: Register (returns JWT + user; seeds default LLM from OPENAI_* env)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        "201": {description: Created}
+  /v1/auth/login:
+    post:
+      summary: Login
+      responses:
+        "200": {description: OK}
+  /v1/me:
+    get:
+      summary: Current user (Bearer)
+      responses:
+        "200": {description: OK}
+  /v1/llm-connections:
+    get:
+      summary: List LLM connections (api_key masked)
+      responses:
+        "200": {description: OK}
+    post:
+      summary: Create LLM connection
+      responses:
+        "201": {description: Created}
+  /v1/llm-connections/{id}:
+    patch:
+      summary: Update LLM connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: OK}
+    delete:
+      summary: Delete LLM connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        "204": {description: No Content}
+  /v1/llm-connections/{id}/default:
+    post:
+      summary: Set default LLM connection
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: {type: string}
+      responses:
+        "200": {description: OK}
+  /v1/agents:
+    get:
+      summary: List built-in agents
+      responses:
+        "200":
+          description: Agent list
+  /v1/skills:
+    get:
+      summary: List Agent Skills (name + description; proxied from runtime)
+      responses:
+        "200":
+          description: Skill catalog
+  /v1/memories:
+    get:
+      summary: List or recall memories (proxied)
+      parameters:
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: tier
+          schema:
+            type: string
+            enum: [profile, log, note]
+        - in: query
+          name: limit
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Memory list
+    post:
+      summary: Create a memory item (proxied)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+                tier:
+                  type: string
+                  enum: [profile, log, note]
+                tags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Created memory
+  /v1/conversations:
+    post:
+      summary: Create conversation (Postgres)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                agent_id:
+                  type: string
+                title:
+                  type: string
+      responses:
+        "201":
+          description: Created
+  /v1/conversations/{conversationId}/messages:
+    get:
+      summary: List messages in a conversation
+      parameters:
+        - in: path
+          name: conversationId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Messages
+    post:
+      summary: Send a user message (SSE stream). Go appends history and calls runtime /v1/runs with messages+agent_id.
+      parameters:
+        - in: path
+          name: conversationId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content:
+                  type: string
+      responses:
+        "200":
+          description: SSE stream of agent events (token/meta/done/error). meta includes history_count.
+components:
+  schemas:
+    RuntimeRunRequest:
+      description: Internal contract Go -> Python POST /v1/runs
+      type: object
+      required: [conversation_id]
+      properties:
+        conversation_id:
+          type: string
+        content:
+          type: string
+        agent_id:
+          type: string
+        user_id:
+          type: string
+        system_prompt:
+          type: string
+        llm:
+          type: object
+          properties:
+            base_url: {type: string}
+            api_key: {type: string}
+            model: {type: string}
+            enable_tools: {type: boolean}
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [system, user, assistant]
+              content:
+                type: string

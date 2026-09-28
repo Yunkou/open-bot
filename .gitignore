@@ -1,0 +1,58 @@
+.DS_Store
+**/.venv/
+**/node_modules/
+**/dist/
+**/__pycache__/
+*.pyc
+*.pyo
+services/api/api
+*.exe
+.env
+.env.local
+.env.*
+!.env.example
+!.env.e2e.example
+!e2e/.env.e2e.example
+.pnpm-store/
+*.log
+.vite/
+coverage/
+services/agent-runtime/data/memories.json
+
+# user-uploaded skills
+skills/users/
+
+# Tauri / Rust
+**/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Capacitor
+apps/mobile/ios/App/Pods/
+apps/mobile/ios/App/App/public/
+apps/mobile/ios/App/App/capacitor.config.json
+apps/mobile/android/app/build/
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/mobile/android/app/src/main/assets/public/
+apps/mobile/android/app/src/main/assets/capacitor.config.json
+apps/mobile/android/app/src/main/assets/capacitor.plugins.json
+apps/mobile/android/capacitor-cordova-android-plugins/
+apps/mobile/ios/capacitor-cordova-ios-plugins/
+# Sandbox computer host volumes
+data/sandboxes/
+
+# chat attachment uploads
+data/uploads/
+
+# Langfuse local stack
+deploy/langfuse/.env
+!deploy/langfuse/.env.example
+
+# E2E
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+e2e/playwright/.cache/
+e2e/.mock-llm.pid
+!.env.e2e.example
+!e2e/.env.e2e.example

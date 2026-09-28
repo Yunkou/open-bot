@@ -1,0 +1,132 @@
+package httpserver
+
+import (
+	"regexp"
+	"strings"
+	"unicode"
+
+	"github.com/tangxin/open-bot/services/api/internal/db"
+)
+
+var mentionTokenRe = regexp.MustCompile(`@([^\s@]+)`)
+
+// parseMentionTokens extracts raw @tokens from text (without the @).
+func parseMentionTokens(content string) []string {
+	matches := mentionTokenRe.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, m := range matches {
+		tok := strings.TrimRightFunc(m[1], func(r rune) bool {
+			return unicode.IsPunct(r) && r != '_' && r != '-'
+		})
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		key := strings.ToLower(tok)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// resolveMentionedAgents maps @tokens / explicit ids to channel member agent ids.
+// Preference: exact agent id, then case-insensitive name, then id prefix.
+func resolveMentionedAgents(tokens []string, members []string, agents []*db.Agent) []string {
+	if len(tokens) == 0 || len(members) == 0 {
+		return nil
+	}
+	memberSet := map[string]struct{}{}
+	for _, id := range members {
+		memberSet[id] = struct{}{}
+	}
+	byID := map[string]*db.Agent{}
+	byName := map[string][]string{} // lower name -> ids
+	for _, a := range agents {
+		if a == nil {
+			continue
+		}
+		if _, ok := memberSet[a.ID]; !ok {
+			continue
+		}
+		byID[a.ID] = a
+		byID[strings.ToLower(a.ID)] = a
+		ln := strings.ToLower(strings.TrimSpace(a.Name))
+		if ln != "" {
+			byName[ln] = append(byName[ln], a.ID)
+		}
+	}
+
+	var out []string
+	seen := map[string]struct{}{}
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := memberSet[id]; !ok {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+
+	for _, tok := range tokens {
+		lower := strings.ToLower(tok)
+		if a, ok := byID[tok]; ok {
+			add(a.ID)
+			continue
+		}
+		if a, ok := byID[lower]; ok {
+			add(a.ID)
+			continue
+		}
+		if ids, ok := byName[lower]; ok {
+			for _, id := range ids {
+				add(id)
+			}
+			continue
+		}
+		// Fuzzy: name contains or id prefix
+		for _, a := range agents {
+			if a == nil {
+				continue
+			}
+			if _, ok := memberSet[a.ID]; !ok {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(a.ID), lower) ||
+				strings.Contains(strings.ToLower(a.Name), lower) {
+				add(a.ID)
+			}
+		}
+	}
+	return out
+}
+
+// dedupeStrings preserves order.
+func dedupeStrings(ids []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
