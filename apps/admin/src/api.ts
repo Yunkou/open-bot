@@ -221,6 +221,45 @@ export async function adminPutOrgLLM(body: {
   return res.json();
 }
 
+export type LLMToolsProbeResult = {
+  ok: boolean;
+  can_enable_tools: boolean;
+  supports_tools: boolean;
+  mode: string;
+  detail: string;
+  hint?: string;
+  error?: string;
+};
+
+export async function adminProbeOrgLLMTools(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+}): Promise<LLMToolsProbeResult> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/llm/probe-tools`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    native: "原生 function calling",
+    markup: "文本工具协议",
+    forced_only: "仅强制 tool_choice",
+    none: "不支持 tools",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.can_enable_tools ? `可用（${label}）` : `不可用（${label}）`;
+  const bits = [head, result.detail];
+  if (result.hint) bits.push(result.hint);
+  return bits.filter(Boolean).join(" ");
+}
+
 export type DecisionSettings = {
   provider: string;
   base_url: string;
@@ -589,6 +628,206 @@ export async function adminGetCompactConfig(): Promise<{ compact?: Record<string
   const res = await fetch(`${API_BASE}/v1/admin/compact-config`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+export type AdminSkillFile = {
+  path: string;
+  content?: string;
+};
+
+export type AdminSkill = {
+  name: string;
+  description: string;
+  body_markdown?: string;
+  enabled: boolean;
+  files?: AdminSkillFile[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type AdminUserSkill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  custom: boolean;
+};
+
+export async function adminListSkills(all = true): Promise<{ skills: AdminSkill[] }> {
+  const q = all ? "?all=1" : "";
+  const res = await fetch(`${API_BASE}/v1/admin/skills${q}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminGetSkill(name: string): Promise<AdminSkill> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminUpsertSkill(body: {
+  name: string;
+  description: string;
+  body_markdown: string;
+  enabled?: boolean;
+}): Promise<AdminSkill> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminPatchSkill(
+  name: string,
+  body: { description?: string; body_markdown?: string; enabled?: boolean },
+): Promise<AdminSkill> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminUpsertSkillFile(
+  name: string,
+  path: string,
+  content: string,
+): Promise<AdminSkill> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}/files`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ path, content }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminDeleteSkillFile(name: string, path: string): Promise<void> {
+  const q = new URLSearchParams({ path });
+  const res = await fetch(
+    `${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}/files?${q.toString()}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function adminDeleteSkill(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function adminImportSkillZip(
+  file: File,
+  opts?: { name?: string; description?: string; enabled?: boolean },
+): Promise<AdminSkill> {
+  const form = new FormData();
+  form.append("archive", file, file.name || "skill.zip");
+  if (opts?.name?.trim()) form.append("name", opts.name.trim());
+  if (opts?.description?.trim()) form.append("description", opts.description.trim());
+  if (opts?.enabled === false) form.append("enabled", "false");
+  const res = await fetch(`${API_BASE}/v1/admin/skills/import`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: form,
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminExportSkillZip(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}/export`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const match = /filename="?([^";]+)"?/i.exec(cd);
+  const filename = match?.[1] || `${name}.zip`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function adminListUserSkills(userId: string): Promise<{ skills: AdminUserSkill[] }> {
+  const res = await fetch(`${API_BASE}/v1/admin/users/${encodeURIComponent(userId)}/skills`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminSetUserSkill(
+  userId: string,
+  name: string,
+  enabled: boolean,
+): Promise<AdminUserSkill> {
+  const res = await fetch(
+    `${API_BASE}/v1/admin/users/${encodeURIComponent(userId)}/skills/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export type AdminMachine = {
+  id: string;
+  user_id: string;
+  machine_key: string;
+  label: string;
+  platform: string;
+  os: string;
+  arch: string;
+  app: string;
+  app_version: string;
+  status: string;
+  last_seen: string;
+  created_at: string;
+  updated_at: string;
+  file_op_count: number;
+  connected: boolean;
+};
+
+export async function adminListUserMachines(
+  userId: string,
+): Promise<{ machines: AdminMachine[]; user_id: string; username?: string }> {
+  const res = await fetch(`${API_BASE}/v1/admin/users/${encodeURIComponent(userId)}/machines`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminDeleteUserMachine(userId: string, machineId: string): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/v1/admin/users/${encodeURIComponent(userId)}/machines/${encodeURIComponent(machineId)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
 }
 
 export async function adminGetTrace(id: string): Promise<{

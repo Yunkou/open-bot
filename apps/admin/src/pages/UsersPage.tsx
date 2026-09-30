@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { Button, Popconfirm, Tabs, Typography, message } from "antd";
+import { Button, Drawer, Popconfirm, Switch, Tabs, Typography, message } from "antd";
 import {
   ModalForm,
   PageContainer,
@@ -14,12 +14,18 @@ import {
   adminBatchDeleteUsers,
   adminCreateUser,
   adminDeleteUser,
+  adminDeleteUserMachine,
   adminInviteMember,
   adminListMembers,
+  adminListUserMachines,
+  adminListUserSkills,
   adminListUsers,
   adminPatchUser,
+  adminSetUserSkill,
   type AdminInvite,
+  type AdminMachine,
   type AdminUser,
+  type AdminUserSkill,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
 
@@ -38,6 +44,25 @@ export default function UsersPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [editing, setEditing] = useState<AdminUser | null>(null);
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
+  const [skillsUser, setSkillsUser] = useState<AdminUser | null>(null);
+  const [userSkills, setUserSkills] = useState<AdminUserSkill[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [machinesUser, setMachinesUser] = useState<AdminUser | null>(null);
+  const [userMachines, setUserMachines] = useState<AdminMachine[]>([]);
+  const [machinesLoading, setMachinesLoading] = useState(false);
+
+  const loadUserMachines = useCallback(async (row: AdminUser) => {
+    setMachinesUser(row);
+    setMachinesLoading(true);
+    try {
+      const data = await adminListUserMachines(row.id);
+      setUserMachines(data.machines || []);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMachinesLoading(false);
+    }
+  }, []);
 
   const roleOptions =
     user?.role === "platform_admin"
@@ -77,8 +102,29 @@ export default function UsersPage() {
     {
       title: "操作",
       valueType: "option",
-      width: 160,
+      width: 260,
       render: (_, row) => [
+        <a
+          key="machines"
+          onClick={() => {
+            void loadUserMachines(row);
+          }}
+        >
+          设备
+        </a>,
+        <a
+          key="skills"
+          onClick={() => {
+            setSkillsUser(row);
+            setSkillsLoading(true);
+            void adminListUserSkills(row.id)
+              .then((data) => setUserSkills(data.skills || []))
+              .catch((err) => message.error(err instanceof Error ? err.message : String(err)))
+              .finally(() => setSkillsLoading(false));
+          }}
+        >
+          技能
+        </a>,
         <a
           key="edit"
           onClick={() => {
@@ -357,6 +403,181 @@ export default function UsersPage() {
           },
         ]}
       />
+
+      <Drawer
+        title={skillsUser ? `技能权限 · ${skillsUser.username}` : "技能权限"}
+        open={Boolean(skillsUser)}
+        onClose={() => {
+          setSkillsUser(null);
+          setUserSkills([]);
+        }}
+        width={480}
+        destroyOnClose
+      >
+        <Paragraph type="secondary">
+          默认全部启用。关闭后该用户对话里不会出现对应 skill，也无法 load_skill。
+        </Paragraph>
+        <ProTable<AdminUserSkill>
+          rowKey="name"
+          search={false}
+          options={false}
+          pagination={false}
+          loading={skillsLoading}
+          dataSource={userSkills}
+          columns={[
+            { title: "技能", dataIndex: "name", width: 140 },
+            { title: "说明", dataIndex: "description", ellipsis: true },
+            {
+              title: "可用",
+              dataIndex: "enabled",
+              width: 80,
+              render: (_, row) => (
+                <Switch
+                  checked={row.enabled}
+                  onChange={async (checked) => {
+                    if (!skillsUser) return;
+                    try {
+                      const updated = await adminSetUserSkill(skillsUser.id, row.name, checked);
+                      setUserSkills((prev) =>
+                        prev.map((s) => (s.name === row.name ? { ...s, enabled: updated.enabled } : s)),
+                      );
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                />
+              ),
+            },
+          ]}
+        />
+      </Drawer>
+
+      <Drawer
+        title={machinesUser ? `注册设备 · ${machinesUser.username}` : "注册设备"}
+        open={Boolean(machinesUser)}
+        onClose={() => {
+          setMachinesUser(null);
+          setUserMachines([]);
+        }}
+        width={720}
+        destroyOnClose
+        extra={
+          machinesUser ? (
+            <Button
+              size="small"
+              loading={machinesLoading}
+              onClick={() => void loadUserMachines(machinesUser)}
+            >
+              刷新
+            </Button>
+          ) : null
+        }
+      >
+        <Paragraph type="secondary">
+          桌面端 / 客户端注册的电脑。状态来自心跳；「执行通道」表示本机 exec WebSocket
+          当前是否在线（可远程执行 host 操作）。
+        </Paragraph>
+        <ProTable<AdminMachine>
+          rowKey="id"
+          search={false}
+          options={false}
+          pagination={false}
+          loading={machinesLoading}
+          dataSource={userMachines}
+          locale={{ emptyText: "该用户暂无注册设备" }}
+          columns={[
+            {
+              title: "名称",
+              dataIndex: "label",
+              width: 140,
+              render: (_, row) => row.label || row.machine_key || row.id,
+            },
+            {
+              title: "平台",
+              width: 160,
+              render: (_, row) =>
+                [row.platform || row.os, row.arch, row.app]
+                  .filter(Boolean)
+                  .join(" · ") || "—",
+            },
+            {
+              title: "版本",
+              dataIndex: "app_version",
+              width: 90,
+              render: (_, row) => row.app_version || "—",
+            },
+            {
+              title: "状态",
+              dataIndex: "status",
+              width: 90,
+              render: (_, row) => (row.status === "online" ? "在线" : "离线"),
+            },
+            {
+              title: "执行通道",
+              dataIndex: "connected",
+              width: 90,
+              render: (_, row) => (row.connected ? "已连接" : "未连接"),
+            },
+            {
+              title: "文件操作",
+              dataIndex: "file_op_count",
+              width: 90,
+            },
+            {
+              title: "最近心跳",
+              dataIndex: "last_seen",
+              valueType: "dateTime",
+              width: 170,
+            },
+            {
+              title: "注册时间",
+              dataIndex: "created_at",
+              valueType: "dateTime",
+              width: 170,
+            },
+            {
+              title: "操作",
+              valueType: "option",
+              width: 80,
+              render: (_, row) => [
+                <Popconfirm
+                  key="del"
+                  title="删除该设备注册记录？用户需重新打开客户端才会再次注册。"
+                  okText="删除"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={async () => {
+                    if (!machinesUser) return;
+                    try {
+                      await adminDeleteUserMachine(machinesUser.id, row.id);
+                      message.success("已删除");
+                      setUserMachines((prev) => prev.filter((m) => m.id !== row.id));
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : String(err));
+                    }
+                  }}
+                >
+                  <a style={{ color: "#ff4d4f" }}>删除</a>
+                </Popconfirm>,
+              ],
+            },
+          ]}
+          expandable={{
+            expandedRowRender: (row) => (
+              <div style={{ fontSize: 12, color: "rgba(0,0,0,0.65)" }}>
+                <div>
+                  ID：<code>{row.id}</code>
+                </div>
+                <div>
+                  machine_key：<code>{row.machine_key}</code>
+                </div>
+                <div>
+                  OS：{row.os || "—"} · App：{row.app || "—"}
+                </div>
+              </div>
+            ),
+          }}
+        />
+      </Drawer>
     </PageContainer>
   );
 }

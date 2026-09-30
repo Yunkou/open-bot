@@ -14,7 +14,7 @@ import (
 
 const (
 	taskSlotsMax   = 3
-	taskRunTimeout = 8 * time.Minute
+	taskRunTimeout = 30 * time.Minute
 )
 
 type taskControl struct {
@@ -234,7 +234,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		systemPrompt = agent.SystemPrompt
 	}
 	instruction := fmt.Sprintf(
-		"你有一条尚未交付的任务，必须在本轮用工具完成，不能只回复承诺。\n目标：\n%s\n完成后：用简短中文说明改了什么，并给出可打开的文件链接。如果做不到，说明卡在哪一步，不要说「稍后」。",
+		"你有一条尚未交付的后台任务，必须在本轮用工具真正做完，不能只回复承诺或「稍后」。\n目标：\n%s\n完成后：用简短中文报告结果；若改了文件请给出可打开的链接。若做不到，说明卡在哪一步。",
 		task.Goal,
 	)
 	if strings.TrimSpace(systemPrompt) != "" {
@@ -251,7 +251,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	if conn != nil {
 		llmPayload = llmRuntimePayload(conn)
 	}
-	enabledSkills, _ := s.db.ListEnabledSkillNames(task.UserID)
+	enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(task.UserID, task.AgentID)
 	if enabledSkills == nil {
 		enabledSkills = []string{}
 	}
@@ -264,7 +264,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		"system_prompt":   systemPrompt,
 		"messages":        historyForRuntime(msgs),
 		"enabled_skills":  enabledSkills,
-		"max_tool_rounds": 8,
+		"max_tool_rounds": 16,
 	}
 	if llmPayload != nil {
 		payloadMap["llm"] = llmPayload

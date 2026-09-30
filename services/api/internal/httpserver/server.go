@@ -100,6 +100,19 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminPatchBot))
 	mux.HandleFunc("DELETE /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminDeleteBot))
 
+	mux.HandleFunc("GET /v1/admin/skills", s.requireOrgAdmin(s.handleAdminListSkills))
+	mux.HandleFunc("GET /v1/admin/skills/{name}", s.requireOrgAdmin(s.handleAdminGetSkill))
+	mux.HandleFunc("POST /v1/admin/skills", s.requireOrgAdmin(s.handleAdminUpsertSkill))
+	mux.HandleFunc("POST /v1/admin/skills/import", s.requireOrgAdmin(s.handleAdminImportSkillZip))
+	mux.HandleFunc("GET /v1/admin/skills/{name}/export", s.requireOrgAdmin(s.handleAdminExportSkillZip))
+	mux.HandleFunc("PUT /v1/admin/skills/{name}", s.requireOrgAdmin(s.handleAdminUpsertSkill))
+	mux.HandleFunc("PATCH /v1/admin/skills/{name}", s.requireOrgAdmin(s.handleAdminPatchSkill))
+	mux.HandleFunc("DELETE /v1/admin/skills/{name}", s.requireOrgAdmin(s.handleAdminDeleteSkill))
+	mux.HandleFunc("PUT /v1/admin/skills/{name}/files", s.requireOrgAdmin(s.handleAdminUpsertSkillFile))
+	mux.HandleFunc("DELETE /v1/admin/skills/{name}/files", s.requireOrgAdmin(s.handleAdminDeleteSkillFile))
+	mux.HandleFunc("GET /v1/admin/users/{id}/skills", s.requireOrgAdmin(s.handleAdminListUserSkills))
+	mux.HandleFunc("PUT /v1/admin/users/{id}/skills/{name}", s.requireOrgAdmin(s.handleAdminSetUserSkill))
+
 	mux.HandleFunc("GET /v1/admin/traces/status", s.requireOrgAdmin(s.handleAdminTracesStatus))
 	mux.HandleFunc("GET /v1/admin/traces", s.requireOrgAdmin(s.handleAdminListTraces))
 	mux.HandleFunc("GET /v1/admin/traces/{id}", s.requireOrgAdmin(s.handleAdminGetTrace))
@@ -121,9 +134,14 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/agents", s.requireAuth(s.handleCreateAgent))
 	mux.HandleFunc("PATCH /v1/agents/{id}", s.requireAuth(s.handlePatchAgent))
 	mux.HandleFunc("DELETE /v1/agents/{id}", s.requireAuth(s.handleDeleteAgent))
+	mux.HandleFunc("GET /v1/agents/{id}/skills", s.requireAuth(s.handleListAgentSkills))
+	mux.HandleFunc("PUT /v1/agents/{id}/skills", s.requireAuth(s.handleReplaceAgentSkills))
+	mux.HandleFunc("PUT /v1/agents/{id}/skills/{name}", s.requireAuth(s.handleSetAgentSkill))
+	mux.HandleFunc("POST /v1/agents/{id}/onboarding", s.requireAuth(s.handleAgentOnboarding))
 
 	mux.HandleFunc("GET /v1/skills", s.requireAuth(s.handleListSkills))
 	mux.HandleFunc("POST /v1/skills/upload", s.requireAuth(s.handleUploadSkill))
+	mux.HandleFunc("GET /v1/skills/{name}/package", s.requireAuth(s.handleGetUserSkillPackage))
 	mux.HandleFunc("PUT /v1/skills/{name}", s.requireAuth(s.handlePutSkill))
 	mux.HandleFunc("DELETE /v1/skills/{name}", s.requireAuth(s.handleDeleteSkill))
 	mux.HandleFunc("GET /v1/memories", s.requireAuth(s.handleListMemories))
@@ -729,50 +747,124 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
-	var name, description, bodyMarkdown string
+	var nameHint, descHint string
+	var files []db.SkillFileRecord
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		if err := r.ParseMultipartForm(8 << 20); err != nil {
+		if err := r.ParseMultipartForm(maxSkillUploadBytes); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid multipart"})
 			return
 		}
-		name = strings.TrimSpace(r.FormValue("name"))
-		description = strings.TrimSpace(r.FormValue("description"))
-		bodyMarkdown = r.FormValue("body_markdown")
+		nameHint = strings.TrimSpace(r.FormValue("name"))
+		descHint = strings.TrimSpace(r.FormValue("description"))
+		bodyMarkdown := r.FormValue("body_markdown")
 		if bodyMarkdown == "" {
 			bodyMarkdown = r.FormValue("body")
 		}
-		if file, _, err := r.FormFile("file"); err == nil {
+
+		// Prefer zip archive when provided.
+		if file, hdr, err := r.FormFile("archive"); err == nil {
 			defer file.Close()
-			b, err := io.ReadAll(io.LimitReader(file, 2<<20))
-			if err == nil && len(b) > 0 {
+			b, err := io.ReadAll(io.LimitReader(file, maxSkillUploadBytes))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read archive"})
+				return
+			}
+			fn := strings.ToLower(hdr.Filename)
+			if !strings.HasSuffix(fn, ".zip") && !looksLikeZip(b) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "archive must be a .zip"})
+				return
+			}
+			parsed, err := db.ParseZipSkillPackage(b)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			files = parsed
+		} else if parts := r.MultipartForm.File["files"]; len(parts) > 0 {
+			for _, fh := range parts {
+				f, err := fh.Open()
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read uploaded file"})
+					return
+				}
+				b, err := io.ReadAll(io.LimitReader(f, int64(dbMaxSkillFileBytes)+1))
+				_ = f.Close()
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read uploaded file"})
+					return
+				}
+				if len(b) > dbMaxSkillFileBytes {
+					writeJSON(w, http.StatusBadRequest, map[string]string{
+						"error": "file too large: " + fh.Filename,
+					})
+					return
+				}
+				rel := strings.TrimSpace(fh.Filename)
+				if rel == "" {
+					continue
+				}
+				files = append(files, db.SkillFileRecord{Path: rel, Content: string(b)})
+			}
+		} else if file, hdr, err := r.FormFile("file"); err == nil {
+			defer file.Close()
+			b, err := io.ReadAll(io.LimitReader(file, maxSkillUploadBytes))
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot read file"})
+				return
+			}
+			fn := strings.ToLower(hdr.Filename)
+			if strings.HasSuffix(fn, ".zip") || looksLikeZip(b) {
+				parsed, err := db.ParseZipSkillPackage(b)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				files = parsed
+			} else {
 				bodyMarkdown = string(b)
 			}
 		}
+
+		if len(files) == 0 && strings.TrimSpace(bodyMarkdown) != "" {
+			files = []db.SkillFileRecord{{Path: "SKILL.md", Content: bodyMarkdown}}
+		}
 	} else {
 		var body struct {
-			Name         string `json:"name"`
-			Description  string `json:"description"`
-			BodyMarkdown string `json:"body_markdown"`
-			Body         string `json:"body"`
+			Name         string              `json:"name"`
+			Description  string              `json:"description"`
+			BodyMarkdown string              `json:"body_markdown"`
+			Body         string              `json:"body"`
+			Files        []db.SkillFileRecord `json:"files"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(io.LimitReader(r.Body, maxSkillUploadBytes)).Decode(&body); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 			return
 		}
-		name = strings.TrimSpace(body.Name)
-		description = strings.TrimSpace(body.Description)
-		bodyMarkdown = body.BodyMarkdown
-		if bodyMarkdown == "" {
-			bodyMarkdown = body.Body
+		nameHint = strings.TrimSpace(body.Name)
+		descHint = strings.TrimSpace(body.Description)
+		if len(body.Files) > 0 {
+			files = body.Files
+		} else {
+			md := body.BodyMarkdown
+			if md == "" {
+				md = body.Body
+			}
+			if strings.TrimSpace(md) != "" || nameHint != "" {
+				files = []db.SkillFileRecord{{Path: "SKILL.md", Content: md}}
+			}
 		}
 	}
-	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
+
+	if len(files) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "provide SKILL.md body, files[], or a zip archive",
+		})
 		return
 	}
-	sk, err := s.db.UploadUserSkill(uid, name, description, bodyMarkdown)
+
+	sk, err := s.db.UploadUserSkillPackage(uid, files, nameHint, descHint)
 	if err != nil {
 		msg := err.Error()
 		code := http.StatusBadRequest
@@ -783,6 +875,30 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, sk)
+}
+
+func (s *Server) handleGetUserSkillPackage(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	name := r.PathValue("name")
+	sk, err := s.db.GetUserSkillPackage(uid, name)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "custom skill not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, sk)
+}
+
+const maxSkillUploadBytes = 8 << 20
+
+// dbMaxSkillFileBytes mirrors db.maxSkillFileBytes (unexported).
+const dbMaxSkillFileBytes = 512 * 1024
+
+func looksLikeZip(b []byte) bool {
+	return len(b) >= 4 && b[0] == 'P' && b[1] == 'K'
 }
 
 func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
@@ -994,11 +1110,6 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		llmPayload = llmRuntimePayload(conn)
 	}
 
-	enabledSkills, _ := s.db.ListEnabledSkillNames(uid)
-	if enabledSkills == nil {
-		enabledSkills = []string{}
-	}
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1077,6 +1188,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		history := historyForRuntime(msgs)
+		enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(uid, agentID)
+		if enabledSkills == nil {
+			enabledSkills = []string{}
+		}
 		payloadMap := map[string]any{
 			"conversation_id": id,
 			"content":         storedContent,

@@ -42,6 +42,9 @@ func Open(databaseURL string) (*DB, error) {
 		_ = sqlDB.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	if err := d.SeedGlobalSkillsFromDisk(); err != nil {
+		fmt.Printf("warn: seed global_skills from disk: %v\n", err)
+	}
 	return d, nil
 }
 
@@ -117,6 +120,16 @@ CREATE TABLE IF NOT EXISTS user_skills (
   PRIMARY KEY (user_id, skill_name)
 );
 
+-- Per-bot skill allowlist (Grok-style: shared library + enable on current Bot).
+CREATE TABLE IF NOT EXISTS agent_skills (
+  agent_id TEXT NOT NULL,
+  skill_name TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  PRIMARY KEY (agent_id, skill_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_id);
+
 CREATE TABLE IF NOT EXISTS memories (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -189,6 +202,39 @@ CREATE TABLE IF NOT EXISTS user_skill_files (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (user_id, skill_name)
 );
+
+-- Per-user skill package files (SKILL.md + references/ scripts/ …).
+CREATE TABLE IF NOT EXISTS user_skill_package_files (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  skill_name TEXT NOT NULL,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, skill_name, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_skill_package_files_user
+  ON user_skill_package_files(user_id, skill_name);
+
+CREATE TABLE IF NOT EXISTS global_skills (
+  name TEXT PRIMARY KEY,
+  description TEXT NOT NULL DEFAULT '',
+  body_markdown TEXT NOT NULL DEFAULT '',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Skill package files (SKILL.md + references/ scripts/ assets/ …). SKILL.md stays mirrored in body_markdown.
+CREATE TABLE IF NOT EXISTS global_skill_files (
+  skill_name TEXT NOT NULL REFERENCES global_skills(name) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (skill_name, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_global_skill_files_skill ON global_skill_files(skill_name);
 
 CREATE TABLE IF NOT EXISTS routines (
   id TEXT PRIMARY KEY,

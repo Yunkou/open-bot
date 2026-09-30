@@ -81,7 +81,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		}
 	}
 
-	enabledSkills, _ := s.db.ListEnabledSkillNames(userID)
+	enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(userID, agentID)
 	if enabledSkills == nil {
 		enabledSkills = []string{}
 	}
