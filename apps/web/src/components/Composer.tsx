@@ -1,10 +1,23 @@
 import { ChangeEvent, FormEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
-import type { Agent } from "../api";
 import { AgentAvatar } from "./AgentAvatar";
 
 export type PendingFile = {
   key: string;
   file: File;
+};
+
+export type ComposerMentionItem = {
+  kind: "agent" | "everyone" | "routine" | "mcp" | "bot";
+  /** Inserted after @ (token). */
+  insert: string;
+  label: string;
+  subtitle?: string;
+  agentId?: string;
+};
+
+export type ComposerSkillOption = {
+  name: string;
+  description?: string;
 };
 
 type Props = {
@@ -18,8 +31,12 @@ type Props = {
   agentName?: string;
   files?: PendingFile[];
   onFilesChange?: (files: PendingFile[]) => void;
-  /** When set, typing @ shows member autocomplete (group chat). */
-  mentionMembers?: Agent[];
+  /** @ autocomplete items (bots, group, routines, MCP…). */
+  mentionItems?: ComposerMentionItem[];
+  /** / skill picker options. */
+  skillOptions?: ComposerSkillOption[];
+  /** When true, @ targets group members; otherwise DM @ switches bot. */
+  groupChat?: boolean;
 };
 
 function formatSize(n: number): string {
@@ -28,22 +45,30 @@ function formatSize(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-type MentionState = {
-  start: number; // index of '@'
+type TriggerState = {
+  kind: "mention" | "slash";
+  start: number;
   query: string;
 };
 
-function detectMention(value: string, caret: number): MentionState | null {
+function detectTrigger(value: string, caret: number): TriggerState | null {
   const before = value.slice(0, caret);
   const at = before.lastIndexOf("@");
-  if (at < 0) return null;
-  if (at > 0) {
-    const prev = before[at - 1];
-    if (prev && !/\s/.test(prev)) return null;
-  }
-  const query = before.slice(at + 1);
-  if (/\s/.test(query)) return null;
-  return { start: at, query };
+  const slash = before.lastIndexOf("/");
+  const pick = (idx: number, kind: "mention" | "slash"): TriggerState | null => {
+    if (idx < 0) return null;
+    if (idx > 0) {
+      const prev = before[idx - 1];
+      if (prev && !/\s/.test(prev)) return null;
+    }
+    const query = before.slice(idx + 1);
+    if (/\s/.test(query)) return null;
+    return { kind, start: idx, query };
+  };
+  const m = pick(at, "mention");
+  const s = pick(slash, "slash");
+  if (m && s) return m.start > s.start ? m : s;
+  return m || s;
 }
 
 export function Composer({
@@ -56,76 +81,119 @@ export function Composer({
   agentName,
   files = [],
   onFilesChange,
-  mentionMembers,
+  mentionItems,
+  skillOptions,
+  groupChat,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
-  const [mention, setMention] = useState<MentionState | null>(null);
-  const [mentionIndex, setMentionIndex] = useState(0);
+  const [trigger, setTrigger] = useState<TriggerState | null>(null);
+  const [pickerIndex, setPickerIndex] = useState(0);
 
-  const placeholder = mentionMembers?.length
-    ? `给群聊发消息，@ 点名助手`
-    : `给 ${agentName || "助手"} 发消息`;
+  const hasMentions = Boolean(mentionItems?.length);
+  const hasSkills = Boolean(skillOptions?.length);
+  const placeholder = hasMentions
+    ? groupChat
+      ? `给群聊发消息，@ 点名成员`
+      : `给 ${agentName || "助手"} 发消息 · @ 可转给其他 Bot`
+    : hasSkills
+      ? `给 ${agentName || "助手"} 发消息 · / 引用 Skill`
+      : `给 ${agentName || "助手"} 发消息`;
   const canSend = Boolean(value.trim() || files.length > 0);
 
   const mentionOptions = useMemo(() => {
-    if (!mention || !mentionMembers?.length) return [];
-    const q = mention.query.trim().toLowerCase();
-    return mentionMembers.filter((a) => {
-      if (!q) return true;
-      return (
-        a.name.toLowerCase().includes(q) ||
-        a.id.toLowerCase().includes(q) ||
-        (a.description || "").toLowerCase().includes(q)
-      );
-    }).slice(0, 8);
-  }, [mention, mentionMembers]);
+    if (!trigger || trigger.kind !== "mention" || !mentionItems?.length) return [];
+    const q = trigger.query.trim().toLowerCase();
+    return mentionItems
+      .filter((item) => {
+        if (!q) return true;
+        return (
+          item.insert.toLowerCase().includes(q) ||
+          item.label.toLowerCase().includes(q) ||
+          (item.subtitle || "").toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 10);
+  }, [trigger, mentionItems]);
 
-  const applyMention = (agent: Agent) => {
-    if (!mention) return;
+  const slashOptions = useMemo(() => {
+    if (!trigger || trigger.kind !== "slash" || !skillOptions?.length) return [];
+    const q = trigger.query.trim().toLowerCase();
+    return skillOptions
+      .filter((s) => {
+        if (!q) return true;
+        return (
+          s.name.toLowerCase().includes(q) ||
+          (s.description || "").toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 10);
+  }, [trigger, skillOptions]);
+
+  const activeOptions =
+    trigger?.kind === "slash" ? slashOptions : mentionOptions;
+  const showPicker = Boolean(
+    trigger &&
+      (activeOptions.length > 0 ||
+        (trigger.kind === "slash" && (!hasSkills || slashOptions.length === 0))),
+  );
+
+  const applyInsert = (text: string) => {
+    if (!trigger) return;
     const ta = taRef.current;
     const caret = ta?.selectionStart ?? value.length;
-    const before = value.slice(0, mention.start);
+    const before = value.slice(0, trigger.start);
     const after = value.slice(caret);
-    const insert = `@${agent.name} `;
-    const next = before + insert + after;
+    const next = before + text + after;
     onChange(next);
-    setMention(null);
-    setMentionIndex(0);
+    setTrigger(null);
+    setPickerIndex(0);
     requestAnimationFrame(() => {
-      const pos = before.length + insert.length;
+      const pos = before.length + text.length;
       ta?.focus();
       ta?.setSelectionRange(pos, pos);
     });
   };
 
+  const applyMention = (item: ComposerMentionItem) => {
+    applyInsert(`@${item.insert} `);
+  };
+
+  const applySkill = (skill: ComposerSkillOption) => {
+    applyInsert(`请 load_skill ${skill.name} `);
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (mention && mentionOptions.length > 0) {
+    if (showPicker && activeOptions.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setMentionIndex((i) => (i + 1) % mentionOptions.length);
+        setPickerIndex((i) => (i + 1) % activeOptions.length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setMentionIndex((i) => (i - 1 + mentionOptions.length) % mentionOptions.length);
+        setPickerIndex((i) => (i - 1 + activeOptions.length) % activeOptions.length);
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        applyMention(mentionOptions[mentionIndex] ?? mentionOptions[0]);
+        const idx = pickerIndex;
+        if (trigger?.kind === "slash") {
+          applySkill(slashOptions[idx] ?? slashOptions[0]);
+        } else {
+          applyMention(mentionOptions[idx] ?? mentionOptions[0]);
+        }
         return;
       }
       if (e.key === "Escape") {
         e.preventDefault();
-        setMention(null);
+        setTrigger(null);
         return;
       }
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (sending) {
-        // Busy: empty Enter = Stop; with content = keep-partial-next-turn interrupt-and-send (parent).
         if (canSend) {
           void onSubmit(e);
         } else {
@@ -154,16 +222,33 @@ export function Composer({
     onFilesChange?.(files.filter((f) => f.key !== key));
   };
 
+  const refreshTrigger = (next: string, caret: number) => {
+    if (!hasMentions && !hasSkills) {
+      setTrigger(null);
+      return;
+    }
+    const t = detectTrigger(next, caret);
+    if (!t) {
+      setTrigger(null);
+      return;
+    }
+    if (t.kind === "mention" && !hasMentions) {
+      setTrigger(null);
+      return;
+    }
+    if (t.kind === "slash" && !hasSkills) {
+      setTrigger(t);
+      setPickerIndex(0);
+      return;
+    }
+    setTrigger(t);
+    setPickerIndex(0);
+  };
+
   const onTextChange = (next: string) => {
     onChange(next);
     const caret = taRef.current?.selectionStart ?? next.length;
-    if (mentionMembers?.length) {
-      const m = detectMention(next, caret);
-      setMention(m);
-      setMentionIndex(0);
-    } else {
-      setMention(null);
-    }
+    refreshTrigger(next, caret);
   };
 
   return (
@@ -208,25 +293,59 @@ export function Composer({
           +
         </button>
         <div className="composer-input-wrap">
-          {mention && mentionOptions.length > 0 ? (
-            <div className="mention-popup" role="listbox" aria-label="提及助手">
-              {mentionOptions.map((a, i) => (
-                <button
-                  key={a.id}
-                  type="button"
-                  role="option"
-                  aria-selected={i === mentionIndex}
-                  className={`mention-option${i === mentionIndex ? " active" : ""}`}
-                  onMouseDown={(ev) => {
-                    ev.preventDefault();
-                    applyMention(a);
-                  }}
-                >
-                  <AgentAvatar id={a.id} name={a.name} size={24} />
-                  <span className="mention-option-name">{a.name}</span>
-                  <span className="mention-option-id">@{a.id}</span>
-                </button>
-              ))}
+          {showPicker ? (
+            <div
+              className="mention-popup"
+              role="listbox"
+              aria-label={trigger?.kind === "slash" ? "引用 Skill" : "提及"}
+            >
+              {trigger?.kind === "slash"
+                ? slashOptions.length === 0
+                  ? (
+                      <div className="mention-option mention-option-empty" role="option" aria-disabled>
+                        <span className="mention-option-name">暂无可用 Skill</span>
+                        <span className="mention-option-id">
+                          写代码岗默认含 diagnosing-bugs / tdd / implement / code-review 等；可在「设置 → 当前 Bot」打开更多
+                        </span>
+                      </div>
+                    )
+                  : slashOptions.map((s, i) => (
+                    <button
+                      key={s.name}
+                      type="button"
+                      role="option"
+                      aria-selected={i === pickerIndex}
+                      className={`mention-option${i === pickerIndex ? " active" : ""}`}
+                      onMouseDown={(ev) => {
+                        ev.preventDefault();
+                        applySkill(s);
+                      }}
+                    >
+                      <span className="mention-option-name">/{s.name}</span>
+                      <span className="mention-option-id">{s.description || "Skill"}</span>
+                    </button>
+                  ))
+                : mentionOptions.map((item, i) => (
+                    <button
+                      key={`${item.kind}-${item.insert}`}
+                      type="button"
+                      role="option"
+                      aria-selected={i === pickerIndex}
+                      className={`mention-option${i === pickerIndex ? " active" : ""}`}
+                      onMouseDown={(ev) => {
+                        ev.preventDefault();
+                        applyMention(item);
+                      }}
+                    >
+                      {item.kind === "agent" || item.kind === "bot" ? (
+                        <AgentAvatar id={item.agentId || item.insert} name={item.label} size={24} />
+                      ) : (
+                        <span className="mention-kind-badge">{item.kind}</span>
+                      )}
+                      <span className="mention-option-name">{item.label}</span>
+                      <span className="mention-option-id">@{item.insert}</span>
+                    </button>
+                  ))}
             </div>
           ) : null}
           <textarea
@@ -234,14 +353,12 @@ export function Composer({
             value={value}
             onChange={(e) => onTextChange(e.target.value)}
             onClick={() => {
-              if (!mentionMembers?.length) return;
               const caret = taRef.current?.selectionStart ?? value.length;
-              setMention(detectMention(value, caret));
+              refreshTrigger(value, caret);
             }}
             onKeyUp={() => {
-              if (!mentionMembers?.length) return;
               const caret = taRef.current?.selectionStart ?? value.length;
-              setMention(detectMention(value, caret));
+              refreshTrigger(value, caret);
             }}
             placeholder={placeholder}
             rows={1}
@@ -263,12 +380,7 @@ export function Composer({
             <span className="composer-stop-icon" aria-hidden />
           </button>
         ) : (
-          <button
-            type="submit"
-            className="composer-send"
-            disabled={!canSend}
-            title="发送"
-          >
+          <button type="submit" className="composer-send" disabled={!canSend} title="发送">
             ↑
           </button>
         )}

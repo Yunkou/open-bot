@@ -26,6 +26,7 @@ import {
   getStoredUser,
   getToken,
   listAgents,
+  listAgentSkills,
   listChannels,
   listLLMConnections,
   listMCPServers,
@@ -34,13 +35,18 @@ import {
   getConversationRunStatus,
   listSkills,
   uploadSkill,
+  uploadSkillPackage,
   deleteSkill,
+  applyAgentOnboarding,
+  formatLLMToolsProbe,
+  probeLLMTools,
   login,
   mcpCallTool,
   register,
   fetchOIDCConfig,
   startOIDCLogin,
   sendMessageStream,
+  persistConversationMessage,
   subscribeConversationEvents,
   cancelConversationRun,
   chatEventsWebSocketUrl,
@@ -64,6 +70,10 @@ import {
   updateRoutine,
   deleteRoutine,
   runRoutine,
+  listInboundHooks,
+  createInboundHook,
+  deleteInboundHook,
+  type InboundHook,
   Sandbox,
   getSandbox,
   ensureSandbox,
@@ -83,6 +93,7 @@ import {
   listMachines,
   registerMachine,
   heartbeatMachine,
+  updateMachineLabel,
   deleteMachine,
   type Machine,
   type BotSecretMeta,
@@ -96,16 +107,25 @@ import {
   setStoredMachineId,
   clearStoredMachineId,
   defaultMachineLabel,
+  resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
 import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
 import { AccountMenu } from "./components/AccountMenu";
+import {
+  SettingsPage,
+  SettingsHint,
+  SettingsSection,
+  SettingsCard,
+  SettingsEmpty,
+} from "./components/SettingsLayout";
 import { AgentAvatar } from "./components/AgentAvatar";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
 import { avatarColor } from "./components/avatarColor";
 import { ChatMessage } from "./components/ChatMessage";
+import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { SecretPromptModal } from "./components/SecretPromptModal";
-import { Composer, PendingFile } from "./components/Composer";
+import { Composer, PendingFile, type ComposerMentionItem, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
   BotOnboardingCard,
@@ -119,6 +139,7 @@ import {
 type UiMessage = Message & { streaming?: boolean; attachments?: AttachmentMeta[]; agent_name?: string };
 type SettingsTab =
   | "general"
+  | "bot"
   | "llm"
   | "skills"
   | "mcp"
@@ -130,9 +151,10 @@ type SettingsTab =
 
 const SETTINGS_TITLE: Record<SettingsTab, string> = {
   general: "通用",
+  bot: "当前 Bot",
   llm: "模型",
   skills: "Skills",
-  mcp: "MCP",
+  mcp: "插件 / MCP",
   compact: "压缩",
   routines: "例行任务",
   sandbox: "运行环境",
@@ -162,6 +184,13 @@ function SettingsGlyph({ id }: { id: SettingsTab }) {
         <svg {...p}>
           <circle cx="12" cy="12" r="3" />
           <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" />
+        </svg>
+      );
+    case "bot":
+      return (
+        <svg {...p}>
+          <circle cx="12" cy="8" r="3" />
+          <path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5" />
         </svg>
       );
     case "machines":
@@ -230,6 +259,82 @@ type ConvRunState = {
   selectionKey: string; // `agent:${id}` | `channel:${id}` for sidebar busy
 };
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchAgentByMentionToken(tok: string, list: Agent[]): Agent | undefined {
+  const lower = tok.toLowerCase();
+  return list.find(
+    (a) =>
+      a.id.toLowerCase() === lower ||
+      a.name.toLowerCase() === lower ||
+      a.name.toLowerCase().includes(lower) ||
+      a.id.toLowerCase().startsWith(lower),
+  );
+}
+
+/** First @Bot in text (skips @everyone / @routine: / @mcp:). */
+function firstMentionedAgent(content: string, list: Agent[]): Agent | undefined {
+  const re = /@([^\s@]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    const tok = m[1].replace(/[.,!?;:，。！？；：]+$/u, "");
+    const lower = tok.toLowerCase();
+    if (lower === "everyone" || lower === "all") continue;
+    if (lower.startsWith("routine:") || lower.startsWith("mcp:")) continue;
+    const hit = matchAgentByMentionToken(tok, list);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function stripLeadingAtAgent(content: string, agent: Agent): string {
+  for (const p of [agent.name, agent.id]) {
+    if (!p) continue;
+    const re = new RegExp(`^@${escapeRegExp(p)}\\s*`, "i");
+    if (re.test(content)) {
+      const next = content.replace(re, "").trim();
+      return next || content;
+    }
+  }
+  return content;
+}
+
+const HANDOFF_CONTEXT_MAX_MSGS = 12;
+const HANDOFF_CONTEXT_MAX_CHARS = 1200;
+
+function buildHandoffContext(
+  msgs: UiMessage[],
+  fromBotName: string,
+): { role: string; content: string }[] {
+  const usable = msgs
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim() && !m.streaming)
+    .slice(-HANDOFF_CONTEXT_MAX_MSGS);
+  if (usable.length === 0) {
+    return [
+      {
+        role: "system",
+        content: `用户从与「${fromBotName}」的对话转交给你；此前暂无更多上下文。`,
+      },
+    ];
+  }
+  const out: { role: string; content: string }[] = [
+    {
+      role: "system",
+      content: `用户从与「${fromBotName}」的对话转交给你。以下是那边近期对话（供参考，不要复述这段说明）：`,
+    },
+  ];
+  for (const m of usable) {
+    let text = m.content.trim();
+    if (text.length > HANDOFF_CONTEXT_MAX_CHARS) {
+      text = `${text.slice(0, HANDOFF_CONTEXT_MAX_CHARS)}…`;
+    }
+    out.push({ role: m.role === "assistant" ? "assistant" : "user", content: text });
+  }
+  return out;
+}
+
 const lastActiveStorageKey = (userId: string) => `openbot_last_active_${userId}`;
 
 function readLastActiveSelection(userId: string): LastActiveSelection | null {
@@ -245,6 +350,9 @@ function readLastActiveSelection(userId: string): LastActiveSelection | null {
   }
   return null;
 }
+
+/** Keep in sync with `@media (max-width: 860px)` in styles.css — master-detail chat nav. */
+const MOBILE_LAYOUT_MQ = "(max-width: 860px)";
 
 const emptyLLMForm: LLMInput = {
   name: "默认连接",
@@ -284,6 +392,13 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
+  /** Narrow panes: list = sidebar only, chat = main only. Wide layout ignores this (CSS). */
+  const [mobileView, setMobileView] = useState<"list" | "chat">("list");
+  const [isNarrowLayout, setIsNarrowLayout] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(MOBILE_LAYOUT_MQ).matches
+      : false,
+  );
   const [onboardingDismissed, setOnboardingDismissedState] = useState(false);
   const newChatBtnRef = useRef<HTMLButtonElement>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
@@ -304,6 +419,10 @@ export default function App() {
   const [skillName, setSkillName] = useState("");
   const [skillDesc, setSkillDesc] = useState("");
   const [skillBody, setSkillBody] = useState("");
+  const [skillZip, setSkillZip] = useState<File | null>(null);
+  const [skillFolder, setSkillFolder] = useState<File[]>([]);
+  const skillFolderInputRef = useRef<HTMLInputElement>(null);
+  const skillZipInputRef = useRef<HTMLInputElement>(null);
 
   const [compactCfg, setCompactCfg] = useState<CompactConfig | null>(null);
   const confirm = useConfirm();
@@ -329,25 +448,36 @@ export default function App() {
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [routinesMsg, setRoutinesMsg] = useState("");
   const [routinesBusy, setRoutinesBusy] = useState(false);
+  const [inboundHooks, setInboundHooks] = useState<InboundHook[]>([]);
+  const [hooksMsg, setHooksMsg] = useState("");
   const [routineForm, setRoutineForm] = useState<RoutineInput>({
     name: "",
     prompt: "",
     schedule_cron: "0 9 * * *",
     enabled: true,
+    agent_id: "",
+    timezone: "Asia/Shanghai",
+    triggers_json: "[]",
+    max_retries: 2,
+    quiet_unchanged: false,
   });
+  const [composerSkills, setComposerSkills] = useState<ComposerSkillOption[]>([]);
 
   const [sandbox, setSandbox] = useState<Sandbox | null>(null);
   const [sandboxMsg, setSandboxMsg] = useState("");
   const [sandboxBusy, setSandboxBusy] = useState(false);
   const [sandboxCmd, setSandboxCmd] = useState("echo hi");
   const [sandboxExecOut, setSandboxExecOut] = useState("");
-  const [sandboxPath, setSandboxPath] = useState("/workspace");
+  const [sandboxPath, setSandboxPath] = useState(".");
   const [sandboxLsOut, setSandboxLsOut] = useState("");
   const [sandboxFilePath, setSandboxFilePath] = useState("hello.txt");
   const [sandboxFileContent, setSandboxFileContent] = useState("hello from open-bot");
   const [machines, setMachines] = useState<Machine[]>([]);
   const [machinesMsg, setMachinesMsg] = useState("");
   const [machinesBusy, setMachinesBusy] = useState(false);
+  const [deviceDisplayName, setDeviceDisplayName] = useState("");
+  const [renamingMachineId, setRenamingMachineId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [hostMachineId, setHostMachineId] = useState<string | null>(() => getStoredMachineId());
   const [hostWritesOn, setHostWritesOn] = useState(() => hostWritesEnabled());
   const [hostActivity, setHostActivity] = useState("");
@@ -355,6 +485,16 @@ export default function App() {
   const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
   const applyRemoteHostDecisionRef = useRef<(msg: Message) => void>(() => {});
   const clientEnv = useMemo(() => detectClientContext(), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void resolveDefaultMachineLabel(clientEnv).then((name) => {
+      if (!cancelled) setDeviceDisplayName(name);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [clientEnv]);
   const [botSecrets, setBotSecrets] = useState<BotSecretMeta[]>([]);
   const [secretRequests, setSecretRequests] = useState<BotSecretRequest[]>([]);
   const [secretPrompt, setSecretPrompt] = useState<BotSecretRequest | null>(null);
@@ -370,6 +510,8 @@ export default function App() {
   const messagesLiveRef = useRef<UiMessage[]>([]);
   const conversationRef = useRef<Conversation | null>(null);
   const didRestoreLastActive = useRef<string | null>(null);
+  /** False until last-active restore finishes so we never flash agents[0] / onboarding. */
+  const [selectionHydrated, setSelectionHydrated] = useState(false);
   /** Ignores stale openPrimaryConversation / openChannel results after rapid switches. */
   const selectGenRef = useRef(0);
   /** Tick so sidebar busy indicators re-render when runs start/end. */
@@ -390,9 +532,11 @@ export default function App() {
     let timer: ReturnType<typeof setInterval> | null = null;
     const run = async () => {
       try {
+        const label =
+          deviceDisplayName.trim() || (await resolveDefaultMachineLabel(clientEnv));
         const m = await registerMachine({
           machine_key: getOrCreateMachineKey(),
-          label: defaultMachineLabel(clientEnv),
+          label,
           platform: clientEnv.platform,
           os: clientEnv.os,
           arch: clientEnv.arch,
@@ -449,7 +593,21 @@ export default function App() {
   const refreshAgents = useCallback(async (): Promise<Agent[]> => {
     const list = await listAgents();
     setAgents(list);
-    setAgentId((prev) => (list.some((a) => a.id === prev) ? prev : list[0]?.id ?? ""));
+    setAgentId((prev) => {
+      if (prev && list.some((a) => a.id === prev)) return prev;
+      const uid = getStoredUser()?.id;
+      const saved = uid ? readLastActiveSelection(uid) : null;
+      // Prefer last-active agent so we never briefly paint agents[0] on refresh.
+      if (saved?.kind === "agent" && list.some((a) => a.id === saved.id)) {
+        return saved.id;
+      }
+      // Before initial restore completes (esp. channel last-active), keep empty
+      // rather than snapping to the first bot.
+      if (uid && didRestoreLastActive.current !== uid) {
+        return prev;
+      }
+      return list[0]?.id ?? "";
+    });
     return list;
   }, []);
 
@@ -645,7 +803,7 @@ export default function App() {
 
 
   const activeAgent = useMemo(
-    () => agents.find((a) => a.id === agentId) ?? agents[0],
+    () => (agentId ? agents.find((a) => a.id === agentId) : undefined),
     [agents, agentId],
   );
 
@@ -663,7 +821,9 @@ export default function App() {
     [messages],
   );
 
-  const showOnboarding = Boolean(authed && !hasChatMessages && !onboardingDismissed && !sending);
+  const showOnboarding = Boolean(
+    authed && selectionHydrated && !hasChatMessages && !onboardingDismissed && !sending,
+  );
 
 
   const filteredAgents = useMemo(() => {
@@ -702,6 +862,75 @@ export default function App() {
       .map((id) => agents.find((a) => a.id === id))
       .filter((a): a is Agent => Boolean(a));
   }, [activeChannel, agents]);
+
+  const composerMentionItems = useMemo((): ComposerMentionItem[] => {
+    const items: ComposerMentionItem[] = [];
+    if (activeChannel?.members?.length) {
+      items.push({
+        kind: "everyone",
+        insert: "everyone",
+        label: "所有人",
+        subtitle: "本回合全体成员回复",
+      });
+      for (const a of groupMentionMembers || []) {
+        items.push({
+          kind: "agent",
+          insert: a.name,
+          label: a.name,
+          subtitle: a.description || a.id,
+          agentId: a.id,
+        });
+      }
+    } else {
+      for (const a of agents) {
+        items.push({
+          kind: "bot",
+          insert: a.name,
+          label: a.name,
+          subtitle: a.description || a.id,
+          agentId: a.id,
+        });
+      }
+    }
+    for (const r of routines.filter((x) => x.enabled)) {
+      items.push({
+        kind: "routine",
+        insert: `routine:${r.name}`,
+        label: r.name,
+        subtitle: `例行 · ${r.schedule_cron}`,
+      });
+    }
+    for (const s of mcpServers.filter((x) => x.enabled)) {
+      items.push({
+        kind: "mcp",
+        insert: `mcp:${s.name}`,
+        label: s.name,
+        subtitle: `插件 · ${s.transport}`,
+      });
+    }
+    return items;
+  }, [activeChannel, groupMentionMembers, agents, routines, mcpServers]);
+
+  useEffect(() => {
+    if (!authed || !agentId) {
+      setComposerSkills([]);
+      return;
+    }
+    let cancelled = false;
+    void listAgentSkills(agentId)
+      .then((list) => {
+        if (cancelled) return;
+        setComposerSkills(
+          list.filter((s) => s.enabled).map((s) => ({ name: s.name, description: s.description })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setComposerSkills([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authed, agentId, skills]);
 
   const defaultLLM = useMemo(
     () => llms.find((c) => c.is_default) ?? llms[0],
@@ -763,6 +992,8 @@ export default function App() {
 
   const onLogout = () => {
     didRestoreLastActive.current = null;
+    setSelectionHydrated(false);
+    setMobileView("list");
     for (const [convId, run] of [...runsRef.current.entries()]) {
       run.generation += 1;
       run.abort.abort();
@@ -1201,47 +1432,46 @@ export default function App() {
     }
   };
 
-  const onSelectAgent = useCallback((id: string) => {
-    void (async () => {
-      snapshotViewedMessages();
-      const selectGen = ++selectGenRef.current;
-      // Hide Stop for the previous run while the target chat loads; do not cancel it.
-      setSending(false);
-      setRunLabel("正在思考…");
-      setAgentId(id);
-      setPendingFiles([]);
-      setStatus("");
-      try {
-        const conv = await openPrimaryConversation(id);
+  const onSelectAgent = useCallback(async (id: string) => {
+    snapshotViewedMessages();
+    const selectGen = ++selectGenRef.current;
+    // Hide Stop for the previous run while the target chat loads; do not cancel it.
+    setSending(false);
+    setRunLabel("正在思考…");
+    setMobileView("chat");
+    setAgentId(id);
+    setPendingFiles([]);
+    setStatus("");
+    try {
+      const conv = await openPrimaryConversation(id);
+      if (selectGen !== selectGenRef.current) return;
+      conversationRef.current = conv;
+      const activeRun = runsRef.current.get(conv.id);
+      let apiMsgs: Message[] | undefined;
+      let runActive = false;
+      if (!activeRun) {
+        const listed = await listMessagesWithStatus(conv.id);
         if (selectGen !== selectGenRef.current) return;
-        conversationRef.current = conv;
-        const activeRun = runsRef.current.get(conv.id);
-        let apiMsgs: Message[] | undefined;
-        let runActive = false;
-        if (!activeRun) {
-          const listed = await listMessagesWithStatus(conv.id);
-          if (selectGen !== selectGenRef.current) return;
-          apiMsgs = listed.messages;
-          runActive = Boolean(listed.run_active);
-          noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
-        } else {
-          setTaskBusy(taskConvIdsRef.current.has(conv.id));
-        }
-        applyConversationView(conv, apiMsgs, agents);
-        saveLastActiveSelection({ kind: "agent", id });
-        void refreshAgents().catch(() => {});
-        if (!activeRun && runActive) {
-          void resumeActiveRun(conv, agents);
-        }
-      } catch (err) {
-        if (selectGen !== selectGenRef.current) return;
-        conversationRef.current = null;
-        setConversation(null);
-        setMessages([]);
-        setSending(false);
-        setStatus(err instanceof Error ? err.message : String(err));
+        apiMsgs = listed.messages;
+        runActive = Boolean(listed.run_active);
+        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
+      } else {
+        setTaskBusy(taskConvIdsRef.current.has(conv.id));
       }
-    })();
+      applyConversationView(conv, apiMsgs, agents);
+      saveLastActiveSelection({ kind: "agent", id });
+      void refreshAgents().catch(() => {});
+      if (!activeRun && runActive) {
+        void resumeActiveRun(conv, agents);
+      }
+    } catch (err) {
+      if (selectGen !== selectGenRef.current) return;
+      conversationRef.current = null;
+      setConversation(null);
+      setMessages([]);
+      setSending(false);
+      setStatus(err instanceof Error ? err.message : String(err));
+    }
   }, [agents, refreshAgents, saveLastActiveSelection]);
 
   const openChannelChat = useCallback(async (channelId: string) => {
@@ -1250,6 +1480,7 @@ export default function App() {
       const selectGen = ++selectGenRef.current;
       setSending(false);
       setRunLabel("正在思考…");
+      setMobileView("chat");
       const { conversation: conv } = await openChannelConversation(channelId);
       if (selectGen !== selectGenRef.current) return;
       conversationRef.current = conv;
@@ -1287,6 +1518,74 @@ export default function App() {
     if (viewedId && runsRef.current.has(viewedId)) {
       await stopCurrentRun({ markStopped: true, waitForFlush: true, conversationId: viewedId });
     }
+
+    // DM: @其他 Bot → 切到对方主线程再发；原会话留下转交记录，并把近期上下文带给对方。
+    let sendContent = content;
+    let handoffConv: Conversation | null = null;
+    let handoffContext: { role: string; content: string }[] | undefined;
+    const inGroup = Boolean(conversationRef.current?.channel_id);
+    if (!inGroup && content) {
+      const mentioned = firstMentionedAgent(content, agents);
+      const currentAid = conversationRef.current?.agent_id || agentId;
+      if (mentioned && mentioned.id !== currentAid) {
+        try {
+          const sourceConvId = conversationRef.current?.id;
+          const sourceAgent =
+            agents.find((a) => a.id === currentAid) ||
+            ({ id: currentAid, name: agentNameById.get(currentAid) || "助手" } as Agent);
+          const sourceMsgs = sourceConvId
+            ? messagesByConvRef.current.get(sourceConvId) ?? messagesLiveRef.current
+            : messagesLiveRef.current;
+          handoffContext = buildHandoffContext(sourceMsgs, sourceAgent.name || "助手");
+
+          // 原 Bot 会话留下这次转交，下次回来仍看得见、模型也读得到。
+          if (sourceConvId) {
+            try {
+              const persisted = await persistConversationMessage(sourceConvId, content);
+              patchConvMessages(sourceConvId, (prev) => [
+                ...prev,
+                {
+                  id: persisted.id,
+                  role: "user",
+                  content,
+                  created_at: persisted.created_at,
+                },
+              ]);
+            } catch {
+              patchConvMessages(sourceConvId, (prev) => [
+                ...prev,
+                { id: `local-handoff-${Date.now()}`, role: "user", content },
+              ]);
+            }
+          }
+
+          snapshotViewedMessages();
+          selectGenRef.current += 1;
+          setAgentId(mentioned.id);
+          const targetConv = await openPrimaryConversation(mentioned.id);
+          conversationRef.current = targetConv;
+          setConversation(targetConv);
+          const listed = await listMessagesWithStatus(targetConv.id);
+          const mapped = mapApiMessages(listed.messages, agentNameById);
+          messagesByConvRef.current.set(targetConv.id, mapped);
+          messagesLiveRef.current = mapped;
+          setMessages(mapped);
+          noteTask(
+            targetConv.id,
+            Boolean(listed.task_active),
+            listed.task_active ? "正在做，做好会发在这里" : undefined,
+          );
+          handoffConv = targetConv;
+          sendContent = stripLeadingAtAgent(content, mentioned);
+          saveLastActiveSelection({ kind: "agent", id: mentioned.id });
+          toast.message(`已转给 ${mentioned.name}（已带上此前对话）`);
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : String(err));
+          return;
+        }
+      }
+    }
+
     setSending(true);
     setInput("");
     setPendingFiles([]);
@@ -1308,7 +1607,7 @@ export default function App() {
     const userMsg: UiMessage = {
       id: `local-user-${Date.now()}`,
       role: "user",
-      content: content || (filesToSend.length ? `（${filesToSend.length} 个附件）` : ""),
+      content: sendContent || (filesToSend.length ? `（${filesToSend.length} 个附件）` : ""),
       attachments: localAttachments.length ? localAttachments : undefined,
     };
     const assistantId = `local-asst-${Date.now()}`;
@@ -1317,22 +1616,30 @@ export default function App() {
       userMsg,
       { id: assistantId, role: "assistant" as const, content: "", streaming: true },
     ];
-    if (viewedId) {
-      patchConvMessages(viewedId, appendOptimistic);
+    const optTargetId = handoffConv?.id || conversationRef.current?.id || viewedId;
+    if (optTargetId) {
+      patchConvMessages(optTargetId, appendOptimistic);
     } else {
       const next = appendOptimistic(messagesLiveRef.current);
       messagesLiveRef.current = next;
       setMessages(next);
     }
     const mentionAgentIds = (() => {
-      if (!conversation?.channel_id || !groupMentionMembers?.length) return undefined as string[] | undefined;
+      if (!conversationRef.current?.channel_id || !groupMentionMembers?.length) {
+        return undefined as string[] | undefined;
+      }
       const re = /@([^\s@]+)/g;
       const ids: string[] = [];
       const seen = new Set<string>();
       let m: RegExpExecArray | null;
-      while ((m = re.exec(content)) !== null) {
+      let everyone = false;
+      while ((m = re.exec(sendContent)) !== null) {
         const tok = m[1].replace(/[.,!?;:，。！？；：]+$/u, "");
         const lower = tok.toLowerCase();
+        if (lower === "everyone" || lower === "all") {
+          everyone = true;
+          continue;
+        }
         const hit = groupMentionMembers.find(
           (a) =>
             a.id.toLowerCase() === lower ||
@@ -1345,14 +1652,18 @@ export default function App() {
           ids.push(hit.id);
         }
       }
-      return ids.length ? ids : undefined;
+      if (everyone) {
+        return groupMentionMembers.map((a) => a.id);
+      }
+      // Single-stage owner: first @ only (server also enforces).
+      return ids.length ? [ids[0]] : undefined;
     })();
     let sendSelection: LastActiveSelection | null = null;
     let sendHadError = false;
     let streamConvId: string | null = null;
     let gen = 0;
     try {
-      const conv = await ensureConversation();
+      const conv = handoffConv ?? (await ensureConversation());
       streamConvId = conv.id;
       sendSelection = conv.channel_id
         ? { kind: "channel", id: conv.channel_id }
@@ -1395,7 +1706,7 @@ export default function App() {
       };
       await sendMessageStream(
         conv.id,
-        content,
+        sendContent,
         {
           onAgentStart: (info) => {
             if (!isRunCurrent()) return;
@@ -1506,7 +1817,20 @@ export default function App() {
         ac.signal,
         uploaded.length ? uploaded : undefined,
         mentionAgentIds,
-        { ...clientEnv, machine_id: getStoredMachineId() || undefined },
+        (() => {
+          // Browser must not send a stale desktop machine_id from localStorage —
+          // that makes the model think the user is on that Mac and invent Downloads contents.
+          if (!shouldRegisterAsHost(clientEnv)) {
+            return { ...clientEnv, machine_id: undefined, machine_label: undefined };
+          }
+          const mid = getStoredMachineId() || undefined;
+          const fromList = mid ? machines.find((x) => x.id === mid)?.label : undefined;
+          const machine_label =
+            (fromList || deviceDisplayName || defaultMachineLabel(clientEnv) || "").trim() ||
+            undefined;
+          return { ...clientEnv, machine_id: mid, machine_label };
+        })(),
+        handoffContext,
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -1567,6 +1891,12 @@ export default function App() {
   const refreshRoutines = useCallback(async () => {
     const list = await listRoutines();
     setRoutines(list);
+    try {
+      const hooks = await listInboundHooks();
+      setInboundHooks(hooks);
+    } catch {
+      /* hooks optional */
+    }
   }, []);
 
   const saveMCP = async (e: FormEvent) => {
@@ -1699,10 +2029,26 @@ export default function App() {
       await createRoutine({
         name: routineForm.name.trim(),
         prompt: routineForm.prompt.trim(),
-        schedule_cron: routineForm.schedule_cron.trim() || "0 9 * * *",
+        schedule_cron: routineForm.schedule_cron.trim(),
         enabled: routineForm.enabled !== false,
+        agent_id: routineForm.agent_id || agentId || undefined,
+        timezone: routineForm.timezone || "Asia/Shanghai",
+        triggers_json: routineForm.triggers_json || "[]",
+        max_retries: routineForm.max_retries ?? 2,
+        quiet_unchanged: !!routineForm.quiet_unchanged,
+        conversation_id: conversation?.id || undefined,
+      })
+      setRoutineForm({
+        name: "",
+        prompt: "",
+        schedule_cron: "0 9 * * *",
+        enabled: true,
+        agent_id: agentId || "",
+        timezone: "Asia/Shanghai",
+        triggers_json: "[]",
+        max_retries: 2,
+        quiet_unchanged: false,
       });
-      setRoutineForm({ name: "", prompt: "", schedule_cron: "0 9 * * *", enabled: true });
       await refreshRoutines();
       setRoutinesMsg("已创建");
     } catch (err) {
@@ -1800,9 +2146,14 @@ export default function App() {
     setSandboxBusy(true);
     setSandboxMsg("");
     try {
-      const s = await ensureSandbox();
+      const s = await ensureSandbox({
+        agent_id: agentId || undefined,
+        mode: activeAgent?.computer_mode || undefined,
+      });
       setSandbox(s);
-      setSandboxMsg(`已确保运行：${s.container_id || "(no id)"}`);
+      setSandboxMsg(
+        `已确保运行：${s.container_id || "(no id)"} · 模式 ${s.computer_mode || activeAgent?.computer_mode || "team"}`,
+      );
     } catch (err) {
       setSandboxMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1814,7 +2165,11 @@ export default function App() {
     setSandboxBusy(true);
     setSandboxMsg("");
     try {
-      const s = await ensureSandbox({ desktop: true });
+      const s = await ensureSandbox({
+        desktop: true,
+        agent_id: agentId || undefined,
+        mode: activeAgent?.computer_mode || undefined,
+      });
       setSandbox(s);
       if (!s.desktop_port) {
         setSandboxMsg(
@@ -1889,7 +2244,7 @@ export default function App() {
     setSandboxBusy(true);
     setSandboxMsg("");
     try {
-      const res = await listSandbox(sandboxPath || "/workspace");
+      const res = await listSandbox(sandboxPath || ".");
       const lines = (res.entries || []).map(
         (e) => `${e.is_dir ? "d" : "f"}\t${e.name}\t${e.size}`,
       );
@@ -1941,6 +2296,7 @@ export default function App() {
     });
     await refreshAgents();
     setShowNewChat(false);
+    setMobileView("chat");
     // Navigate away without cancelling other bots' in-flight runs.
     snapshotViewedMessages();
     selectGenRef.current += 1;
@@ -1981,9 +2337,31 @@ export default function App() {
     await refreshConversations();
   };
 
+  // Sync with CSS `@media (max-width: 860px)`. Keep mobileView across wide↔narrow so the same pane returns.
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const mq = window.matchMedia(MOBILE_LAYOUT_MQ);
+    const sync = () => setIsNarrowLayout(mq.matches);
+    sync();
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", sync);
+      return () => mq.removeEventListener("change", sync);
+    }
+    mq.addListener(sync);
+    return () => mq.removeListener(sync);
+  }, []);
+
+  // Keep latest select handlers in refs so the restore effect only re-runs on auth,
+  // not when `agents` identity changes (which would cancel mid-restore and flash UI).
+  const onSelectAgentRef = useRef(onSelectAgent);
+  onSelectAgentRef.current = onSelectAgent;
+  const openChannelChatRef = useRef(openChannelChat);
+  openChannelChatRef.current = openChannelChat;
+
   useEffect(() => {
     if (!authed || !user?.id) {
       didRestoreLastActive.current = null;
+      setSelectionHydrated(false);
       return;
     }
     if (didRestoreLastActive.current === user.id) return;
@@ -1992,31 +2370,44 @@ export default function App() {
     const restoreLastActive = async () => {
       try {
         const [agentList, channelList] = await Promise.all([refreshAgents(), refreshChannels()]);
-        if (cancelled || didRestoreLastActive.current === user.id || conversationRef.current) return;
+        if (cancelled) return;
 
-        // Mark the auth session as handled before opening the restored conversation.
-        didRestoreLastActive.current = user.id;
+        // User already opened something (click / prior in-flight select).
+        if (conversationRef.current) {
+          didRestoreLastActive.current = user.id;
+          setSelectionHydrated(true);
+          setMobileView("chat");
+          return;
+        }
+
         const saved = readLastActiveSelection(user.id);
         if (saved?.kind === "agent" && agentList.some((agent) => agent.id === saved.id)) {
-          onSelectAgent(saved.id);
-          return;
-        }
-        if (saved?.kind === "channel" && channelList.some((channel) => channel.id === saved.id)) {
-          void openChannelChat(saved.id);
-          return;
+          await onSelectAgentRef.current(saved.id);
+        } else if (saved?.kind === "channel" && channelList.some((channel) => channel.id === saved.id)) {
+          await openChannelChatRef.current(saved.id);
+        } else {
+          const datedAgents = agentList
+            .filter((agent) => agent.conversation_updated_at)
+            .sort(
+              (a, b) =>
+                (Date.parse(b.conversation_updated_at || "") || 0) -
+                (Date.parse(a.conversation_updated_at || "") || 0),
+            );
+          const fallback = datedAgents[0] ?? agentList[0];
+          if (fallback) await onSelectAgentRef.current(fallback.id);
         }
 
-        const datedAgents = agentList
-          .filter((agent) => agent.conversation_updated_at)
-          .sort(
-            (a, b) =>
-              (Date.parse(b.conversation_updated_at || "") || 0) -
-              (Date.parse(a.conversation_updated_at || "") || 0),
-          );
-        const fallback = datedAgents[0] ?? agentList[0];
-        if (fallback) onSelectAgent(fallback.id);
+        if (cancelled) return;
+        didRestoreLastActive.current = user.id;
+        setSelectionHydrated(true);
+        // Selecting a bot/channel already sets chat; if restore opened a conversation, stay on chat.
+        if (conversationRef.current) setMobileView("chat");
       } catch {
-        if (!cancelled) setStatus("无法拉取助手或群聊列表（请确认已登录且 API 可用）");
+        if (!cancelled) {
+          didRestoreLastActive.current = user.id;
+          setSelectionHydrated(true);
+          setStatus("无法拉取助手或群聊列表（请确认已登录且 API 可用）");
+        }
       }
     };
 
@@ -2025,7 +2416,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [authed, user?.id, refreshAgents, refreshChannels, refreshLLMs, onSelectAgent, openChannelChat]);
+  }, [authed, user?.id, refreshAgents, refreshChannels, refreshLLMs]);
 
   const openSettings = async (tab: SettingsTab = "llm") => {
     setShowSettings(true);
@@ -2098,6 +2489,22 @@ export default function App() {
     setLLMBusy(true);
     setLLMMsg("");
     try {
+      if (llmForm.enable_tools) {
+        const probe = await probeLLMTools({
+          base_url: llmForm.base_url,
+          model: llmForm.model,
+          api_key: llmForm.api_key?.trim() || undefined,
+          connection_id: editingId || undefined,
+        });
+        if (!probe.can_enable_tools) {
+          setLLMMsg(formatLLMToolsProbe(probe));
+          setLLMBusy(false);
+          return;
+        }
+        if (probe.mode !== "native") {
+          setLLMMsg(formatLLMToolsProbe(probe));
+        }
+      }
       if (editingId) {
         const patch: Partial<LLMInput> = {
           name: llmForm.name,
@@ -2114,7 +2521,7 @@ export default function App() {
           patch.api_key = llmForm.api_key.trim();
         }
         await updateLLMConnection(editingId, patch);
-        setLLMMsg("已更新");
+        setLLMMsg((prev) => (prev ? `${prev} · 已更新` : "已更新"));
       } else {
         await createLLMConnection({
           ...llmForm,
@@ -2123,10 +2530,31 @@ export default function App() {
               ? llmForm.context_window
               : null,
         });
-        setLLMMsg("已创建");
+        setLLMMsg((prev) => (prev ? `${prev} · 已创建` : "已创建"));
       }
       await refreshLLMs();
       resetForm();
+    } catch (err) {
+      setLLMMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLLMBusy(false);
+    }
+  };
+
+  const probeLLMFormTools = async () => {
+    setLLMBusy(true);
+    setLLMMsg("正在检测 tools / function calling…");
+    try {
+      const probe = await probeLLMTools({
+        base_url: llmForm.base_url,
+        model: llmForm.model,
+        api_key: llmForm.api_key?.trim() || undefined,
+        connection_id: editingId || undefined,
+      });
+      setLLMMsg(formatLLMToolsProbe(probe));
+      if (!probe.can_enable_tools && llmForm.enable_tools) {
+        setLLMForm({ ...llmForm, enable_tools: false });
+      }
     } catch (err) {
       setLLMMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -2219,16 +2647,36 @@ export default function App() {
     setSkillsBusy(true);
     setSkillsMsg("");
     try {
-      await uploadSkill({
-        name: skillName.trim(),
-        description: skillDesc.trim(),
-        body_markdown: skillBody,
-      });
+      let result;
+      if (skillZip) {
+        result = await uploadSkillPackage({
+          name: skillName.trim() || undefined,
+          description: skillDesc.trim() || undefined,
+          archive: skillZip,
+        });
+      } else if (skillFolder.length > 0) {
+        result = await uploadSkillPackage({
+          name: skillName.trim() || undefined,
+          description: skillDesc.trim() || undefined,
+          folderFiles: skillFolder,
+        });
+      } else {
+        result = await uploadSkill({
+          name: skillName.trim(),
+          description: skillDesc.trim(),
+          body_markdown: skillBody,
+        });
+      }
       setSkillName("");
       setSkillDesc("");
       setSkillBody("");
+      setSkillZip(null);
+      setSkillFolder([]);
+      if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+      if (skillZipInputRef.current) skillZipInputRef.current.value = "";
       await refreshSkills();
-      setSkillsMsg("技能已上传并默认启用");
+      const n = result.file_count ?? result.files?.length ?? 1;
+      setSkillsMsg(`技能「${result.name}」已上传并启用（${n} 个文件）`);
     } catch (err) {
       setSkillsMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -2337,7 +2785,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${isNarrowLayout ? ` mobile-${mobileView}` : ""}`}>
       <aside className="sidebar">
         <div className="sidebar-top">
           <label className="sidebar-search">
@@ -2498,6 +2946,17 @@ export default function App() {
       <main className="main">
         {hostActivity ? <div className="status host-activity">{hostActivity}</div> : null}
         <header className="topbar">
+          <button
+            type="button"
+            className="topbar-back"
+            aria-label="返回"
+            onClick={() => setMobileView("list")}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+            返回
+          </button>
           <div className="agent-pill">
             {activeChannel ? (
               <>
@@ -2508,6 +2967,8 @@ export default function App() {
                     .join("、")}
                 </span>
               </>
+            ) : !selectionHydrated ? (
+              <span className="agent-pill-name muted">加载中…</span>
             ) : (
               <>
                 <AgentAvatar
@@ -2522,7 +2983,11 @@ export default function App() {
         </header>
 
         <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
-          {showOnboarding ? (
+          {!selectionHydrated ? (
+            <div className="empty">
+              <p className="muted">加载中…</p>
+            </div>
+          ) : showOnboarding ? (
             <>
               {ONBOARDING_WELCOME.map((text, i) => (
                 <ChatMessage
@@ -2533,10 +2998,34 @@ export default function App() {
               <BotOnboardingCard
                 disabled={sending}
                 onSelectOption={(opt: OnboardingOption) => {
-                  void sendUserText(opt.prompt);
+                  void (async () => {
+                    try {
+                      if (agentId) {
+                        await applyAgentOnboarding(agentId, { focus: opt.letter });
+                        await refreshAgents();
+                      }
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : String(err));
+                    }
+                    void sendUserText(opt.prompt);
+                  })();
                 }}
                 onCustomSubmit={(customText: string) => {
-                  void sendUserText(customText);
+                  void (async () => {
+                    try {
+                      if (agentId) {
+                        await applyAgentOnboarding(agentId, {
+                          focus: "E",
+                          description: customText.slice(0, 400),
+                          system_prompt: `用户自定义方向：${customText}`,
+                        });
+                        await refreshAgents();
+                      }
+                    } catch (err) {
+                      toast.error(err instanceof Error ? err.message : String(err));
+                    }
+                    void sendUserText(customText);
+                  })();
                 }}
                 onDismiss={() => {
                   setOnboardingDismissed(onboardingKey);
@@ -2554,7 +3043,7 @@ export default function App() {
             <ChatMessage
               key={m.id}
               message={m}
-              agentId={agentId}
+              agentId={m.agent_id || agentId}
               onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
             />
           ))}
@@ -2590,7 +3079,9 @@ export default function App() {
             agentName={activeChannel ? activeChannel.name : activeAgent?.name}
             files={pendingFiles}
             onFilesChange={setPendingFiles}
-            mentionMembers={groupMentionMembers}
+            mentionItems={composerMentionItems}
+            skillOptions={composerSkills}
+            groupChat={Boolean(activeChannel)}
           />
         </div>
       </main>
@@ -2602,11 +3093,12 @@ export default function App() {
               {(
                 [
                   ["general", "通用"],
+                  ["bot", "当前 Bot"],
                   ["machines", "电脑"],
                   ["sandbox", "运行环境"],
                   ["llm", "模型"],
                   ["skills", "Skills"],
-                  ["mcp", "MCP"],
+                  ["mcp", "插件 / MCP"],
                   ["compact", "压缩"],
                   ["routines", "例行任务"],
                   ["secrets", "密钥"],
@@ -2662,10 +3154,9 @@ export default function App() {
               </div>
               <div className="settings-main-body">
             {settingsTab === "general" && (
-              <div className="settings-page">
-                <section className="settings-section">
-                  <h3 className="settings-section-label">账户</h3>
-                  <div className="settings-card settings-account">
+              <SettingsPage>
+                <SettingsSection title="账户">
+                  <SettingsCard className="settings-account">
                     <div className="settings-account-avatar" aria-hidden>
                       {accountInitials(user?.username || "")}
                     </div>
@@ -2697,11 +3188,10 @@ export default function App() {
                     <button type="button" className="settings-pill" onClick={onLogout}>
                       退出登录
                     </button>
-                  </div>
-                </section>
-                <section className="settings-section">
-                  <h3 className="settings-section-label">模型</h3>
-                  <div className="settings-card">
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="模型">
+                  <SettingsCard>
                     <div className="settings-row">
                       <span>默认模型</span>
                       <button type="button" className="settings-pill" onClick={() => setSettingsTab("llm")}>
@@ -2711,762 +3201,953 @@ export default function App() {
                         </svg>
                       </button>
                     </div>
-                  </div>
-                </section>
-              </div>
+                  </SettingsCard>
+                </SettingsSection>
+              </SettingsPage>
+            )}
+
+            {settingsTab === "bot" && (
+              <BotSettingsPanel
+                agent={activeAgent ?? null}
+                onSaved={(a) => {
+                  void refreshAgents().then(() => {
+                    toast.success(`已更新「${a.name}」`);
+                  });
+                }}
+              />
             )}
 
             {settingsTab === "llm" && (
-              <>
-                <p className="muted small">
-                  每个用户可配置多个 OpenAI 兼容连接；聊天默认使用「默认」连接。密钥不会完整回显。
-                </p>
-                <div className="llm-list">
-                  {llms.length === 0 ? (
-                    <div className="muted">暂无连接，请在下方新增。</div>
-                  ) : (
-                    llms.map((c) => (
-                      <div key={c.id} className={`llm-item ${c.is_default ? "default" : ""}`}>
-                        <div>
-                          <div className="agent-name">
-                            {c.name}
-                            {c.is_default ? <span className="tag">默认</span> : null}
+              <SettingsPage>
+                <SettingsHint>
+                  可配置多个 OpenAI 兼容连接；聊天默认使用标记为「默认」的连接。密钥不会完整回显。
+                  勾选「启用 tools」前可用「检测 tools 能力」验证上游是否支持 function calling；不支持时无法开启。
+                </SettingsHint>
+                <SettingsSection title="已有连接">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {llms.length === 0 ? (
+                        <SettingsEmpty>暂无连接，请在下方新增。</SettingsEmpty>
+                      ) : (
+                        llms.map((c) => (
+                          <div key={c.id} className={`llm-item ${c.is_default ? "default" : ""}`}>
+                            <div>
+                              <div className="agent-name">
+                                {c.name}
+                                {c.is_default ? <span className="tag">默认</span> : null}
+                              </div>
+                              <div className="agent-desc">
+                                {c.model || "(无 model)"} · {c.base_url || "(无 base_url)"} · key{" "}
+                                {c.api_key_set ? c.api_key_hint || "已设置" : "未设置"}
+                                {c.enable_tools ? " · tools" : ""}
+                              </div>
+                            </div>
+                            <div className="llm-actions">
+                              {!c.is_default ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void setDefaultLLMConnection(c.id)
+                                      .then(refreshLLMs)
+                                      .catch((err) => setLLMMsg(String(err)))
+                                  }
+                                >
+                                  设默认
+                                </button>
+                              ) : null}
+                              <button type="button" onClick={() => startEdit(c)}>
+                                编辑
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() =>
+                                  void deleteLLMConnection(c.id)
+                                    .then(refreshLLMs)
+                                    .then(resetForm)
+                                    .catch((err) => setLLMMsg(String(err)))
+                                }
+                              >
+                                删除
+                              </button>
+                            </div>
                           </div>
-                          <div className="agent-desc">
-                            {c.model || "(无 model)"} · {c.base_url || "(无 base_url)"} · key{" "}
-                            {c.api_key_set ? c.api_key_hint || "已设置" : "未设置"}
-                            {c.enable_tools ? " · tools" : ""}
-                          </div>
-                        </div>
-                        <div className="llm-actions">
-                          {!c.is_default ? (
-                            <button
-                              type="button"
-                              onClick={() =>
-                                void setDefaultLLMConnection(c.id)
-                                  .then(refreshLLMs)
-                                  .catch((err) => setLLMMsg(String(err)))
-                              }
-                            >
-                              设默认
-                            </button>
-                          ) : null}
-                          <button type="button" onClick={() => startEdit(c)}>
-                            编辑
-                          </button>
-                          <button
-                            type="button"
-                            className="danger"
-                            onClick={() =>
-                              void deleteLLMConnection(c.id)
-                                .then(refreshLLMs)
-                                .then(resetForm)
-                                .catch((err) => setLLMMsg(String(err)))
-                            }
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-
-                <form className="llm-form" onSubmit={saveLLM}>
-                  <h4>{editingId ? "编辑连接" : "新增连接"}</h4>
-                  <label>
-                    名称
-                    <input
-                      value={llmForm.name}
-                      onChange={(e) => setLLMForm({ ...llmForm, name: e.target.value })}
-                      required
-                    />
-                  </label>
-                  <label>
-                    Base URL
-                    <input
-                      value={llmForm.base_url}
-                      onChange={(e) => setLLMForm({ ...llmForm, base_url: e.target.value })}
-                      placeholder="https://api.openai.com/v1"
-                    />
-                  </label>
-                  <label>
-                    API Key{editingId ? "（留空不改）" : ""}
-                    <input
-                      type="password"
-                      value={llmForm.api_key || ""}
-                      onChange={(e) => setLLMForm({ ...llmForm, api_key: e.target.value })}
-                      placeholder="sk-..."
-                      autoComplete="off"
-                    />
-                  </label>
-                  <label>
-                    Model
-                    <input
-                      value={llmForm.model}
-                      onChange={(e) => setLLMForm({ ...llmForm, model: e.target.value })}
-                      placeholder="gpt-4o-mini"
-                    />
-                  </label>
-                  <label>
-                    上下文窗口 (tokens)
-                    <input
-                      type="number"
-                      min={0}
-                      step={1024}
-                      value={llmForm.context_window ?? ""}
-                      onChange={(e) => {
-                        const raw = e.target.value.trim();
-                        if (!raw) {
-                          setLLMForm({ ...llmForm, context_window: null });
-                          return;
-                        }
-                        const n = Number(raw);
-                        setLLMForm({
-                          ...llmForm,
-                          context_window: Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
-                        });
-                      }}
-                      placeholder="留空=自动（按模型名推断）"
-                    />
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(llmForm.enable_tools)}
-                      onChange={(e) => setLLMForm({ ...llmForm, enable_tools: e.target.checked })}
-                    />
-                    启用 tools（上游需支持 tool calling）
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(llmForm.is_default)}
-                      onChange={(e) => setLLMForm({ ...llmForm, is_default: e.target.checked })}
-                    />
-                    设为默认
-                  </label>
-                  {llmMsg ? <div className="status">{llmMsg}</div> : null}
-                  <div className="llm-actions">
-                    <button type="submit" className="primary" disabled={llmBusy}>
-                      {llmBusy ? "保存中…" : "保存"}
-                    </button>
-                    {editingId ? (
-                      <button type="button" onClick={resetForm}>
-                        取消编辑
-                      </button>
-                    ) : null}
-                  </div>
-                </form>
-              </>
-            )}
-
-            {settingsTab === "skills" && (
-              <>
-                <p className="muted small">
-                  关闭后该技能不会注入 runtime 系统提示，也无法被 load_skill 加载。默认全部启用。
-                  {"可上传自定义技能（Agent Skills：小写+数字+连字符），落盘到 skills/users/{user_id}/。"}
-                </p>
-                <form className="llm-form" onSubmit={(e) => void onUploadSkill(e)}>
-                  <h4>上传自定义 Skill</h4>
-                  <input
-                    placeholder="name（如 my-helper）"
-                    value={skillName}
-                    onChange={(e) => setSkillName(e.target.value)}
-                    required
-                  />
-                  <input
-                    placeholder="description（何时使用）"
-                    value={skillDesc}
-                    onChange={(e) => setSkillDesc(e.target.value)}
-                    required
-                  />
-                  <textarea
-                    placeholder="正文 Markdown（可省略 frontmatter，会自动补全）"
-                    value={skillBody}
-                    onChange={(e) => setSkillBody(e.target.value)}
-                    rows={6}
-                  />
-                  <button type="submit" disabled={skillsBusy}>
-                    {skillsBusy ? "上传中…" : "上传并启用"}
-                  </button>
-                </form>
-                <div className="llm-list">
-                  {skills.length === 0 ? (
-                    <div className="muted">暂无技能（检查仓库 skills/ 目录）</div>
-                  ) : (
-                    skills.map((s) => (
-                      <div key={s.name} className="llm-item">
-                        <div>
-                          <div className="agent-name">
-                            {s.name}
-                            {s.custom ? <span className="pill">自定义</span> : null}
-                          </div>
-                          <div className="agent-desc">{s.description}</div>
-                        </div>
-                        <div className="llm-actions">
-                          <label className="check skill-toggle">
-                            <input
-                              type="checkbox"
-                              checked={s.enabled}
-                              disabled={skillsBusy}
-                              onChange={(e) => void toggleSkill(s.name, e.target.checked)}
-                            />
-                            {s.enabled ? "已启用" : "已关闭"}
-                          </label>
-                          {s.custom ? (
-                            <button
-                              type="button"
-                              className="ghost danger"
-                              disabled={skillsBusy}
-                              onClick={() => void onDeleteSkill(s.name)}
-                            >
-                              删除
-                            </button>
-                          ) : null}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-                {skillsMsg ? <div className="status">{skillsMsg}</div> : null}
-              </>
-            )}
-
-            {settingsTab === "mcp" && (
-              <>
-                <p className="muted small">
-                  配置 MCP Client servers（stdio / sse / http）。启用后，在 LLM 开启 tools 时会注入工具；本地
-                  vLLM 无 function-calling 时可用下方手动「调用工具」。示例脚本：
-                  <code>services/agent-runtime/examples/mcp_echo_server.py</code>
-                </p>
-                <div className="llm-list">
-                  {mcpServers.length === 0 ? (
-                    <div className="muted">暂无 MCP server，请在下方新增。</div>
-                  ) : (
-                    mcpServers.map((s) => (
-                      <div key={s.id} className="llm-item">
-                        <div>
-                          <div className="agent-name">
-                            {s.name}
-                            {s.enabled ? <span className="tag">启用</span> : <span className="tag">停用</span>}
-                          </div>
-                          <div className="agent-desc">
-                            {s.transport}
-                            {s.transport === "stdio"
-                              ? ` · ${s.command} ${(s.args || []).join(" ")}`
-                              : ` · ${s.url}`}
-                          </div>
-                        </div>
-                        <div className="llm-actions">
-                          <button type="button" onClick={() => void runTestMCP(s.id)} disabled={mcpBusy}>
-                            测试连接
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void toggleMCP(s, !s.enabled)}
-                            disabled={mcpBusy}
-                          >
-                            {s.enabled ? "停用" : "启用"}
-                          </button>
-                          <button
-                            type="button"
-                            className="danger"
-                            onClick={() => void removeMCP(s.id)}
-                            disabled={mcpBusy}
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-                {mcpTestResult ? <div className="status">{mcpTestResult}</div> : null}
-                {mcpMsg ? <div className="status">{mcpMsg}</div> : null}
-
-                <form className="llm-form" onSubmit={saveMCP}>
-                  <h4>新增 MCP server</h4>
-                  <label>
-                    名称
-                    <input
-                      value={mcpForm.name}
-                      onChange={(e) => setMcpForm({ ...mcpForm, name: e.target.value })}
-                      required
-                    />
-                  </label>
-                  <label>
-                    传输
-                    <select
-                      value={mcpForm.transport}
-                      onChange={(e) =>
-                        setMcpForm({
-                          ...mcpForm,
-                          transport: e.target.value as MCPServerInput["transport"],
-                        })
-                      }
-                    >
-                      <option value="stdio">stdio</option>
-                      <option value="sse">sse</option>
-                      <option value="http">http</option>
-                    </select>
-                  </label>
-                  {mcpForm.transport === "stdio" ? (
-                    <>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title={editingId ? "编辑连接" : "新增连接"}>
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={saveLLM}>
                       <label>
-                        command（绝对路径或 python3/node/npx/uv…）
+                        名称
                         <input
-                          value={mcpForm.command || ""}
-                          onChange={(e) => setMcpForm({ ...mcpForm, command: e.target.value })}
-                          placeholder="/path/to/.venv/bin/python"
+                          value={llmForm.name}
+                          onChange={(e) => setLLMForm({ ...llmForm, name: e.target.value })}
                           required
                         />
                       </label>
                       <label>
-                        args（JSON 数组）
+                        Base URL
                         <input
-                          value={mcpArgsText}
-                          onChange={(e) => setMcpArgsText(e.target.value)}
-                          placeholder='["/path/to/mcp_echo_server.py"]'
+                          value={llmForm.base_url}
+                          onChange={(e) => setLLMForm({ ...llmForm, base_url: e.target.value })}
+                          placeholder="https://api.openai.com/v1"
                         />
                       </label>
-                    </>
-                  ) : (
-                    <label>
-                      URL
-                      <input
-                        value={mcpForm.url || ""}
-                        onChange={(e) => setMcpForm({ ...mcpForm, url: e.target.value })}
-                        placeholder="http://127.0.0.1:8000/sse"
-                        required
-                      />
-                    </label>
-                  )}
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={mcpForm.enabled !== false}
-                      onChange={(e) => setMcpForm({ ...mcpForm, enabled: e.target.checked })}
-                    />
-                    启用
-                  </label>
-                  <div className="llm-actions">
-                    <button type="submit" className="primary" disabled={mcpBusy}>
-                      {mcpBusy ? "保存中…" : "新增"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        // Fill echo example paths relative to common local layout.
-                        setMcpForm({
-                          name: "echo",
-                          transport: "stdio",
-                          command:
-                            "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/.venv/bin/python",
-                          args: [
-                            "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/examples/mcp_echo_server.py",
-                          ],
-                          url: "",
-                          enabled: true,
-                        });
-                        setMcpArgsText(
-                          JSON.stringify([
-                            "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/examples/mcp_echo_server.py",
-                          ]),
-                        );
-                        setMcpMsg("已填入本地 echo 示例路径");
-                      }}
-                    >
-                      填入 echo 示例
-                    </button>
-                  </div>
-                </form>
+                      <label>
+                        API Key{editingId ? "（留空不改）" : ""}
+                        <input
+                          type="password"
+                          value={llmForm.api_key || ""}
+                          onChange={(e) => setLLMForm({ ...llmForm, api_key: e.target.value })}
+                          placeholder="sk-..."
+                          autoComplete="off"
+                        />
+                      </label>
+                      <label>
+                        Model
+                        <input
+                          value={llmForm.model}
+                          onChange={(e) => setLLMForm({ ...llmForm, model: e.target.value })}
+                          placeholder="gpt-4o-mini"
+                        />
+                      </label>
+                      <label>
+                        上下文窗口 (tokens)
+                        <input
+                          type="number"
+                          min={0}
+                          step={1024}
+                          value={llmForm.context_window ?? ""}
+                          onChange={(e) => {
+                            const raw = e.target.value.trim();
+                            if (!raw) {
+                              setLLMForm({ ...llmForm, context_window: null });
+                              return;
+                            }
+                            const n = Number(raw);
+                            setLLMForm({
+                              ...llmForm,
+                              context_window: Number.isFinite(n) && n > 0 ? Math.floor(n) : null,
+                            });
+                          }}
+                          placeholder="留空=自动（按模型名推断）"
+                        />
+                      </label>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(llmForm.enable_tools)}
+                          onChange={(e) => setLLMForm({ ...llmForm, enable_tools: e.target.checked })}
+                        />
+                        启用 tools（需上游支持 function calling / 工具调用）
+                      </label>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(llmForm.is_default)}
+                          onChange={(e) => setLLMForm({ ...llmForm, is_default: e.target.checked })}
+                        />
+                        设为默认
+                      </label>
+                      {llmMsg ? <div className="settings-status">{llmMsg}</div> : null}
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={llmBusy}>
+                          {llmBusy ? "保存中…" : "保存"}
+                        </button>
+                        <button type="button" disabled={llmBusy} onClick={() => void probeLLMFormTools()}>
+                          检测 tools 能力
+                        </button>
+                        {editingId ? (
+                          <button type="button" onClick={resetForm}>
+                            取消编辑
+                          </button>
+                        ) : null}
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+              </SettingsPage>
+            )}
 
-                <form className="llm-form" onSubmit={runCallMCP} style={{ marginTop: 16 }}>
-                  <h4>手动调用工具</h4>
-                  <label>
-                    Server
-                    <select
-                      value={mcpCallServerId}
-                      onChange={(e) => setMcpCallServerId(e.target.value)}
-                    >
-                      <option value="">选择…</option>
-                      {mcpServers.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    Tool 名
-                    <input
-                      value={mcpCallToolName}
-                      onChange={(e) => setMcpCallToolName(e.target.value)}
-                      placeholder="echo"
-                      required
-                    />
-                  </label>
-                  <label>
-                    Arguments（JSON）
-                    <textarea
-                      rows={3}
-                      value={mcpCallArgs}
-                      onChange={(e) => setMcpCallArgs(e.target.value)}
-                    />
-                  </label>
-                  <div className="llm-actions">
-                    <button type="submit" className="primary" disabled={mcpBusy}>
-                      调用
-                    </button>
-                  </div>
-                  {mcpCallResult ? (
-                    <pre className="status" style={{ whiteSpace: "pre-wrap" }}>
-                      {mcpCallResult}
-                    </pre>
-                  ) : null}
-                </form>
-              </>
+            {settingsTab === "skills" && (
+              <SettingsPage>
+                <SettingsHint>
+                  关闭后该技能不会注入系统提示，也无法被 load_skill 加载。默认全部启用。自定义技能是目录包（必有
+                  SKILL.md，可含 references/、scripts/ 等）。可粘贴正文、选文件夹，或上传 .zip；服务端会校验路径与体积。
+                </SettingsHint>
+                <SettingsSection title="上传自定义 Skill">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={(e) => void onUploadSkill(e)}>
+                      <label>
+                        名称（可选，若 SKILL.md frontmatter 已有可省略）
+                        <input
+                          placeholder="如 my-helper"
+                          value={skillName}
+                          onChange={(e) => setSkillName(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        描述（可选，若 frontmatter 已有可省略）
+                        <input
+                          placeholder="简要说明适用场景"
+                          value={skillDesc}
+                          onChange={(e) => setSkillDesc(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        正文（单文件 Markdown；与文件夹/zip 三选一）
+                        <textarea
+                          placeholder="可省略 frontmatter，会自动补全"
+                          value={skillBody}
+                          onChange={(e) => {
+                            setSkillBody(e.target.value);
+                            setSkillZip(null);
+                            setSkillFolder([]);
+                            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+                            if (skillZipInputRef.current) skillZipInputRef.current.value = "";
+                          }}
+                          rows={6}
+                          disabled={Boolean(skillZip) || skillFolder.length > 0}
+                        />
+                      </label>
+                      <label>
+                        上传文件夹
+                        <input
+                          ref={skillFolderInputRef}
+                          type="file"
+                          multiple
+                          {...({
+                            webkitdirectory: "",
+                            directory: "",
+                          } as Record<string, string>)}
+                          onChange={(e) => {
+                            const list = Array.from(e.target.files || []);
+                            setSkillFolder(list);
+                            setSkillZip(null);
+                            setSkillBody("");
+                            if (skillZipInputRef.current) skillZipInputRef.current.value = "";
+                          }}
+                        />
+                        {skillFolder.length > 0 ? (
+                          <span className="agent-desc">已选 {skillFolder.length} 个文件</span>
+                        ) : null}
+                      </label>
+                      <label>
+                        上传 .zip 压缩包
+                        <input
+                          ref={skillZipInputRef}
+                          type="file"
+                          accept=".zip,application/zip"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null;
+                            setSkillZip(f);
+                            setSkillFolder([]);
+                            setSkillBody("");
+                            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+                          }}
+                        />
+                        {skillZip ? <span className="agent-desc">{skillZip.name}</span> : null}
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={skillsBusy}>
+                          {skillsBusy ? "上传中…" : "上传并启用"}
+                        </button>
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="已安装">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {skills.length === 0 ? (
+                        <SettingsEmpty>暂无技能。</SettingsEmpty>
+                      ) : (
+                        skills.map((s) => (
+                          <div key={s.name} className="llm-item">
+                            <div>
+                              <div className="agent-name">
+                                {s.name}
+                                {s.custom ? <span className="pill">自定义</span> : null}
+                                {s.custom && s.file_count ? (
+                                  <span className="pill">{s.file_count} 文件</span>
+                                ) : null}
+                              </div>
+                              <div className="agent-desc">{s.description}</div>
+                            </div>
+                            <div className="llm-actions">
+                              <label className="check skill-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={s.enabled}
+                                  disabled={skillsBusy}
+                                  onChange={(e) => void toggleSkill(s.name, e.target.checked)}
+                                />
+                                {s.enabled ? "已启用" : "已关闭"}
+                              </label>
+                              {s.custom ? (
+                                <button
+                                  type="button"
+                                  className="ghost danger"
+                                  disabled={skillsBusy}
+                                  onClick={() => void onDeleteSkill(s.name)}
+                                >
+                                  删除
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                  {skillsMsg ? <div className="settings-status">{skillsMsg}</div> : null}
+                </SettingsSection>
+              </SettingsPage>
+            )}
+
+            {settingsTab === "mcp" && (
+              <SettingsPage>
+                <SettingsHint>
+                  插件 / MCP：账号级连接（stdio / sse / http）。启用后可在作曲框用 @mcp:名称 引用；模型开启 tools 时会注入工具。上游不支持 function calling 时可用下方手动调用测试连接。
+                </SettingsHint>
+                <SettingsSection title="已配置">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {mcpServers.length === 0 ? (
+                        <SettingsEmpty>暂无 MCP server，请在下方新增。</SettingsEmpty>
+                      ) : (
+                        mcpServers.map((s) => (
+                          <div key={s.id} className="llm-item">
+                            <div>
+                              <div className="agent-name">
+                                {s.name}
+                                {s.enabled ? <span className="tag">启用</span> : <span className="tag">停用</span>}
+                              </div>
+                              <div className="agent-desc">
+                                {s.transport}
+                                {s.transport === "stdio"
+                                  ? ` · ${s.command} ${(s.args || []).join(" ")}`
+                                  : ` · ${s.url}`}
+                              </div>
+                            </div>
+                            <div className="llm-actions">
+                              <button type="button" onClick={() => void runTestMCP(s.id)} disabled={mcpBusy}>
+                                测试连接
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void toggleMCP(s, !s.enabled)}
+                                disabled={mcpBusy}
+                              >
+                                {s.enabled ? "停用" : "启用"}
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => void removeMCP(s.id)}
+                                disabled={mcpBusy}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                  {mcpTestResult ? <div className="settings-status">{mcpTestResult}</div> : null}
+                  {mcpMsg ? <div className="settings-status">{mcpMsg}</div> : null}
+                </SettingsSection>
+                <SettingsSection title="新增 MCP server">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={saveMCP}>
+                      <label>
+                        名称
+                        <input
+                          value={mcpForm.name}
+                          onChange={(e) => setMcpForm({ ...mcpForm, name: e.target.value })}
+                          required
+                        />
+                      </label>
+                      <label>
+                        传输
+                        <select
+                          value={mcpForm.transport}
+                          onChange={(e) =>
+                            setMcpForm({
+                              ...mcpForm,
+                              transport: e.target.value as MCPServerInput["transport"],
+                            })
+                          }
+                        >
+                          <option value="stdio">stdio</option>
+                          <option value="sse">sse</option>
+                          <option value="http">http</option>
+                        </select>
+                      </label>
+                      {mcpForm.transport === "stdio" ? (
+                        <>
+                          <label>
+                            command（绝对路径或 python3/node/npx/uv…）
+                            <input
+                              value={mcpForm.command || ""}
+                              onChange={(e) => setMcpForm({ ...mcpForm, command: e.target.value })}
+                              placeholder="python3"
+                              required
+                            />
+                          </label>
+                          <label>
+                            args（JSON 数组）
+                            <input
+                              value={mcpArgsText}
+                              onChange={(e) => setMcpArgsText(e.target.value)}
+                              placeholder='["/path/to/server.py"]'
+                            />
+                          </label>
+                        </>
+                      ) : (
+                        <label>
+                          URL
+                          <input
+                            value={mcpForm.url || ""}
+                            onChange={(e) => setMcpForm({ ...mcpForm, url: e.target.value })}
+                            placeholder="http://127.0.0.1:8000/sse"
+                            required
+                          />
+                        </label>
+                      )}
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={mcpForm.enabled !== false}
+                          onChange={(e) => setMcpForm({ ...mcpForm, enabled: e.target.checked })}
+                        />
+                        启用
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={mcpBusy}>
+                          {mcpBusy ? "保存中…" : "新增"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMcpForm({
+                              name: "echo",
+                              transport: "stdio",
+                              command:
+                                "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/.venv/bin/python",
+                              args: [
+                                "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/examples/mcp_echo_server.py",
+                              ],
+                              url: "",
+                              enabled: true,
+                            });
+                            setMcpArgsText(
+                              JSON.stringify([
+                                "/Users/tangxin/Workprojects/open-bot/services/agent-runtime/examples/mcp_echo_server.py",
+                              ]),
+                            );
+                            setMcpMsg("已填入本地 echo 示例路径");
+                          }}
+                        >
+                          填入 echo 示例
+                        </button>
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="手动调用工具">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={runCallMCP}>
+                      <label>
+                        Server
+                        <select
+                          value={mcpCallServerId}
+                          onChange={(e) => setMcpCallServerId(e.target.value)}
+                        >
+                          <option value="">选择…</option>
+                          {mcpServers.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Tool 名
+                        <input
+                          value={mcpCallToolName}
+                          onChange={(e) => setMcpCallToolName(e.target.value)}
+                          placeholder="echo"
+                          required
+                        />
+                      </label>
+                      <label>
+                        Arguments（JSON）
+                        <textarea
+                          rows={3}
+                          value={mcpCallArgs}
+                          onChange={(e) => setMcpCallArgs(e.target.value)}
+                        />
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={mcpBusy}>
+                          调用
+                        </button>
+                      </div>
+                      {mcpCallResult ? (
+                        <pre className="settings-status">{mcpCallResult}</pre>
+                      ) : null}
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+              </SettingsPage>
             )}
 
             {settingsTab === "compact" && (
-              <>
-                <p className="muted small">
-                  上下文压缩以估算 token 相对模型上下文窗口为主触发；消息数 / 字符数阈值作兜底。
-                  每条 LLM 连接可在「LLM」页设置「上下文窗口 (tokens)」（留空则按模型名自动推断）。
-                  摘要以 role=summary 落库，重启后优先复用。
-                </p>
-                {compactCfg ? (
-                  <div className="llm-list">
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">触发模式</div>
-                        <div className="agent-desc">
-                          {compactCfg.token_mode === false ? "仅遗留阈值" : "token 预算（主）+ 遗留阈值（兜底）"}
+              <SettingsPage>
+                <SettingsHint>
+                  上下文压缩以估算 token 相对模型上下文窗口为主触发；消息数 / 字符数阈值作兜底。可在「模型」页为每条连接设置「上下文窗口 (tokens)」（留空则按模型名自动推断）。摘要以 role=summary 落库，重启后优先复用。
+                </SettingsHint>
+                <SettingsSection
+                  title="当前参数"
+                  actions={
+                    <button type="button" onClick={() => void refreshCompact()}>
+                      刷新
+                    </button>
+                  }
+                >
+                  {compactCfg ? (
+                    <SettingsCard>
+                      <div className="llm-list">
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">触发模式</div>
+                            <div className="agent-desc">
+                              {compactCfg.token_mode === false ? "仅遗留阈值" : "token 预算（主）+ 遗留阈值（兜底）"}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">上下文窗口（当前用于估算）</div>
+                            <div className="agent-desc">
+                              {defaultLLM?.context_window && defaultLLM.context_window > 0
+                                ? `${defaultLLM.context_window}（默认模型「${defaultLLM.name}」显式设置）`
+                                : `${compactCfg.context_window ?? compactCfg.default_context_window ?? "—"}（自动 / 环境默认）`}
+                              {defaultLLM?.model ? ` · 模型 ${defaultLLM.model}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">估算 token 预算</div>
+                            <div className="agent-desc">
+                              {compactCfg.token_budget ?? "—"}
+                              {" "}
+                              （窗口 × {compactCfg.budget_ratio ?? 0.75} − 预留输出{" "}
+                              {compactCfg.reserve_output_tokens ?? 2048}）
+                            </div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">默认上下文窗口</div>
+                            <div className="agent-desc">{compactCfg.default_context_window ?? 32768}</div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">预算比例</div>
+                            <div className="agent-desc">{compactCfg.budget_ratio ?? 0.75}</div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">预留输出 tokens</div>
+                            <div className="agent-desc">{compactCfg.reserve_output_tokens ?? 2048}</div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">消息数阈值（兜底）</div>
+                            <div className="agent-desc">{compactCfg.max_messages}</div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">字符数阈值（兜底）</div>
+                            <div className="agent-desc">{compactCfg.max_chars}</div>
+                          </div>
+                        </div>
+                        <div className="llm-item">
+                          <div>
+                            <div className="agent-name">保留最近消息数</div>
+                            <div className="agent-desc">{compactCfg.keep_recent}</div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">上下文窗口（当前用于估算）</div>
-                        <div className="agent-desc">
-                          {defaultLLM?.context_window && defaultLLM.context_window > 0
-                            ? `${defaultLLM.context_window}（默认 LLM「${defaultLLM.name}」显式设置）`
-                            : `${compactCfg.context_window ?? compactCfg.default_context_window ?? "—"}（自动 / 环境默认）`}
-                          {defaultLLM?.model ? ` · 模型 ${defaultLLM.model}` : ""}
-                        </div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">估算 token 预算</div>
-                        <div className="agent-desc">
-                          {compactCfg.token_budget ?? "—"}
-                          {" "}
-                          （窗口 × {compactCfg.budget_ratio ?? 0.75} − 预留输出{" "}
-                          {compactCfg.reserve_output_tokens ?? 2048}）
-                        </div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_DEFAULT_CONTEXT_WINDOW</div>
-                        <div className="agent-desc">{compactCfg.default_context_window ?? 32768}</div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_BUDGET_RATIO</div>
-                        <div className="agent-desc">{compactCfg.budget_ratio ?? 0.75}</div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_RESERVE_OUTPUT_TOKENS</div>
-                        <div className="agent-desc">{compactCfg.reserve_output_tokens ?? 2048}</div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_MAX_MESSAGES（兜底）</div>
-                        <div className="agent-desc">{compactCfg.max_messages}</div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_MAX_CHARS（兜底）</div>
-                        <div className="agent-desc">{compactCfg.max_chars}</div>
-                      </div>
-                    </div>
-                    <div className="llm-item">
-                      <div>
-                        <div className="agent-name">COMPACT_KEEP_RECENT</div>
-                        <div className="agent-desc">{compactCfg.keep_recent}</div>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="muted">无法读取（请确认 runtime 已启动）</div>
-                )}
-                <button type="button" onClick={() => void refreshCompact()}>
-                  刷新
-                </button>
-              </>
+                    </SettingsCard>
+                  ) : (
+                    <SettingsCard>
+                      <SettingsEmpty>无法读取（请确认服务已启动）</SettingsEmpty>
+                    </SettingsCard>
+                  )}
+                </SettingsSection>
+              </SettingsPage>
             )}
 
             {settingsTab === "routines" && (
-              <>
-                <p className="muted small">
-                  例行任务：5 字段 cron（分 时 日 月 周）。调度器运行在 API 进程内，每分钟检查一次；使用指定助手（缺省为你的第一个助手）与默认 LLM。立即运行会写入 routine_runs。
-                </p>
-                <div className="llm-list">
-                  {routines.length === 0 ? (
-                    <div className="muted">暂无例行任务。</div>
-                  ) : (
-                    routines.map((r) => (
-                      <div key={r.id} className="llm-item">
-                        <div style={{ flex: 1 }}>
-                          <div className="agent-name">
-                            {r.name}
-                            {r.enabled ? <span className="tag">启用</span> : <span className="tag">停用</span>}
+              <SettingsPage>
+                <SettingsHint>
+                  例行任务绑定所属 Bot，触发后复用固定会话并注入 [routine] 提示。支持 IANA 时区 cron，以及 Slack / GitHub 事件唤醒（需先创建入站 Hook）。可在聊天里用工具创建/暂停/恢复。
+                </SettingsHint>
+                <SettingsSection title="任务列表">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {routines.length === 0 ? (
+                        <SettingsEmpty>暂无例行任务。</SettingsEmpty>
+                      ) : (
+                        routines.map((r) => (
+                          <div key={r.id} className="llm-item">
+                            <div style={{ flex: 1 }}>
+                              <div className="agent-name">
+                                {r.name}
+                                {r.enabled ? <span className="tag">启用</span> : <span className="tag">停用</span>}
+                              </div>
+                              <div className="agent-desc">
+                                Bot: {agentNameById.get(r.agent_id) || r.agent_id || "—"}
+                                {" · "}
+                                cron: {r.schedule_cron || "（无）"}
+                                {" · "}
+                                {r.timezone || "Asia/Shanghai"}
+                                {r.triggers && r.triggers.length
+                                  ? ` · 事件 ${r.triggers.length}`
+                                  : ""}
+                                {r.conversation_id ? " · 已绑定会话" : ""}
+                                {r.last_run_at ? ` · 上次 ${r.last_run_at}` : ""}
+                              </div>
+                              <div className="agent-desc" style={{ marginTop: 4 }}>
+                                prompt: {r.prompt.slice(0, 120)}
+                                {r.prompt.length > 120 ? "…" : ""}
+                              </div>
+                              {r.last_run ? (
+                                <pre className="settings-status" style={{ marginTop: 8, maxHeight: 160 }}>
+                                  [{r.last_run.status}] {r.last_run.result_text}
+                                </pre>
+                              ) : null}
+                            </div>
+                            <div className="llm-actions">
+                              <label className="check">
+                                <input
+                                  type="checkbox"
+                                  checked={r.enabled}
+                                  onChange={(e) => void toggleRoutine(r, e.target.checked)}
+                                  disabled={routinesBusy}
+                                />
+                                启用
+                              </label>
+                              <button type="button" onClick={() => void runRoutineNow(r.id)} disabled={routinesBusy}>
+                                立即运行
+                              </button>
+                              <button type="button" className="danger" onClick={() => void removeRoutine(r.id)}>
+                                删除
+                              </button>
+                            </div>
                           </div>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="新建例行任务">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={saveRoutine}>
+                      <label>
+                        名称
+                        <input
+                          value={routineForm.name}
+                          onChange={(e) => setRoutineForm({ ...routineForm, name: e.target.value })}
+                          required
+                        />
+                      </label>
+                      <label>
+                        Prompt
+                        <textarea
+                          rows={3}
+                          value={routineForm.prompt}
+                          onChange={(e) => setRoutineForm({ ...routineForm, prompt: e.target.value })}
+                          required
+                        />
+                      </label>
+                      <label>
+                        所属 Bot
+                        <select
+                          value={routineForm.agent_id || agentId || ""}
+                          onChange={(e) => setRoutineForm({ ...routineForm, agent_id: e.target.value })}
+                        >
+                          {agents.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        Cron（5 字段，纯事件可留空）
+                        <input
+                          value={routineForm.schedule_cron}
+                          onChange={(e) => setRoutineForm({ ...routineForm, schedule_cron: e.target.value })}
+                          placeholder="0 9 * * *"
+                        />
+                      </label>
+                      <label>
+                        时区（IANA）
+                        <input
+                          value={routineForm.timezone || "Asia/Shanghai"}
+                          onChange={(e) => setRoutineForm({ ...routineForm, timezone: e.target.value })}
+                          placeholder="Asia/Shanghai"
+                        />
+                      </label>
+                      <label>
+                        事件触发器 JSON
+                        <textarea
+                          rows={3}
+                          value={routineForm.triggers_json || "[]"}
+                          onChange={(e) => setRoutineForm({ ...routineForm, triggers_json: e.target.value })}
+                          placeholder='[{"source":"slack","type":"app_mention"}]'
+                        />
+                      </label>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={!!routineForm.quiet_unchanged}
+                          onChange={(e) => setRoutineForm({ ...routineForm, quiet_unchanged: e.target.checked })}
+                        />
+                        结果无变化时静默
+                      </label>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={routineForm.enabled !== false}
+                          onChange={(e) => setRoutineForm({ ...routineForm, enabled: e.target.checked })}
+                        />
+                        创建后启用
+                      </label>
+                      {routinesMsg ? <div className="settings-status">{routinesMsg}</div> : null}
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={routinesBusy}>
+                          {routinesBusy ? "处理中…" : "创建"}
+                        </button>
+                        <button type="button" onClick={() => void refreshRoutines()}>
+                          刷新
+                        </button>
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+              </SettingsPage>
+            )}
+
+
+                <SettingsSection title="入站 Webhook（Slack / GitHub）">
+                  <SettingsHint>
+                    创建 Hook 后把返回的 URL 配到 Slack Event Subscriptions 或 GitHub Webhooks。
+                    例行任务的 triggers 匹配事件后，会在绑定会话中唤醒助手。密钥可选用 bot_secrets / Hook secret（GitHub 签名）。
+                  </SettingsHint>
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {inboundHooks.length === 0 ? (
+                        <SettingsEmpty>暂无 Hook。点击下方创建。</SettingsEmpty>
+                      ) : (
+                        inboundHooks.map((h) => (
+                          <div key={h.id} className="llm-item">
+                            <div style={{ flex: 1 }}>
+                              <div className="agent-name">{h.label || h.provider}</div>
+                              <div className="agent-desc">Slack: {h.url_slack}</div>
+                              <div className="agent-desc">GitHub: {h.url_github}</div>
+                              <div className="agent-desc">token: {h.token}</div>
+                            </div>
+                            <div className="llm-actions">
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => {
+                                  void (async () => {
+                                    await deleteInboundHook(h.id);
+                                    await refreshRoutines();
+                                  })().catch((err) =>
+                                    setHooksMsg(err instanceof Error ? err.message : String(err)),
+                                  );
+                                }}
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    {hooksMsg ? <div className="settings-status">{hooksMsg}</div> : null}
+                    <div className="llm-actions" style={{ marginTop: 12 }}>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={routinesBusy}
+                        onClick={() => {
+                          void (async () => {
+                            setHooksMsg("");
+                            await createInboundHook({ provider: "any", label: "默认入站" });
+                            await refreshRoutines();
+                            setHooksMsg("已创建 Hook");
+                          })().catch((err) =>
+                            setHooksMsg(err instanceof Error ? err.message : String(err)),
+                          );
+                        }}
+                      >
+                        创建 Hook
+                      </button>
+                    </div>
+                  </SettingsCard>
+                </SettingsSection>
+
+            {settingsTab === "sandbox" && (
+              <SettingsPage>
+                <SettingsHint>
+                  运行环境由本账户下的 Bot 共用。电脑模式决定读写文件时是账户内多 Bot 共用一份，还是每个 Bot 单独一份。你自己的设备请到「电脑」里查看。
+                </SettingsHint>
+                <SettingsSection title="状态">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      <div className="llm-item">
+                        <div>
+                          <div className="agent-name">状态：{sandbox?.status || "未知"}</div>
                           <div className="agent-desc">
-                            cron: {r.schedule_cron}
-                            {r.last_run_at ? ` · 上次 ${r.last_run_at}` : ""}
+                            {sandbox?.image ? `环境 ${sandbox.image}` : "尚未就绪"}
                           </div>
-                          <div className="agent-desc" style={{ marginTop: 4 }}>
-                            prompt: {r.prompt.slice(0, 120)}
-                            {r.prompt.length > 120 ? "…" : ""}
-                          </div>
-                          {r.last_run ? (
-                            <pre
-                              className="status"
-                              style={{ whiteSpace: "pre-wrap", marginTop: 8, maxHeight: 160, overflow: "auto" }}
-                            >
-                              [{r.last_run.status}] {r.last_run.result_text}
-                            </pre>
+                          {sandbox?.last_error ? (
+                            <div className="agent-desc" style={{ color: "var(--danger)" }}>
+                              错误：{sandbox.last_error}
+                            </div>
                           ) : null}
                         </div>
                         <div className="llm-actions">
-                          <label className="check">
-                            <input
-                              type="checkbox"
-                              checked={r.enabled}
-                              onChange={(e) => void toggleRoutine(r, e.target.checked)}
-                              disabled={routinesBusy}
-                            />
-                            启用
-                          </label>
-                          <button type="button" onClick={() => void runRoutineNow(r.id)} disabled={routinesBusy}>
-                            立即运行
+                          <button type="button" onClick={() => void doEnsureSandbox()} disabled={sandboxBusy}>
+                            确保启动
                           </button>
-                          <button type="button" className="danger" onClick={() => void removeRoutine(r.id)}>
-                            删除
+                          <button type="button" onClick={() => void doOpenDesktop()} disabled={sandboxBusy}>
+                            打开桌面
+                          </button>
+                          <button type="button" onClick={() => void doCheckpointSandbox()} disabled={sandboxBusy}>
+                            快照
+                          </button>
+                          <button type="button" onClick={() => void doStopSandbox()} disabled={sandboxBusy}>
+                            停止
+                          </button>
+                          <button
+                            type="button"
+                            className="danger"
+                            onClick={() => void doResetSandbox()}
+                            disabled={sandboxBusy}
+                          >
+                            重置
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void refreshSandbox().catch((err) =>
+                                setSandboxMsg(err instanceof Error ? err.message : String(err)),
+                              )
+                            }
+                          >
+                            刷新
                           </button>
                         </div>
                       </div>
-                    ))
-                  )}
-                </div>
-
-                <form className="llm-form" onSubmit={saveRoutine}>
-                  <h4>新建例行任务</h4>
-                  <label>
-                    名称
-                    <input
-                      value={routineForm.name}
-                      onChange={(e) => setRoutineForm({ ...routineForm, name: e.target.value })}
-                      required
-                    />
-                  </label>
-                  <label>
-                    Prompt
-                    <textarea
-                      rows={3}
-                      value={routineForm.prompt}
-                      onChange={(e) => setRoutineForm({ ...routineForm, prompt: e.target.value })}
-                      required
-                    />
-                  </label>
-                  <label>
-                    Cron（5 字段）
-                    <input
-                      value={routineForm.schedule_cron}
-                      onChange={(e) => setRoutineForm({ ...routineForm, schedule_cron: e.target.value })}
-                      placeholder="0 9 * * *"
-                      required
-                    />
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={routineForm.enabled !== false}
-                      onChange={(e) => setRoutineForm({ ...routineForm, enabled: e.target.checked })}
-                    />
-                    创建后启用
-                  </label>
-                  {routinesMsg ? <div className="status">{routinesMsg}</div> : null}
-                  <div className="llm-actions">
-                    <button type="submit" className="primary" disabled={routinesBusy}>
-                      {routinesBusy ? "处理中…" : "创建"}
-                    </button>
-                    <button type="button" onClick={() => void refreshRoutines()}>
-                      刷新
-                    </button>
-                  </div>
-                </form>
-              </>
+                    </div>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="执行命令">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={doExecSandbox}>
+                      <label>
+                        命令
+                        <input
+                          value={sandboxCmd}
+                          onChange={(e) => setSandboxCmd(e.target.value)}
+                          placeholder="echo hi"
+                          required
+                        />
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={sandboxBusy}>
+                          运行
+                        </button>
+                      </div>
+                      {sandboxExecOut ? <pre className="settings-status">{sandboxExecOut}</pre> : null}
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="文件">
+                  <SettingsCard padded>
+                    <div className="llm-form">
+                      <label>
+                        目录路径
+                        <input
+                          value={sandboxPath}
+                          onChange={(e) => setSandboxPath(e.target.value)}
+                          placeholder="."
+                        />
+                      </label>
+                      <div className="llm-actions">
+                        <button type="button" onClick={() => void doLsSandbox()} disabled={sandboxBusy}>
+                          列出
+                        </button>
+                      </div>
+                      {sandboxLsOut ? <pre className="settings-status">{sandboxLsOut}</pre> : null}
+                      <label>
+                        文件路径
+                        <input
+                          value={sandboxFilePath}
+                          onChange={(e) => setSandboxFilePath(e.target.value)}
+                          placeholder="hello.txt"
+                        />
+                      </label>
+                      <label>
+                        内容
+                        <textarea
+                          rows={3}
+                          value={sandboxFileContent}
+                          onChange={(e) => setSandboxFileContent(e.target.value)}
+                        />
+                      </label>
+                      <div className="llm-actions">
+                        <button type="button" onClick={() => void doWriteSandboxFile()} disabled={sandboxBusy}>
+                          写入
+                        </button>
+                        <button type="button" onClick={() => void doReadSandboxFile()} disabled={sandboxBusy}>
+                          读取
+                        </button>
+                      </div>
+                    </div>
+                  </SettingsCard>
+                  {sandboxMsg ? <div className="settings-status">{sandboxMsg}</div> : null}
+                </SettingsSection>
+              </SettingsPage>
             )}
 
-            {settingsTab === "sandbox" && (
-              <>
-                <p className="muted small">
-                  运行环境（高级）：助手生成脚本、临时文件与预览时使用的隔离环境。
-                  一般用户只需在聊天里查看预览或下载结果；本机设备请看「我的电脑」。
-                  「打开桌面」可打开图形预览（经 API 安全反代）。
-                </p>
-                <div className="llm-list">
-                  <div className="llm-item">
-                    <div>
-                      <div className="agent-name">
-                        状态：{sandbox?.status || "未知"}
-                        {sandbox?.container_id ? (
-                          <span className="tag">{sandbox.container_id.slice(0, 12)}</span>
-                        ) : null}
-                      </div>
-                      <div className="agent-desc">
-                        镜像：{sandbox?.image || "-"}
-                        {sandbox?.workdir_host ? ` · 宿主机 ${sandbox.workdir_host}` : ""}
-                      </div>
-                      {sandbox?.last_error ? (
-                        <div className="agent-desc" style={{ color: "#f88" }}>
-                          错误：{sandbox.last_error}
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="llm-actions">
-                      <button type="button" onClick={() => void doEnsureSandbox()} disabled={sandboxBusy}>
-                        确保启动
-                      </button>
-                      <button type="button" onClick={() => void doOpenDesktop()} disabled={sandboxBusy}>
-                        打开桌面
-                      </button>
-                      <button type="button" onClick={() => void doCheckpointSandbox()} disabled={sandboxBusy}>
-                        快照
-                      </button>
-                      <button type="button" onClick={() => void doStopSandbox()} disabled={sandboxBusy}>
-                        停止
-                      </button>
-                      <button
-                        type="button"
-                        className="danger"
-                        onClick={() => void doResetSandbox()}
-                        disabled={sandboxBusy}
-                      >
-                        重置
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void refreshSandbox().catch((err) =>
-                            setSandboxMsg(err instanceof Error ? err.message : String(err)),
-                          )
-                        }
-                      >
-                        刷新
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <form className="llm-form" onSubmit={doExecSandbox}>
-                  <h4>执行命令</h4>
-                  <label>
-                    命令
-                    <input
-                      value={sandboxCmd}
-                      onChange={(e) => setSandboxCmd(e.target.value)}
-                      placeholder="echo hi"
-                      required
-                    />
-                  </label>
-                  <div className="llm-actions">
-                    <button type="submit" className="primary" disabled={sandboxBusy}>
-                      运行
-                    </button>
-                  </div>
-                  {sandboxExecOut ? (
-                    <pre
-                      className="status"
-                      style={{ whiteSpace: "pre-wrap", maxHeight: 220, overflow: "auto" }}
-                    >
-                      {sandboxExecOut}
-                    </pre>
-                  ) : null}
-                </form>
-
-                <div className="llm-form">
-                  <h4>列目录 / 读写文件</h4>
-                  <label>
-                    路径（ls）
-                    <input
-                      value={sandboxPath}
-                      onChange={(e) => setSandboxPath(e.target.value)}
-                      placeholder="/workspace"
-                    />
-                  </label>
-                  <div className="llm-actions">
-                    <button type="button" onClick={() => void doLsSandbox()} disabled={sandboxBusy}>
-                      列出
-                    </button>
-                  </div>
-                  {sandboxLsOut ? (
-                    <pre
-                      className="status"
-                      style={{ whiteSpace: "pre-wrap", maxHeight: 160, overflow: "auto" }}
-                    >
-                      {sandboxLsOut}
-                    </pre>
-                  ) : null}
-                  <label>
-                    文件路径
-                    <input
-                      value={sandboxFilePath}
-                      onChange={(e) => setSandboxFilePath(e.target.value)}
-                      placeholder="hello.txt"
-                    />
-                  </label>
-                  <label>
-                    内容
-                    <textarea
-                      rows={3}
-                      value={sandboxFileContent}
-                      onChange={(e) => setSandboxFileContent(e.target.value)}
-                    />
-                  </label>
-                  <div className="llm-actions">
-                    <button type="button" onClick={() => void doWriteSandboxFile()} disabled={sandboxBusy}>
-                      写入
-                    </button>
-                    <button type="button" onClick={() => void doReadSandboxFile()} disabled={sandboxBusy}>
-                      读取
-                    </button>
-                  </div>
-                </div>
-                {sandboxMsg ? <div className="status">{sandboxMsg}</div> : null}
-              </>
-            )}
             {settingsTab === "machines" && (
-              <>
-                <p className="muted small">
-                  已注册的电脑。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。
-                  网页不会登记为电脑。可读写 Downloads、Desktop、Documents。
-                  覆盖、删除和移动会在那台电脑上请你确认。
-                  当前客户端：{clientEnv.platform} / {clientEnv.app}
+              <SettingsPage>
+                <SettingsHint>
+                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。覆盖、删除、移动，以及主目录外写入会在对话里请你确认。当前客户端：{clientEnv.platform} / {clientEnv.app}
+                  {deviceDisplayName ? ` · 本机名称「${deviceDisplayName}」` : ""}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
-                </p>
+                </SettingsHint>
                 {clientEnv.app === "tauri" ? (
-                  <label className="muted small">
+                  <label className="settings-inline-check">
                     <input
                       type="checkbox"
                       checked={hostWritesOn}
@@ -3474,168 +4155,291 @@ export default function App() {
                         setHostWritesEnabled(e.target.checked);
                         setHostWritesOn(e.target.checked);
                       }}
-                    />{" "}
+                    />
                     允许写入这台电脑
                   </label>
                 ) : null}
-                <div className="llm-actions" style={{ marginBottom: 12 }}>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      void refreshMachines()
-                        .then(() => setMachinesMsg("已刷新"))
-                        .catch((err) =>
-                          setMachinesMsg(err instanceof Error ? err.message : String(err)),
-                        )
-                    }
-                    disabled={machinesBusy}
-                  >
-                    刷新
-                  </button>
-                  {shouldRegisterAsHost(clientEnv) ? (
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={machinesBusy}
-                      onClick={() => {
-                        setMachinesBusy(true);
-                        void registerMachine({
-                          machine_key: getOrCreateMachineKey(),
-                          label: defaultMachineLabel(clientEnv),
-                          platform: clientEnv.platform,
-                          os: clientEnv.os,
-                          arch: clientEnv.arch,
-                          app: clientEnv.app,
-                          app_version: clientEnv.app_version,
-                        })
-                          .then((m) => {
-                            setStoredMachineId(m.id);
-                            setHostMachineId(m.id);
-                            setMachinesMsg(`已注册：${m.label}`);
-                            return refreshMachines();
-                          })
-                          .catch((err) =>
-                            setMachinesMsg(err instanceof Error ? err.message : String(err)),
-                          )
-                          .finally(() => setMachinesBusy(false));
-                      }}
-                    >
-                      重新注册本机
-                    </button>
-                  ) : null}
-                </div>
-                <div className="llm-list">
-                  {machines.length === 0 ? (
-                    <div className="muted small">暂无已注册电脑。请用桌面或移动客户端登录以登记。</div>
-                  ) : (
-                    machines.map((m) => (
-                      <div className="llm-item" key={m.id}>
-                        <div>
-                          <div className="agent-name">
-                            {m.label}{" "}
-                            <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                <SettingsSection
+                  title="已注册"
+                  actions={
+                    <>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void refreshMachines()
+                            .then(() => setMachinesMsg("已刷新"))
+                            .catch((err) =>
+                              setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                            )
+                        }
+                        disabled={machinesBusy}
+                      >
+                        刷新
+                      </button>
+                      {shouldRegisterAsHost(clientEnv) ? (
+                        <button
+                          type="button"
+                          className="primary"
+                          disabled={machinesBusy}
+                          onClick={() => {
+                            setMachinesBusy(true);
+                            void (async () => {
+                              const label =
+                                deviceDisplayName.trim() ||
+                                (await resolveDefaultMachineLabel(clientEnv));
+                              const m = await registerMachine({
+                                machine_key: getOrCreateMachineKey(),
+                                label,
+                                platform: clientEnv.platform,
+                                os: clientEnv.os,
+                                arch: clientEnv.arch,
+                                app: clientEnv.app,
+                                app_version: clientEnv.app_version,
+                              });
+                              setStoredMachineId(m.id);
+                              setHostMachineId(m.id);
+                              setMachinesMsg(`已注册：${m.label}`);
+                              await refreshMachines();
+                            })()
+                              .catch((err) =>
+                                setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                              )
+                              .finally(() => setMachinesBusy(false));
+                          }}
+                        >
+                          重新注册本机
+                        </button>
+                      ) : null}
+                    </>
+                  }
+                >
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {machines.length === 0 ? (
+                        <SettingsEmpty>暂无已注册电脑。请用桌面或移动客户端登录以登记。</SettingsEmpty>
+                      ) : (
+                        machines.map((m) => (
+                          <div className="llm-item" key={m.id}>
+                            <div>
+                              {renamingMachineId === m.id ? (
+                                <div className="llm-form" style={{ gap: 8, marginBottom: 4 }}>
+                                  <input
+                                    value={renameDraft}
+                                    onChange={(e) => setRenameDraft(e.target.value)}
+                                    maxLength={64}
+                                    placeholder="设备名称"
+                                    autoFocus
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        const name = renameDraft.trim();
+                                        if (!name) return;
+                                        setMachinesBusy(true);
+                                        void updateMachineLabel(m.id, name)
+                                          .then((updated) => {
+                                            setMachinesMsg(`已重命名为 ${updated.label}`);
+                                            setRenamingMachineId(null);
+                                            if (getStoredMachineId() === m.id) {
+                                              setDeviceDisplayName(updated.label);
+                                            }
+                                            return refreshMachines();
+                                          })
+                                          .catch((err) =>
+                                            setMachinesMsg(
+                                              err instanceof Error ? err.message : String(err),
+                                            ),
+                                          )
+                                          .finally(() => setMachinesBusy(false));
+                                      } else if (e.key === "Escape") {
+                                        setRenamingMachineId(null);
+                                      }
+                                    }}
+                                  />
+                                </div>
+                              ) : (
+                                <div className="agent-name">
+                                  {m.label}{" "}
+                                  <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                                </div>
+                              )}
+                              <div className="agent-desc">
+                                {m.platform}
+                                {m.os ? ` · ${m.os}` : ""}
+                                {m.arch ? ` · ${m.arch}` : ""}
+                                {m.app ? ` · ${m.app}` : ""}
+                                {m.last_seen ? ` · 最近 ${m.last_seen}` : ""}
+                              </div>
+                            </div>
+                            <div className="llm-actions">
+                              {renamingMachineId === m.id ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="primary"
+                                    disabled={machinesBusy || !renameDraft.trim()}
+                                    onClick={() => {
+                                      const name = renameDraft.trim();
+                                      if (!name) return;
+                                      setMachinesBusy(true);
+                                      void updateMachineLabel(m.id, name)
+                                        .then((updated) => {
+                                          setMachinesMsg(`已重命名为 ${updated.label}`);
+                                          setRenamingMachineId(null);
+                                          if (getStoredMachineId() === m.id) {
+                                            setDeviceDisplayName(updated.label);
+                                          }
+                                          return refreshMachines();
+                                        })
+                                        .catch((err) =>
+                                          setMachinesMsg(
+                                            err instanceof Error ? err.message : String(err),
+                                          ),
+                                        )
+                                        .finally(() => setMachinesBusy(false));
+                                    }}
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={machinesBusy}
+                                    onClick={() => setRenamingMachineId(null)}
+                                  >
+                                    取消
+                                  </button>
+                                </>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={machinesBusy}
+                                  onClick={() => {
+                                    setRenamingMachineId(m.id);
+                                    setRenameDraft(m.label);
+                                  }}
+                                >
+                                  重命名
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className="danger"
+                                disabled={machinesBusy}
+                                onClick={() => {
+                                  setMachinesBusy(true);
+                                  void deleteMachine(m.id)
+                                    .then(() => {
+                                      if (getStoredMachineId() === m.id) clearStoredMachineId();
+                                      if (renamingMachineId === m.id) setRenamingMachineId(null);
+                                      setMachinesMsg(`已删除 ${m.label}`);
+                                      return refreshMachines();
+                                    })
+                                    .catch((err) =>
+                                      setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                                    )
+                                    .finally(() => setMachinesBusy(false));
+                                }}
+                              >
+                                删除
+                              </button>
+                            </div>
                           </div>
-                          <div className="agent-desc">
-                            {m.platform}
-                            {m.os ? ` · ${m.os}` : ""}
-                            {m.arch ? ` · ${m.arch}` : ""}
-                            {m.app ? ` · ${m.app}` : ""}
-                            {m.last_seen ? ` · 最近 ${m.last_seen}` : ""}
-                          </div>
-                        </div>
-                        <div className="llm-actions">
-                          <button
-                            type="button"
-                            className="danger"
-                            disabled={machinesBusy}
-                            onClick={() => {
-                              setMachinesBusy(true);
-                              void deleteMachine(m.id)
-                                .then(() => {
-                                  if (getStoredMachineId() === m.id) clearStoredMachineId();
-                                  setMachinesMsg(`已删除 ${m.label}`);
-                                  return refreshMachines();
-                                })
-                                .catch((err) =>
-                                  setMachinesMsg(err instanceof Error ? err.message : String(err)),
-                                )
-                                .finally(() => setMachinesBusy(false));
-                            }}
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-                {machinesMsg ? <div className="status">{machinesMsg}</div> : null}
-              </>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                  {machinesMsg ? <div className="settings-status">{machinesMsg}</div> : null}
+                </SettingsSection>
+              </SettingsPage>
             )}
 
             {settingsTab === "secrets" && (
-              <div className="settings-panel">
-                <h3>Bot 密钥</h3>
-                <p className="muted">仅存元数据与密文；列表 API 永不返回明文。需配置 ENCRYPTION_KEY / BOT_SECRETS_KEY。</p>
-                <form
-                  className="stack"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void (async () => {
-                      try {
-                        await createBotSecret({
-                          name: secretFormName,
-                          value: secretFormValue,
-                          origin: secretFormOrigin,
-                          auth_type: "bearer",
-                        });
-                        setSecretFormValue("");
-                        setSecretMsg("已保存");
-                        await refreshSecrets();
-                      } catch (err) {
-                        setSecretMsg(err instanceof Error ? err.message : String(err));
-                      }
-                    })();
-                  }}
-                >
-                  <label>
-                    名称
-                    <input value={secretFormName} onChange={(e) => setSecretFormName(e.target.value)} />
-                  </label>
-                  <label>
-                    Origin (HTTPS)
-                    <input value={secretFormOrigin} onChange={(e) => setSecretFormOrigin(e.target.value)} />
-                  </label>
-                  <label>
-                    值
-                    <input type="password" value={secretFormValue} onChange={(e) => setSecretFormValue(e.target.value)} />
-                  </label>
-                  <button type="submit" className="primary">
-                    添加密钥
-                  </button>
-                </form>
-                <ul className="list">
-                  {botSecrets.map((s) => (
-                    <li key={s.id}>
-                      <strong>{s.name}</strong> · {s.origin || "(no origin)"} · {s.auth_type}
-                      <button
-                        type="button"
-                        className="ghost"
-                        onClick={() =>
-                          void deleteBotSecret(s.id).then(() => refreshSecrets()).catch((e) => setSecretMsg(String(e)))
-                        }
-                      >
-                        删除
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                {secretRequests.length ? (
-                  <div className="status">待处理请求：{secretRequests.length}</div>
-                ) : null}
-                {secretMsg ? <div className="status">{secretMsg}</div> : null}
-              </div>
+              <SettingsPage>
+                <SettingsHint>
+                  仅存元数据与密文；列表接口永不返回明文。需在服务端配置加密密钥。
+                </SettingsHint>
+                <SettingsSection title="添加密钥">
+                  <SettingsCard padded>
+                    <form
+                      className="llm-form"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        void (async () => {
+                          try {
+                            await createBotSecret({
+                              name: secretFormName,
+                              value: secretFormValue,
+                              origin: secretFormOrigin,
+                              auth_type: "bearer",
+                            });
+                            setSecretFormValue("");
+                            setSecretMsg("已保存");
+                            await refreshSecrets();
+                          } catch (err) {
+                            setSecretMsg(err instanceof Error ? err.message : String(err));
+                          }
+                        })();
+                      }}
+                    >
+                      <label>
+                        名称
+                        <input value={secretFormName} onChange={(e) => setSecretFormName(e.target.value)} />
+                      </label>
+                      <label>
+                        Origin (HTTPS)
+                        <input value={secretFormOrigin} onChange={(e) => setSecretFormOrigin(e.target.value)} />
+                      </label>
+                      <label>
+                        值
+                        <input type="password" value={secretFormValue} onChange={(e) => setSecretFormValue(e.target.value)} />
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary">
+                          添加密钥
+                        </button>
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="已保存">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {botSecrets.length === 0 ? (
+                        <SettingsEmpty>暂无密钥。</SettingsEmpty>
+                      ) : (
+                        botSecrets.map((s) => (
+                          <div key={s.id} className="llm-item">
+                            <div>
+                              <div className="agent-name">{s.name}</div>
+                              <div className="agent-desc">
+                                {s.origin || "(no origin)"} · {s.auth_type}
+                              </div>
+                            </div>
+                            <div className="llm-actions">
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() =>
+                                  void deleteBotSecret(s.id)
+                                    .then(() => refreshSecrets())
+                                    .catch((e) => setSecretMsg(String(e)))
+                                }
+                              >
+                                删除
+                              </button>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                  {secretRequests.length ? (
+                    <div className="settings-status">待处理请求：{secretRequests.length}</div>
+                  ) : null}
+                  {secretMsg ? <div className="settings-status">{secretMsg}</div> : null}
+                </SettingsSection>
+              </SettingsPage>
             )}
+
               </div>
             </div>
           </div>

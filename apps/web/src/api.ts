@@ -38,6 +38,14 @@ export type AgentInput = {
   name: string;
   description: string;
   system_prompt: string;
+  computer_mode?: "team" | "private" | string;
+};
+
+export type AgentSkill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  custom?: boolean;
 };
 
 export type Skill = {
@@ -45,6 +53,13 @@ export type Skill = {
   description: string;
   enabled: boolean;
   custom?: boolean;
+  file_count?: number;
+  files?: { path: string; content?: string }[];
+};
+
+export type SkillFile = {
+  path: string;
+  content: string;
 };
 
 export type Message = {
@@ -184,6 +199,78 @@ export async function deleteAgent(id: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(await readError(res));
 }
 
+export async function listAgentSkills(agentId: string): Promise<AgentSkill[]> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/skills`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.skills ?? [];
+}
+
+export async function setAgentSkill(
+  agentId: string,
+  name: string,
+  enabled: boolean,
+): Promise<AgentSkill> {
+  const res = await fetch(
+    `${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function replaceAgentSkills(
+  agentId: string,
+  enabled: string[],
+): Promise<AgentSkill[]> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/skills`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.skills ?? [];
+}
+
+export async function applyAgentOnboarding(
+  agentId: string,
+  body: {
+    focus?: string;
+    description?: string;
+    system_prompt?: string;
+    skills?: string[] | null;
+  },
+): Promise<Agent> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/onboarding`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.agent as Agent;
+}
+
+/** Persist assistant reply as a custom skill package (SKILL.md). Off by default in UI. */
+export async function saveSkillFromText(opts: {
+  name: string;
+  description?: string;
+  body_markdown: string;
+}): Promise<Skill> {
+  return uploadSkill({
+    name: opts.name,
+    description: opts.description || "",
+    body_markdown: opts.body_markdown,
+  });
+}
+
 export async function listSkills(): Promise<Skill[]> {
   const res = await fetch(`${API_BASE}/v1/skills`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
@@ -211,6 +298,56 @@ export async function uploadSkill(body: {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function uploadSkillPackage(opts: {
+  name?: string;
+  description?: string;
+  files?: SkillFile[];
+  archive?: File;
+  folderFiles?: File[];
+}): Promise<Skill> {
+  const { name, description, files, archive, folderFiles } = opts;
+  if (archive || (folderFiles && folderFiles.length > 0)) {
+    const form = new FormData();
+    if (name?.trim()) form.append("name", name.trim());
+    if (description?.trim()) form.append("description", description.trim());
+    if (archive) {
+      form.append("archive", archive, archive.name || "skill.zip");
+    } else if (folderFiles) {
+      for (const f of folderFiles) {
+        const rel =
+          (f as File & { webkitRelativePath?: string }).webkitRelativePath || f.name;
+        form.append("files", f, rel);
+      }
+    }
+    const res = await fetch(`${API_BASE}/v1/skills/upload`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: form,
+    });
+    if (!res.ok) throw new Error(await readError(res));
+    return res.json();
+  }
+  const res = await fetch(`${API_BASE}/v1/skills/upload`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      name,
+      description,
+      files,
+    }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function getSkillPackage(name: string): Promise<Skill> {
+  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/package`, {
+    headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
@@ -352,6 +489,47 @@ export async function setDefaultLLMConnection(id: string): Promise<LLMConnection
   return res.json();
 }
 
+export type LLMToolsProbeResult = {
+  ok: boolean;
+  can_enable_tools: boolean;
+  supports_tools: boolean;
+  mode: "native" | "markup" | "forced_only" | "none" | "error" | string;
+  detail: string;
+  hint?: string;
+  error?: string;
+  http_status?: number;
+};
+
+export async function probeLLMTools(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  connection_id?: string;
+}): Promise<LLMToolsProbeResult> {
+  const res = await fetch(`${API_BASE}/v1/llm/probe-tools`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    native: "原生 function calling",
+    markup: "文本工具协议",
+    forced_only: "仅强制 tool_choice",
+    none: "不支持 tools",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.can_enable_tools ? `可用（${label}）` : `不可用（${label}）`;
+  const bits = [head, result.detail];
+  if (result.hint) bits.push(result.hint);
+  return bits.filter(Boolean).join(" ");
+}
+
 export type AttachmentMeta = {
   id: string;
   name: string;
@@ -465,6 +643,11 @@ async function readSSEStream(
   if (!sawDone) handlers.onDone?.();
 }
 
+export type HandoffContextMsg = {
+  role: "user" | "assistant" | "system" | "summary" | string;
+  content: string;
+};
+
 export async function sendMessageStream(
   conversationId: string,
   content: string,
@@ -473,6 +656,7 @@ export async function sendMessageStream(
   attachments?: AttachmentMeta[],
   agentIds?: string[],
   client?: import("./lib/clientEnv").ClientContext,
+  handoffContext?: HandoffContextMsg[],
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (attachments && attachments.length > 0) {
@@ -483,6 +667,9 @@ export async function sendMessageStream(
   }
   if (client) {
     body.client = client;
+  }
+  if (handoffContext && handoffContext.length > 0) {
+    body.handoff_context = handoffContext;
   }
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -497,6 +684,21 @@ export async function sendMessageStream(
     throw new Error(await readError(res));
   }
   await readSSEStream(res.body, handlers);
+}
+
+/** Store a user message without starting an agent run (e.g. @handoff record on source bot). */
+export async function persistConversationMessage(
+  conversationId: string,
+  content: string,
+): Promise<Message> {
+  const res = await fetch(`${API_BASE}/v1/conversations/${encodeURIComponent(conversationId)}/messages`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ content, persist_only: true }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.message as Message;
 }
 
 /** Rejoin an in-flight server run after refresh / reconnect. Does not cancel on abort. */
@@ -886,6 +1088,14 @@ export type RoutineRun = {
   created_at: string;
 };
 
+export type RoutineTrigger = {
+  source: string;
+  type: string;
+  keywords?: string[];
+  actions?: string[];
+  repo?: string;
+};
+
 export type Routine = {
   id: string;
   user_id: string;
@@ -893,7 +1103,17 @@ export type Routine = {
   prompt: string;
   schedule_cron: string;
   enabled: boolean;
+  agent_id: string;
+  timezone?: string;
+  conversation_id?: string;
+  triggers_json?: string;
+  triggers?: RoutineTrigger[];
+  max_retries?: number;
+  fail_count?: number;
+  quiet_unchanged?: boolean;
   last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_error?: string;
   created_at: string;
   updated_at: string;
   last_run?: RoutineRun | null;
@@ -904,7 +1124,55 @@ export type RoutineInput = {
   prompt: string;
   schedule_cron: string;
   enabled?: boolean;
+  agent_id?: string;
+  timezone?: string;
+  conversation_id?: string;
+  triggers?: RoutineTrigger[];
+  triggers_json?: string;
+  max_retries?: number;
+  quiet_unchanged?: boolean;
 };
+
+export type InboundHook = {
+  id: string;
+  user_id: string;
+  provider: string;
+  token: string;
+  label: string;
+  has_secret?: boolean;
+  created_at: string;
+  url_slack?: string;
+  url_github?: string;
+};
+
+export async function listInboundHooks(): Promise<InboundHook[]> {
+  const res = await fetch(`${API_BASE}/v1/inbound-hooks`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.hooks ?? [];
+}
+
+export async function createInboundHook(body: {
+  provider: string;
+  label?: string;
+  secret?: string;
+}): Promise<InboundHook & { hint?: string }> {
+  const res = await fetch(`${API_BASE}/v1/inbound-hooks`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteInboundHook(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/inbound-hooks/${id}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
 
 export async function listRoutines(): Promise<Routine[]> {
   const res = await fetch(`${API_BASE}/v1/routines`, { headers: authHeaders() });
@@ -1258,6 +1526,17 @@ export async function heartbeatMachine(id: string): Promise<Machine> {
   const res = await fetch(`${API_BASE}/v1/machines/${encodeURIComponent(id)}/heartbeat`, {
     method: "POST",
     headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as { machine: Machine };
+  return data.machine;
+}
+
+export async function updateMachineLabel(id: string, label: string): Promise<Machine> {
+  const res = await fetch(`${API_BASE}/v1/machines/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ label }),
   });
   if (!res.ok) throw new Error(await readError(res));
   const data = (await res.json()) as { machine: Machine };

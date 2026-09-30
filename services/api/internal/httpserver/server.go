@@ -118,10 +118,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("DELETE /v1/admin/skills/{name}/files", s.requireOrgAdmin(s.handleAdminDeleteSkillFile))
 	mux.HandleFunc("GET /v1/admin/users/{id}/skills", s.requireOrgAdmin(s.handleAdminListUserSkills))
 	mux.HandleFunc("PUT /v1/admin/users/{id}/skills/{name}", s.requireOrgAdmin(s.handleAdminSetUserSkill))
-
 	mux.HandleFunc("GET /v1/admin/users/{id}/machines", s.requireOrgAdmin(s.handleAdminListUserMachines))
 	mux.HandleFunc("DELETE /v1/admin/users/{id}/machines/{machineId}", s.requireOrgAdmin(s.handleAdminDeleteUserMachine))
-
 
 	mux.HandleFunc("GET /v1/admin/traces/status", s.requireOrgAdmin(s.handleAdminTracesStatus))
 	mux.HandleFunc("GET /v1/admin/traces", s.requireOrgAdmin(s.handleAdminListTraces))
@@ -1094,6 +1092,10 @@ type sendBody struct {
 	Attachments     []AttachmentRef `json:"attachments"`
 	AgentIDs        []string        `json:"agent_ids"` // group @targets; empty = first member / conv agent
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
+	// PersistOnly stores the user message and returns JSON without running an agent.
+	PersistOnly bool `json:"persist_only"`
+	// HandoffContext is injected into runtime history (not stored) when @-handing off from another bot thread.
+	HandoffContext []runtimeMsg `json:"handoff_context"`
 }
 
 type runtimeMsg struct {
@@ -1147,6 +1149,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	userMsg, err := s.db.AddMessage(conv.ID, "user", storedContent)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if body.PersistOnly {
+		writeJSON(w, http.StatusOK, map[string]any{"message": userMsg, "persist_only": true})
 		return
 	}
 	// Auto-title from first user message (20–30 chars, strip newlines).
@@ -1264,6 +1270,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		history := historyForRuntime(msgs)
+		if len(body.HandoffContext) > 0 {
+			history = mergeHandoffContext(history, body.HandoffContext)
+		}
 		enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(uid, agentID)
 		if enabledSkills == nil {
 			enabledSkills = []string{}
@@ -1328,6 +1337,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 // resolveSendTargets picks which agents should answer this turn.
 // DM: always the conversation's agent.
 // Group: explicit agent_ids and/or @mentions; if neither, first channel member (conv.AgentID).
+// @everyone expands to all members. Otherwise only the first target owns this stage
+// (Grok-style single-stage owner); other mentions stay in the user text for context.
 func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string) ([]string, error) {
 	if conv.ChannelID == "" {
 		return []string{conv.AgentID}, nil
@@ -1367,7 +1378,11 @@ func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit 
 		}
 		return []string{members[0]}, nil
 	}
-	return targets, nil
+	if mentionIncludesEveryone(content) {
+		return targets, nil
+	}
+	// Single-stage owner: first mentioned / explicit agent replies this turn.
+	return []string{targets[0]}, nil
 }
 
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text + optional summary.
