@@ -197,6 +197,11 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/routines/{id}", s.requireAuth(s.handlePatchRoutine))
 	mux.HandleFunc("DELETE /v1/routines/{id}", s.requireAuth(s.handleDeleteRoutine))
 	mux.HandleFunc("POST /v1/routines/{id}/run", s.requireAuth(s.handleRunRoutine))
+	mux.HandleFunc("GET /v1/inbound-hooks", s.requireAuth(s.handleListInboundHooks))
+	mux.HandleFunc("POST /v1/inbound-hooks", s.requireAuth(s.handleCreateInboundHook))
+	mux.HandleFunc("DELETE /v1/inbound-hooks/{id}", s.requireAuth(s.handleDeleteInboundHook))
+	mux.HandleFunc("POST /v1/webhooks/slack/{token}", s.handleSlackWebhook)
+	mux.HandleFunc("POST /v1/webhooks/github/{token}", s.handleGitHubWebhook)
 
 	// Sandbox computer (Phase 1 MVP)
 	mux.HandleFunc("GET /v1/sandbox", s.requireAuth(s.handleGetSandbox))
@@ -229,6 +234,11 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/bot-secrets/decrypt", s.requireInternal(s.handleInternalDecryptSecret))
 	mux.HandleFunc("POST /internal/bot-secrets/http", s.requireInternal(s.handleInternalSecretHTTP))
 	mux.HandleFunc("POST /internal/routines/run", s.requireInternal(s.handleInternalRunRoutine))
+	mux.HandleFunc("POST /internal/conversation-tasks/enqueue", s.requireInternal(s.handleInternalEnqueueTask))
+	mux.HandleFunc("POST /internal/routines/list", s.requireInternal(s.handleInternalListRoutines))
+	mux.HandleFunc("POST /internal/routines/create", s.requireInternal(s.handleInternalCreateRoutine))
+	mux.HandleFunc("POST /internal/routines/update", s.requireInternal(s.handleInternalUpdateRoutine))
+	mux.HandleFunc("POST /internal/routines/delete", s.requireInternal(s.handleInternalDeleteRoutine))
 
 	// Registered host machines (ListMachines-like)
 	mux.HandleFunc("GET /v1/machines", s.requireAuth(s.handleListMachines))

@@ -331,7 +331,7 @@ func (s *Server) handleInternalRunRoutine(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	run, err := s.executeRoutine(r.Context(), rt)
+	run, err := s.executeRoutine(r.Context(), rt, "")
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "run": run})
 		return
