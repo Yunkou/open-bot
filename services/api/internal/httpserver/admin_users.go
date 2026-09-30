@@ -373,3 +373,56 @@ func (s *Server) handleAdminBatchDeleteUsers(w http.ResponseWriter, r *http.Requ
 		"failed":  failed,
 	})
 }
+
+func (s *Server) handleAdminListUserMachines(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	userID := r.PathValue("id")
+	target, err := s.db.GetUserByID(userID)
+	if err != nil || target.OrgID != admin.OrgID {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+		return
+	}
+	list, err := s.db.ListMachines(userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if list == nil {
+		list = []db.Machine{}
+	}
+	s.markConnected(userID, list)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"machines": list,
+		"user_id":  userID,
+		"username": target.Username,
+	})
+}
+
+func (s *Server) handleAdminDeleteUserMachine(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	userID := r.PathValue("id")
+	machineID := r.PathValue("machineId")
+	target, err := s.db.GetUserByID(userID)
+	if err != nil || target.OrgID != admin.OrgID {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
+		return
+	}
+	if err := s.db.DeleteMachine(userID, machineID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "设备不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.writeAudit(admin.OrgID, admin.ID, "user.machine_delete", "user", userID, map[string]any{
+		"machine_id": machineID,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

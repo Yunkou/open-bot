@@ -247,6 +247,9 @@ fn run_captured(command: &str) -> Result<Value, String> {
 #[tauri::command]
 pub fn host_shell(command: String, terminal: bool) -> Result<Value, String> {
     let command = validate_label(&command, 2000)?;
+    if crate::host_ssh::is_remote_ssh_command(&command) {
+        return Err("远程连接由应用自己完成，请改用 host_ssh_exec、host_ssh_ls、host_ssh_read、host_ssh_write 或 host_ssh_delete".into());
+    }
     if terminal {
         open_terminal(&command)?;
         return Ok(json!({ "ok": true, "terminal": true, "command": command }));
@@ -257,4 +260,50 @@ pub fn host_shell(command: String, terminal: bool) -> Result<Value, String> {
         obj.insert("terminal".into(), json!(false));
     }
     Ok(result)
+}
+
+fn trim_cmd_out(raw: &[u8]) -> String {
+    String::from_utf8_lossy(raw).trim().to_string()
+}
+
+/// Best-effort computer / device display name for machine registration.
+#[tauri::command]
+pub fn host_device_name() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        for args in [["--get", "ComputerName"], ["--get", "LocalHostName"]] {
+            if let Ok(out) = Command::new("scutil").args(args).output() {
+                if out.status.success() {
+                    let name = trim_cmd_out(&out.stdout);
+                    if !name.is_empty() {
+                        return Ok(name);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(v) = std::env::var("COMPUTERNAME") {
+            let name = v.trim().to_string();
+            if !name.is_empty() {
+                return Ok(name);
+            }
+        }
+    }
+    if let Ok(out) = Command::new("hostname").output() {
+        if out.status.success() {
+            let name = trim_cmd_out(&out.stdout);
+            if !name.is_empty() {
+                return Ok(name);
+            }
+        }
+    }
+    if let Ok(v) = std::env::var("HOSTNAME") {
+        let name = v.trim().to_string();
+        if !name.is_empty() {
+            return Ok(name);
+        }
+    }
+    Err("无法读取设备名称".into())
 }

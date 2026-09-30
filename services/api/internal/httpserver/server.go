@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tangxin/open-bot/services/api/internal/auth"
@@ -30,9 +31,12 @@ type Server struct {
 	hub        *busHub
 	events     *chatHub
 	hosts      *hostHub
-	tasks      *taskControl
-	sbx        *sandbox.Manager
-	runs       *activeRuns
+	confirms   *hostConfirmGate
+	// Serializes coalescing parallel delete confirms into one chat card.
+	deleteConfirmMu sync.Mutex
+	tasks           *taskControl
+	sbx             *sandbox.Manager
+	runs            *activeRuns
 }
 
 func Listen(addr, runtimeURL string, database *db.DB) error {
@@ -46,6 +50,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 		hub:        newBusHub(),
 		events:     newChatHub(),
 		hosts:      newHostHub(),
+		confirms:   newHostConfirmGate(),
 		tasks:      newTaskControl(),
 		sbx:        sandbox.NewManager(sandbox.LoadConfig()),
 		runs:       newActiveRuns(),
@@ -112,6 +117,10 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("DELETE /v1/admin/skills/{name}/files", s.requireOrgAdmin(s.handleAdminDeleteSkillFile))
 	mux.HandleFunc("GET /v1/admin/users/{id}/skills", s.requireOrgAdmin(s.handleAdminListUserSkills))
 	mux.HandleFunc("PUT /v1/admin/users/{id}/skills/{name}", s.requireOrgAdmin(s.handleAdminSetUserSkill))
+
+	mux.HandleFunc("GET /v1/admin/users/{id}/machines", s.requireOrgAdmin(s.handleAdminListUserMachines))
+	mux.HandleFunc("DELETE /v1/admin/users/{id}/machines/{machineId}", s.requireOrgAdmin(s.handleAdminDeleteUserMachine))
+
 
 	mux.HandleFunc("GET /v1/admin/traces/status", s.requireOrgAdmin(s.handleAdminTracesStatus))
 	mux.HandleFunc("GET /v1/admin/traces", s.requireOrgAdmin(s.handleAdminListTraces))
@@ -224,6 +233,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/machines/register", s.requireAuth(s.handleRegisterMachine))
 	mux.HandleFunc("POST /v1/machines/{id}/heartbeat", s.requireAuth(s.handleHeartbeatMachine))
 	mux.HandleFunc("DELETE /v1/machines/{id}", s.requireAuth(s.handleDeleteMachine))
+	mux.HandleFunc("PATCH /v1/machines/{id}", s.requireAuth(s.handlePatchMachine))
 	mux.HandleFunc("GET /v1/machines/{id}/exec", s.handleHostExecWS)
 	mux.HandleFunc("POST /internal/machines/list", s.requireInternal(s.handleInternalListMachines))
 	mux.HandleFunc("POST /internal/machines/exec", s.requireInternal(s.handleInternalHostExec))
@@ -1410,9 +1420,75 @@ func historyForRuntime(msgs []db.Message) []runtimeMsg {
 		switch m.Role {
 		case "user", "assistant", "summary", "system":
 			out = append(out, runtimeMsg{Role: m.Role, Content: m.Content})
+		case "host_confirm":
+			if note := hostConfirmRuntimeNote(m.Content); note != "" {
+				// Visible to the model so it does not invent allow/deny outcomes.
+				out = append(out, runtimeMsg{Role: "system", Content: note})
+			}
 		}
 	}
 	return out
+}
+
+func hostConfirmRuntimeNote(content string) string {
+	var payload hostConfirmPayload
+	if json.Unmarshal([]byte(content), &payload) != nil {
+		return ""
+	}
+	op := strings.TrimSpace(payload.Op)
+	if op == "" {
+		return ""
+	}
+	path := strings.TrimSpace(payload.Path)
+	if path == "" {
+		path = "(无路径)"
+	}
+	status := strings.TrimSpace(payload.Status)
+	switch status {
+	case "allowed":
+		status = "已允许"
+	case "denied":
+		status = "已拒绝"
+	case "pending":
+		status = "等待用户在对话里点允许/拒绝"
+	case "":
+		status = "未知"
+	}
+	return "[本机操作确认] op=" + op + " path=" + path + " 结果=" + status +
+		"。这是系统记录。禁止编造与此相反的批准/拒绝；用户要重试删除时必须再次调用 host_delete（或 host_ssh_delete）。"
+}
+
+// mergeHandoffContext inserts prior-thread turns before the latest user message
+// so the receiving bot can continue with shared context without storing it in its thread.
+func mergeHandoffContext(history, handoff []runtimeMsg) []runtimeMsg {
+	if len(handoff) == 0 {
+		return history
+	}
+	cleaned := make([]runtimeMsg, 0, len(handoff))
+	for _, m := range handoff {
+		role := strings.TrimSpace(m.Role)
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
+		switch role {
+		case "user", "assistant", "system", "summary":
+			cleaned = append(cleaned, runtimeMsg{Role: role, Content: content})
+		}
+	}
+	if len(cleaned) == 0 {
+		return history
+	}
+	if len(history) > 0 && history[len(history)-1].Role == "user" {
+		base := history[:len(history)-1]
+		last := history[len(history)-1]
+		out := make([]runtimeMsg, 0, len(base)+len(cleaned)+1)
+		out = append(out, base...)
+		out = append(out, cleaned...)
+		out = append(out, last)
+		return out
+	}
+	return append(cleaned, history...)
 }
 
 func (s *Server) handleCompactConfig(w http.ResponseWriter, r *http.Request) {

@@ -37,3 +37,38 @@ commands.allow = ["host_open"]
 identifier = "allow-host-shell"
 description = "Enables the host_shell command."
 commands.allow = ["host_shell"]
+
+[[permission]]
+identifier = "allow-host-ssh-probe"
+description = "Enables the host_ssh_probe command."
+commands.allow = ["host_ssh_probe"]
+
+[[permission]]
+identifier = "allow-host-ssh-ls"
+description = "Enables the host_ssh_ls command."
+commands.allow = ["host_ssh_ls"]
+
+[[permission]]
+identifier = "allow-host-ssh-read"
+description = "Enables the host_ssh_read command."
+commands.allow = ["host_ssh_read"]
+
+[[permission]]
+identifier = "allow-host-ssh-write"
+description = "Enables the host_ssh_write command."
+commands.allow = ["host_ssh_write"]
+
+[[permission]]
+identifier = "allow-host-ssh-delete"
+description = "Enables the host_ssh_delete command."
+commands.allow = ["host_ssh_delete"]
+
+[[permission]]
+identifier = "allow-host-ssh-exec"
+description = "Enables the host_ssh_exec command."
+commands.allow = ["host_ssh_exec"]
+
+[[permission]]
+identifier = "allow-host-device-name"
+description = "Enables the host_device_name command."
+commands.allow = ["host_device_name"]

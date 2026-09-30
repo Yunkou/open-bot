@@ -1,12 +1,16 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/tangxin/open-bot/services/api/internal/auth"
 	"github.com/tangxin/open-bot/services/api/internal/db"
 )
@@ -95,6 +99,33 @@ func (s *Server) handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+
+func (s *Server) handlePatchMachine(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body struct {
+		Label *string `json:"label"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if body.Label == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label required"})
+		return
+	}
+	m, err := s.db.UpdateMachineLabel(uid, id, *body.Label)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "machine not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"machine": m})
+}
+
 func (s *Server) handleInternalListMachines(w http.ResponseWriter, r *http.Request) {
 	var body internalListMachinesBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -171,6 +202,25 @@ func (s *Server) handleHostExecWS(w http.ResponseWriter, r *http.Request) {
 	s.hosts.serve(claims.UserID, m.ID, conn)
 }
 
+func supportedHostOp(op string) bool {
+	switch op {
+	case "ls", "read", "write", "delete", "move", "open", "shell",
+		"ssh_ls", "ssh_read", "ssh_write", "ssh_delete", "ssh_exec":
+		return true
+	default:
+		return false
+	}
+}
+
+func hostOpNeedsConfirm(op string) bool {
+	switch op {
+	case "write", "delete", "move", "shell", "ssh_write", "ssh_delete", "ssh_exec":
+		return true
+	default:
+		return false
+	}
+}
+
 func hostActivityLabel(label, op string) string {
 	action := "处理文件"
 	switch op {
@@ -188,9 +238,19 @@ func hostActivityLabel(label, op string) string {
 		action = "打开软件"
 	case "shell":
 		action = "运行命令"
+	case "ssh_ls":
+		action = "列出远程目录"
+	case "ssh_read":
+		action = "读取远程文件"
+	case "ssh_write":
+		action = "写入远程文件"
+	case "ssh_delete":
+		action = "删除远程文件"
+	case "ssh_exec":
+		action = "在远程主机上运行命令"
 	}
 	msg := "正在" + label + "上" + action
-	if op == "write" || op == "delete" || op == "move" || op == "shell" {
+	if hostOpNeedsConfirm(op) {
 		msg += "。若需要确认，在对话里点允许或拒绝"
 	}
 	return msg
@@ -205,6 +265,9 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		Path           string `json:"path"`
 		Dest           string `json:"dest"`
 		Content        string `json:"content"`
+		SSHHost        string `json:"ssh_host"`
+		SSHUser        string `json:"ssh_user"`
+		SSHPort        int    `json:"ssh_port"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -217,17 +280,27 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user_id, machine_id and op required"})
 		return
 	}
-	switch op {
-	case "ls", "read", "write", "delete", "move", "open", "shell":
-	default:
+	if !supportedHostOp(op) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported op"})
 		return
 	}
-	if op != "ls" && strings.TrimSpace(body.Path) == "" {
+	sshHost := strings.TrimSpace(body.SSHHost)
+	sshUser := strings.TrimSpace(body.SSHUser)
+	if strings.HasPrefix(op, "ssh_") {
+		if sshHost == "" || len(sshHost) > 253 || len(sshUser) > 64 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ssh host required"})
+			return
+		}
+		if body.SSHPort < 0 || body.SSHPort > 65535 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ssh port invalid"})
+			return
+		}
+	}
+	if op != "ls" && op != "ssh_ls" && strings.TrimSpace(body.Path) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path required"})
 		return
 	}
-	if op == "shell" && len(body.Path) > 2000 {
+	if (op == "shell" || op == "ssh_exec") && len(body.Path) > 2000 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command too long"})
 		return
 	}
@@ -258,6 +331,39 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
+
+	conversationID := strings.TrimSpace(body.ConversationID)
+	preconfirmed := false
+	confirmReqID := ""
+	if hostOpNeedsConfirm(op) && conversationID != "" {
+		preview := ""
+		if op == "shell" || op == "ssh_exec" || op == "write" || op == "ssh_write" {
+			preview = body.Content
+			if preview == "" && (op == "shell" || op == "ssh_exec") {
+				preview = body.Path
+			}
+		}
+		allowed, reqID, cerr := s.requestChatHostConfirm(
+			r.Context(), uid, conversationID, op, body.Path, body.Dest, preview,
+		)
+		confirmReqID = reqID
+		if cerr != nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "denied": true, "error": cerr.Error(),
+				"req_id": reqID, "machine_id": mid, "label": m.Label,
+			})
+			return
+		}
+		if !allowed {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": false, "denied": true, "error": "用户拒绝了这次操作",
+				"req_id": reqID, "machine_id": mid, "label": m.Label,
+			})
+			return
+		}
+		preconfirmed = true
+	}
+
 	if s.events != nil {
 		s.events.Publish(uid, map[string]any{
 			"type":       "host_activity",
@@ -268,7 +374,11 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	}
 	result, err := s.hosts.Call(r.Context(), uid, mid, hostExecRequest{
 		Op: op, Path: body.Path, Dest: body.Dest, Content: body.Content,
-		ConversationID: strings.TrimSpace(body.ConversationID),
+		ConversationID: conversationID,
+		SSHHost:        sshHost,
+		SSHUser:        sshUser,
+		SSHPort:        body.SSHPort,
+		Preconfirmed:   preconfirmed,
 	})
 	if s.events != nil {
 		s.events.Publish(uid, map[string]any{
@@ -277,7 +387,16 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 			"machine_id": mid,
 		})
 	}
-	s.finishHostConfirm(uid, strings.TrimSpace(body.ConversationID), result)
+	if result == nil {
+		result = map[string]any{}
+	}
+	if confirmReqID != "" {
+		result["req_id"] = confirmReqID
+		if preconfirmed {
+			result["confirmed"] = true
+		}
+	}
+	s.finishHostConfirm(uid, conversationID, result)
 	if err != nil {
 		if errors.Is(err, errHostNotConnected) {
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -314,6 +433,198 @@ type hostConfirmPayload struct {
 	Dest    string `json:"dest,omitempty"`
 	Preview string `json:"preview,omitempty"`
 	Status  string `json:"status"`
+}
+
+// hostConfirmGate parks dangerous host ops until the chat UI allows/denies.
+// Multiple waiters may share one reqID when parallel deletes are coalesced.
+type hostConfirmGate struct {
+	mu   sync.Mutex
+	wait map[string][]chan bool
+}
+
+func newHostConfirmGate() *hostConfirmGate {
+	return &hostConfirmGate{wait: map[string][]chan bool{}}
+}
+
+func hostConfirmKey(conversationID, reqID string) string {
+	return conversationID + "\n" + reqID
+}
+
+func isDeleteConfirmOp(op string) bool {
+	return op == "delete" || op == "ssh_delete"
+}
+
+func mergeHostPaths(existing, add string) string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, chunk := range []string{existing, add} {
+		for _, line := range strings.Split(chunk, "\n") {
+			p := strings.TrimSpace(line)
+			if p == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func (g *hostConfirmGate) register(conversationID, reqID string) chan bool {
+	ch := make(chan bool, 1)
+	g.mu.Lock()
+	if g.wait == nil {
+		g.wait = map[string][]chan bool{}
+	}
+	key := hostConfirmKey(conversationID, reqID)
+	g.wait[key] = append(g.wait[key], ch)
+	g.mu.Unlock()
+	return ch
+}
+
+func (g *hostConfirmGate) resolve(conversationID, reqID string, allowed bool) {
+	if g == nil {
+		return
+	}
+	key := hostConfirmKey(conversationID, reqID)
+	g.mu.Lock()
+	list := g.wait[key]
+	delete(g.wait, key)
+	g.mu.Unlock()
+	for _, ch := range list {
+		select {
+		case ch <- allowed:
+		default:
+		}
+	}
+}
+
+func (g *hostConfirmGate) cancel(conversationID, reqID string) {
+	g.resolve(conversationID, reqID, false)
+}
+
+func (s *Server) waitHostConfirm(
+	ctx context.Context,
+	userID, conversationID, reqID string,
+	ch <-chan bool,
+) (allowed bool, err error) {
+	timer := time.NewTimer(hostExecTimeout)
+	defer timer.Stop()
+	select {
+	case allowed = <-ch:
+		return allowed, nil
+	case <-ctx.Done():
+		s.confirms.cancel(conversationID, reqID)
+		_ = s.markHostConfirmStatus(userID, conversationID, reqID, "denied")
+		return false, ctx.Err()
+	case <-timer.C:
+		s.confirms.cancel(conversationID, reqID)
+		_ = s.markHostConfirmStatus(userID, conversationID, reqID, "denied")
+		return false, errors.New("等待确认超时")
+	}
+}
+
+func (s *Server) requestChatHostConfirm(
+	ctx context.Context,
+	userID, conversationID, op, path, dest, preview string,
+) (allowed bool, reqID string, err error) {
+	coalesce := isDeleteConfirmOp(op)
+	if coalesce {
+		s.deleteConfirmMu.Lock()
+	}
+
+	if coalesce {
+		if msgs, mErr := s.db.RecentHostConfirms(conversationID); mErr == nil {
+			for i := range msgs {
+				var existing hostConfirmPayload
+				if json.Unmarshal([]byte(msgs[i].Content), &existing) != nil {
+					continue
+				}
+				if existing.Status != "pending" || existing.Op != op {
+					continue
+				}
+				if op == "ssh_delete" && strings.TrimSpace(existing.Dest) != strings.TrimSpace(dest) {
+					continue
+				}
+				merged := mergeHostPaths(existing.Path, path)
+				if merged != existing.Path {
+					existing.Path = merged
+					if raw, mErr := json.Marshal(existing); mErr == nil {
+						if updated, uErr := s.db.UpdateMessageContent(conversationID, msgs[i].ID, string(raw)); uErr == nil {
+							s.publishConversationMessage(userID, updated)
+						}
+					}
+				}
+				reqID = existing.ReqID
+				ch := s.confirms.register(conversationID, reqID)
+				s.deleteConfirmMu.Unlock()
+				allowed, err = s.waitHostConfirm(ctx, userID, conversationID, reqID, ch)
+				return allowed, reqID, err
+			}
+		}
+	}
+
+	reqID = uuid.NewString()
+	payload := hostConfirmPayload{
+		ReqID:   reqID,
+		Op:      op,
+		Path:    path,
+		Dest:    dest,
+		Preview: clipRunes(preview, 180),
+		Status:  "pending",
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		if coalesce {
+			s.deleteConfirmMu.Unlock()
+		}
+		return false, reqID, err
+	}
+	msg, err := s.db.AddMessage(conversationID, "host_confirm", string(raw))
+	if err != nil {
+		if coalesce {
+			s.deleteConfirmMu.Unlock()
+		}
+		return false, reqID, err
+	}
+	s.publishConversationMessage(userID, msg)
+	ch := s.confirms.register(conversationID, reqID)
+	if coalesce {
+		s.deleteConfirmMu.Unlock()
+	}
+	allowed, err = s.waitHostConfirm(ctx, userID, conversationID, reqID, ch)
+	return allowed, reqID, err
+}
+
+func (s *Server) markHostConfirmStatus(userID, conversationID, reqID, status string) error {
+	msg, err := s.db.RecentHostConfirms(conversationID)
+	if err != nil {
+		return err
+	}
+	for i := range msg {
+		var payload hostConfirmPayload
+		if json.Unmarshal([]byte(msg[i].Content), &payload) != nil || payload.ReqID != reqID {
+			continue
+		}
+		if payload.Status == status {
+			return nil
+		}
+		payload.Status = status
+		raw, mErr := json.Marshal(payload)
+		if mErr != nil {
+			return mErr
+		}
+		updated, uErr := s.db.UpdateMessageContent(conversationID, msg[i].ID, string(raw))
+		if uErr != nil {
+			return uErr
+		}
+		s.publishConversationMessage(userID, updated)
+		return nil
+	}
+	return nil
 }
 
 func hostConfirmStatus(result map[string]any) string {
@@ -404,9 +715,7 @@ func (s *Server) handleCreateHostConfirm(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "req_id and path required"})
 		return
 	}
-	switch body.Op {
-	case "write", "delete", "move", "shell":
-	default:
+	if !hostOpNeedsConfirm(body.Op) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported op"})
 		return
 	}
@@ -490,6 +799,9 @@ func (s *Server) handleDecideHostConfirm(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		s.publishConversationMessage(uid, updated)
+		if s.confirms != nil {
+			s.confirms.resolve(conversationID, payload.ReqID, status == "allowed")
+		}
 		writeJSON(w, http.StatusOK, updated)
 		return
 	}

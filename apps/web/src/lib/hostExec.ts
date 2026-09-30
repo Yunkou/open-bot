@@ -10,6 +10,12 @@ export type HostExecRequest = {
   dest?: string;
   content?: string;
   conversation_id?: string;
+  ssh_host?: string;
+  ssh_user?: string;
+  ssh_port?: number;
+  ssh_fingerprint?: string;
+  /** API already got allow/deny in chat; execute without asking again. */
+  preconfirmed?: boolean;
 };
 
 type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
@@ -37,7 +43,7 @@ export function setHostWritesEnabled(on: boolean): void {
 }
 
 function isWriteOp(op: string): boolean {
-  return op === "write" || op === "delete" || op === "move";
+  return op === "write" || op === "delete" || op === "move" || op === "ssh_write" || op === "ssh_delete" || op === "ssh_exec";
 }
 
 async function runOp(req: HostExecRequest): Promise<Record<string, unknown>> {
@@ -62,16 +68,66 @@ async function runOp(req: HostExecRequest): Promise<Record<string, unknown>> {
       terminal: req.dest === "terminal",
     })) as Record<string, unknown>;
   }
+  if (req.op.startsWith("ssh_")) {
+    const args = {
+      host: req.ssh_host || "",
+      user: req.ssh_user || "",
+      port: req.ssh_port || 0,
+      path,
+    };
+    if (req.op === "ssh_ls") return (await invoke("host_ssh_ls", args)) as Record<string, unknown>;
+    if (req.op === "ssh_read") return (await invoke("host_ssh_read", args)) as Record<string, unknown>;
+    if (req.op === "ssh_write") {
+      return (await invoke("host_ssh_write", { ...args, content: req.content || "" })) as Record<string, unknown>;
+    }
+    if (req.op === "ssh_delete") return (await invoke("host_ssh_delete", args)) as Record<string, unknown>;
+    if (req.op === "ssh_exec") {
+      return (await invoke("host_ssh_exec", {
+        host: args.host,
+        user: args.user,
+        port: args.port,
+        command: path,
+      })) as Record<string, unknown>;
+    }
+  }
   return { ok: false, error: "不支持的操作" };
 }
 
+async function probeSsh(req: HostExecRequest): Promise<Record<string, unknown>> {
+  const invoke = tauriInvoke();
+  if (!invoke) return { ok: false, error: "当前窗口不能连接远程主机" };
+  try {
+    return (await invoke("host_ssh_probe", {
+      host: req.ssh_host || "",
+      user: req.ssh_user || "",
+      port: req.ssh_port || 0,
+    })) as Record<string, unknown>;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 async function needsConfirm(req: HostExecRequest): Promise<boolean> {
-  if (req.op === "shell" || req.op === "delete" || req.op === "move") return true;
+  if (
+    req.op === "shell" ||
+    req.op === "delete" ||
+    req.op === "move" ||
+    req.op === "ssh_write" ||
+    req.op === "ssh_delete" ||
+    req.op === "ssh_exec"
+  ) {
+    return true;
+  }
   if (req.op !== "write") return false;
   const invoke = tauriInvoke();
   if (!invoke) return true;
   try {
-    const stat = (await invoke("host_stat", { path: req.path || "" })) as { exists?: boolean; is_dir?: boolean };
+    const stat = (await invoke("host_stat", { path: req.path || "" })) as {
+      exists?: boolean;
+      is_dir?: boolean;
+      under_home?: boolean;
+    };
+    if (stat.under_home === false) return true;
     return Boolean(stat.exists && !stat.is_dir);
   } catch {
     return true;
@@ -103,14 +159,39 @@ export function startHostExecSession(opts: {
         let result: Record<string, unknown>;
         try {
           if (isWriteOp(req.op) && !hostWritesEnabled()) {
-            result = { ok: false, error: "本机写入已关闭" };
+            result = {
+              ok: false,
+              error: req.op.startsWith("ssh_") ? "写入已关闭，远程写入、删除和命令也停着" : "本机写入已关闭",
+            };
+          } else if (req.preconfirmed) {
+            result = await runOp(req);
+            result.confirmed = true;
           } else if (await needsConfirm(req)) {
-            const allowed = await opts.confirm(req);
-            if (!allowed) {
-              result = { ok: false, denied: true, error: "用户拒绝了这次操作" };
+            let confirmReq = req;
+            let blocked: Record<string, unknown> | null = null;
+            if (req.op.startsWith("ssh_")) {
+              const probe = await probeSsh(req);
+              if (probe.ok !== true) {
+                blocked = probe;
+              } else if (probe.host_key_status === "changed") {
+                blocked = {
+                  ok: false,
+                  error: `主机密钥和 known_hosts 不一致（${String(probe.fingerprint || "")}）。连接已断开`,
+                };
+              } else if (probe.host_key_status === "unknown" && probe.fingerprint) {
+                confirmReq = { ...req, ssh_fingerprint: String(probe.fingerprint) };
+              }
+            }
+            if (blocked) {
+              result = blocked;
             } else {
-              result = await runOp(req);
-              result.confirmed = true;
+              const allowed = await opts.confirm(confirmReq);
+              if (!allowed) {
+                result = { ok: false, denied: true, error: "用户拒绝了这次操作" };
+              } else {
+                result = await runOp(req);
+                result.confirmed = true;
+              }
             }
           } else {
             result = await runOp(req);

@@ -19,6 +19,8 @@ export type ClientContext = {
   app_version: string;
   locale: string;
   machine_id?: string;
+  /** Display name of the current device (OS name or user rename). */
+  machine_label?: string;
   capabilities: ClientCapabilities;
 };
 
@@ -29,6 +31,11 @@ declare global {
     Capacitor?: {
       isNativePlatform?: () => boolean;
       getPlatform?: () => string;
+      Plugins?: {
+        Device?: {
+          getInfo?: () => Promise<{ name?: string; model?: string }>;
+        };
+      };
     };
   }
 }
@@ -202,7 +209,7 @@ export function shouldRegisterAsHost(client: ClientContext = detectClientContext
   return client.app === "tauri" || client.app === "capacitor";
 }
 
-export function defaultMachineLabel(client: ClientContext): string {
+function platformFallbackLabel(client: ClientContext): string {
   switch (client.platform) {
     case "macos":
       return "我的 Mac";
@@ -217,4 +224,100 @@ export function defaultMachineLabel(client: ClientContext): string {
     default:
       return "本机";
   }
+}
+
+function browserName(): string {
+  const ua = (typeof navigator !== "undefined" ? navigator.userAgent : "") || "";
+  if (/edg\//i.test(ua)) return "Edge";
+  if (/chrome|crios/i.test(ua) && !/edg\//i.test(ua)) return "Chrome";
+  if (/firefox|fxios/i.test(ua)) return "Firefox";
+  if (/safari/i.test(ua) && !/chrome|crios|android/i.test(ua)) return "Safari";
+  return "浏览器";
+}
+
+function osDisplayName(client: ClientContext): string {
+  switch (client.platform) {
+    case "macos":
+      return "macOS";
+    case "windows":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "ios":
+      return "iOS";
+    case "android":
+      return "Android";
+    default:
+      if (client.os === "darwin") return "macOS";
+      if (client.os === "win32") return "Windows";
+      return client.os || "未知系统";
+  }
+}
+
+/** Sync fallback label (generic). Prefer resolveDefaultMachineLabel for real OS names. */
+export function defaultMachineLabel(client: ClientContext, deviceName?: string): string {
+  const name = (deviceName || "").trim();
+  if (name) return name.slice(0, 64);
+  if (client.app === "browser" || client.platform === "web") {
+    return `${browserName()} · ${osDisplayName(client)}`.slice(0, 64);
+  }
+  return platformFallbackLabel(client);
+}
+
+type TauriInvoke = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+function tauriInvoke(): TauriInvoke | null {
+  if (typeof window === "undefined") return null;
+  const internals = (window as Window & { __TAURI_INTERNALS__?: { invoke?: TauriInvoke } })
+    .__TAURI_INTERNALS__;
+  return internals?.invoke ?? null;
+}
+
+/**
+ * Best-effort real device / computer name:
+ * - Tauri: OS computer name (macOS ComputerName / hostname / …)
+ * - Capacitor: Device plugin name when available
+ * - Browser: "Chrome · macOS" style fallback
+ */
+export async function resolveDeviceDisplayName(
+  client: ClientContext = detectClientContext(),
+): Promise<string> {
+  if (client.app === "tauri") {
+    const invoke = tauriInvoke();
+    if (invoke) {
+      try {
+        const raw = await invoke("host_device_name");
+        const name = typeof raw === "string" ? raw.trim() : "";
+        if (name) return name.slice(0, 64);
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  if (client.app === "capacitor") {
+    try {
+      const mod = await import("@capacitor/device");
+      const info = await mod.Device.getInfo();
+      const name = (info?.name || info?.model || "").trim();
+      if (name) return name.slice(0, 64);
+    } catch {
+      try {
+        const info = await window.Capacitor?.Plugins?.Device?.getInfo?.();
+        const name = (info?.name || info?.model || "").trim();
+        if (name) return name.slice(0, 64);
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  return defaultMachineLabel(client);
+}
+
+/** Resolve the label to send on first machine register. */
+export async function resolveDefaultMachineLabel(
+  client: ClientContext = detectClientContext(),
+): Promise<string> {
+  return resolveDeviceDisplayName(client);
 }

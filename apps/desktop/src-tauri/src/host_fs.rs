@@ -4,132 +4,128 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::{json, Value};
 
-fn home_dir() -> Result<PathBuf, String> {
+fn home_dir() -> Option<PathBuf> {
     for key in ["HOME", "USERPROFILE"] {
         if let Ok(v) = std::env::var(key) {
             let p = PathBuf::from(v);
             if p.is_dir() {
-                return Ok(p);
+                return Some(p);
             }
         }
     }
-    Err("找不到用户主目录".into())
-}
-
-fn allowed_roots() -> Result<Vec<PathBuf>, String> {
-    let home = home_dir()?;
-    Ok(vec![
-        home.join("Downloads"),
-        home.join("Desktop"),
-        home.join("Documents"),
-    ])
-}
-
-fn logical_path(raw: &str) -> Result<PathBuf, String> {
-    let raw = raw.trim();
-    if raw.is_empty() || raw == "~" || raw == "home" {
-        return Err("请指定 Downloads、Desktop 或 Documents 下的路径".into());
-    }
-    if raw.contains('\0') {
-        return Err("路径无效".into());
-    }
-    let home = home_dir()?;
-    let path = if let Some(rest) = raw.strip_prefix("~/") {
-        home.join(rest)
-    } else if raw == "~" {
-        return Err("请指定 Downloads、Desktop 或 Documents 下的路径".into());
-    } else {
-        let p = PathBuf::from(raw);
-        if p.is_absolute() {
-            p
-        } else {
-            home.join(raw)
-        }
-    };
-    for c in path.components() {
-        if matches!(c, Component::ParentDir) {
-            return Err("路径不能包含 ..".into());
-        }
-    }
-    Ok(path)
+    None
 }
 
 fn under_root(path: &Path, root: &Path) -> bool {
     path == root || path.starts_with(root)
 }
 
-fn ensure_allowed(raw: &str) -> Result<PathBuf, String> {
-    let path = logical_path(raw)?;
-    let roots = allowed_roots()?;
-    let ok = roots.iter().any(|root| under_root(&path, root));
-    if !ok {
-        return Err("只能访问 Downloads、Desktop、Documents".into());
-    }
-    if path.exists() {
-        let canon = fs::canonicalize(&path).map_err(|e| e.to_string())?;
-        let rooted = roots.iter().any(|root| {
-            fs::canonicalize(root)
-                .map(|c| under_root(&canon, &c))
-                .unwrap_or(false)
-        });
-        if !rooted {
-            return Err("只能访问 Downloads、Desktop、Documents".into());
+fn normalize_components(path: PathBuf) -> Result<PathBuf, String> {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return Err("路径无效".into());
+                }
+            }
+            Component::Normal(part) => out.push(part),
         }
-        return Ok(canon);
+    }
+    if out.as_os_str().is_empty() {
+        return Err("路径无效".into());
+    }
+    Ok(out)
+}
+
+fn logical_path(raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('\0') {
+        if raw.is_empty() {
+            return home_dir().ok_or_else(|| "找不到用户主目录".to_string());
+        }
+        return Err("路径无效".into());
+    }
+    if raw == "~" || raw == "home" {
+        return home_dir().ok_or_else(|| "找不到用户主目录".to_string());
+    }
+    let path = if let Some(rest) = raw.strip_prefix("~/") {
+        let home = home_dir().ok_or_else(|| "找不到用户主目录".to_string())?;
+        home.join(rest)
+    } else {
+        let p = PathBuf::from(raw);
+        if p.is_absolute() {
+            p
+        } else if let Some(home) = home_dir() {
+            home.join(raw)
+        } else {
+            p
+        }
+    };
+    normalize_components(path)
+}
+
+fn resolve_path(raw: &str) -> Result<PathBuf, String> {
+    let path = logical_path(raw)?;
+    if path.exists() {
+        return fs::canonicalize(&path).map_err(|e| e.to_string());
     }
     if let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            return Ok(path);
+        }
         if parent.exists() {
             let canon_parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
-            let rooted = roots.iter().any(|root| {
-                fs::canonicalize(root)
-                    .map(|c| under_root(&canon_parent, &c))
-                    .unwrap_or(false)
-            });
-            if !rooted {
-                return Err("只能访问 Downloads、Desktop、Documents".into());
-            }
+            let name = path
+                .file_name()
+                .ok_or_else(|| "路径无效".to_string())?;
+            return Ok(canon_parent.join(name));
         }
     }
     Ok(path)
 }
 
-fn list_roots() -> Result<Value, String> {
-    let roots = allowed_roots()?;
-    let mut entries = Vec::new();
-    for root in roots {
-        let name = root
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| root.display().to_string());
-        entries.push(json!({
-            "name": name,
-            "path": name,
-            "is_dir": true,
-        }));
+fn is_under_home(path: &Path) -> bool {
+    let Some(home) = home_dir() else {
+        return false;
+    };
+    let home_canon = fs::canonicalize(&home).unwrap_or(home);
+    under_root(path, &home_canon)
+}
+
+fn display_path(path: &Path) -> String {
+    let Some(home) = home_dir() else {
+        return path.display().to_string();
+    };
+    let home_canon = fs::canonicalize(&home).unwrap_or(home.clone());
+    if path == home_canon || path == home {
+        return "~".into();
     }
-    Ok(json!({ "ok": true, "path": "", "entries": entries }))
+    if let Ok(rest) = path.strip_prefix(&home_canon).or_else(|_| path.strip_prefix(&home)) {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
 }
 
 #[tauri::command]
 pub fn host_stat(path: String) -> Result<Value, String> {
-    if path.trim().is_empty() || path.trim() == "~" {
-        return Ok(json!({ "ok": true, "exists": true, "is_dir": true }));
-    }
-    let resolved = ensure_allowed(&path)?;
+    let resolved = resolve_path(&path)?;
     let exists = resolved.exists();
     Ok(json!({
         "ok": true,
         "exists": exists,
         "is_dir": exists && resolved.is_dir(),
+        "under_home": is_under_home(&resolved),
+        "path": display_path(&resolved),
     }))
 }
 
 #[tauri::command]
 pub fn host_ls(path: String) -> Result<Value, String> {
-    if path.trim().is_empty() || path.trim() == "~" || path.trim() == "home" {
-        return list_roots();
-    }
-    let dir = ensure_allowed(&path)?;
+    let dir = resolve_path(&path)?;
     if !dir.is_dir() {
         return Err("不是目录".into());
     }
@@ -143,8 +139,10 @@ pub fn host_ls(path: String) -> Result<Value, String> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let name = item.file_name().to_string_lossy().to_string();
         entries.push(json!({
-            "name": item.file_name().to_string_lossy(),
+            "name": name,
+            "path": display_path(&item.path()),
             "is_dir": meta.is_dir(),
             "size": meta.len(),
             "modified": modified,
@@ -158,12 +156,12 @@ pub fn host_ls(path: String) -> Result<Value, String> {
     if entries.len() > 200 {
         entries.truncate(200);
     }
-    Ok(json!({ "ok": true, "path": path, "entries": entries }))
+    Ok(json!({ "ok": true, "path": display_path(&dir), "entries": entries }))
 }
 
 #[tauri::command]
 pub fn host_read(path: String) -> Result<Value, String> {
-    let file = ensure_allowed(&path)?;
+    let file = resolve_path(&path)?;
     if !file.is_file() {
         return Err("不是文件".into());
     }
@@ -172,36 +170,101 @@ pub fn host_read(path: String) -> Result<Value, String> {
         return Err("文件太大，只支持读取 200KB 以内的文本".into());
     }
     let text = String::from_utf8(bytes).map_err(|_| "不是文本文件".to_string())?;
-    Ok(json!({ "ok": true, "path": path, "content": text }))
+    Ok(json!({ "ok": true, "path": display_path(&file), "content": text }))
 }
 
 #[tauri::command]
 pub fn host_write(path: String, content: String) -> Result<Value, String> {
-    let file = ensure_allowed(&path)?;
+    let file = resolve_path(&path)?;
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::write(&file, content.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "path": path }))
+    Ok(json!({ "ok": true, "path": display_path(&file) }))
 }
 
 #[tauri::command]
 pub fn host_delete(path: String) -> Result<Value, String> {
-    let file = ensure_allowed(&path)?;
+    let paths: Vec<String> = path
+        .split('\n')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if paths.is_empty() {
+        return Err("需要文件路径".into());
+    }
+    let mut deleted: Vec<String> = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
+    for raw in &paths {
+        match delete_one_file(raw) {
+            Ok(display) => deleted.push(display),
+            Err(err) => errors.push(json!({ "path": raw, "error": err })),
+        }
+    }
+    if deleted.is_empty() {
+        let msg = errors
+            .first()
+            .and_then(|e| e.get("error"))
+            .and_then(|e| e.as_str())
+            .unwrap_or("删除失败");
+        return Err(msg.to_string());
+    }
+    if paths.len() == 1 {
+        return Ok(json!({ "ok": errors.is_empty(), "path": deleted[0] }));
+    }
+    Ok(json!({
+        "ok": errors.is_empty(),
+        "paths": deleted,
+        "errors": errors,
+    }))
+}
+
+fn delete_one_file(path: &str) -> Result<String, String> {
+    let file = resolve_path(path)?;
     if file.is_dir() {
         return Err("只能删除文件".into());
     }
     fs::remove_file(&file).map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "path": path }))
+    Ok(display_path(&file))
 }
 
 #[tauri::command]
 pub fn host_move(path: String, dest: String) -> Result<Value, String> {
-    let from = ensure_allowed(&path)?;
-    let to = ensure_allowed(&dest)?;
+    let from = resolve_path(&path)?;
+    let to = resolve_path(&dest)?;
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::rename(&from, &to).map_err(|e| e.to_string())?;
-    Ok(json!({ "ok": true, "path": path, "dest": dest }))
+    Ok(json!({
+        "ok": true,
+        "path": display_path(&from),
+        "dest": display_path(&to),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_resolve_under_home() {
+        let home = home_dir().unwrap();
+        let path = logical_path("Projects/demo").unwrap();
+        assert_eq!(path, home.join("Projects/demo"));
+        let tilde = logical_path("~/Library").unwrap();
+        assert_eq!(tilde, home.join("Library"));
+    }
+
+    #[test]
+    fn absolute_paths_are_allowed() {
+        let path = logical_path("/tmp/open-bot-demo").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/open-bot-demo"));
+    }
+
+    #[test]
+    fn normalizes_parent_components() {
+        let path = logical_path("/tmp/a/../b").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/b"));
+    }
 }

@@ -32,10 +32,39 @@ def test_from_any_and_env_block() -> None:
         }
     )
     _ok(c is not None and c.platform == "web", "parse web client")
-    block = format_environment_block(c)
+    block = format_environment_block(c, machines=[])
     _ok("环境" in block and "sandbox_*" in block, "env block mentions internal sandbox_*")
     _ok("工作电脑" not in block, "env block does not invent 工作电脑 for users")
     _ok("禁止提及" in block and "Docker" in block, "instructs model not to say Docker")
+    _ok("网页浏览器" in block, "browser chat is explicit")
+    _ok("硬性" in block and "编造" in block, "hard rule when no connected hosts")
+    _ok("已连接" in block and "代操作" in format_environment_block(
+        c,
+        machines=[{"id": "m1", "label": "书房 Mac", "connected": True, "file_op_count": 3}],
+    ), "browser can still use a connected desktop")
+
+
+def test_browser_ignores_stale_machine_label() -> None:
+    c = ClientContext(
+        platform="web",
+        app="browser",
+        os="darwin",
+        machine_id="m-mac",
+        machine_label="我的 Mac",
+    )
+    machines = [
+        {
+            "id": "m-mac",
+            "label": "我的 Mac",
+            "connected": False,
+            "online": False,
+            "file_op_count": 9,
+        }
+    ]
+    block = format_environment_block(c, machines)
+    _ok("网页浏览器" in block, "states browser")
+    _ok("用户当前正在这台设备上聊天：我的 Mac" not in block, "does not claim chatting on Mac")
+    _ok("未连接" in block and "硬性" in block, "offline machines trigger hard rule")
 
 
 def test_tool_defs_include_list_machines() -> None:
@@ -44,6 +73,15 @@ def test_tool_defs_include_list_machines() -> None:
     _ok("host_ls" in names and "host_read" in names and "host_write" in names, "host file tools present")
     _ok("host_delete" in names and "host_move" in names, "dangerous host tools present")
     _ok("host_open" in names and "host_shell" in names, "host open and shell tools present")
+    _ok("host_ssh_exec" in names and "host_ssh_ls" in names and "host_ssh_read" in names, "ssh client tools present")
+    shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
+    desc = str((shell.get("function") or {}).get("description") or "")
+    _ok("host_ssh" in desc, "local shell points remote ssh at host_ssh tools")
+    env = format_environment_block(
+        ClientContext(platform="macos", app="tauri", os="darwin", arch="arm64")
+    )
+    _ok("load_skill host-ssh" in env, "env points remote ssh at host-ssh skill")
+    _ok("fingerprint" not in env.lower() and "ssh-agent" not in env.lower(), "env omits long ssh tutorial")
     _ok(tool_display_label("sandbox_ls") == "列出目录", "sandbox_ls alias")
     _ok(tool_display_label("sandbox_write") == "写入文件", "sandbox_write alias")
 
@@ -66,8 +104,30 @@ def test_system_prompt_routing() -> None:
     _ok("完全透明" in prompt or "只谈结果" in prompt, "instructs outcome-only user speech")
 
 
+
+
+def test_machine_label_in_env_block() -> None:
+    client = ClientContext(
+        platform="macos",
+        app="tauri",
+        os="darwin",
+        machine_id="m-1",
+        machine_label="旧名",
+    )
+    machines = [
+        {"id": "m-1", "label": "书房 Mac", "connected": True, "file_op_count": 3},
+        {"id": "m-2", "label": "公司本", "connected": False, "file_op_count": 1},
+    ]
+    block = format_environment_block(client, machines)
+    _ok("书房 Mac" in block, "prefers server-side renamed label")
+    _ok("用户当前正在这台设备上聊天：书房 Mac" in block, "states current chatting device")
+    _ok("已登记的电脑：" in block and "公司本" in block, "lists other machines by name")
+    _ok("工作电脑" not in block, "no 工作电脑 wording")
+
 if __name__ == "__main__":
     test_from_any_and_env_block()
+    test_browser_ignores_stale_machine_label()
     test_tool_defs_include_list_machines()
     test_system_prompt_routing()
+    test_machine_label_in_env_block()
     print("all passed")

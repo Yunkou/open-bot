@@ -22,6 +22,11 @@ type hostExecRequest struct {
 	Dest           string `json:"dest,omitempty"`
 	Content        string `json:"content,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
+	SSHHost        string `json:"ssh_host,omitempty"`
+	SSHUser        string `json:"ssh_user,omitempty"`
+	SSHPort        int    `json:"ssh_port,omitempty"`
+	// Preconfirmed: chat UI already allowed this op; host client must execute without asking again.
+	Preconfirmed bool `json:"preconfirmed,omitempty"`
 }
 
 type hostHub struct {
@@ -123,6 +128,10 @@ func (h *hostHub) Call(ctx context.Context, userID, machineID string, req hostEx
 		"dest":            req.Dest,
 		"content":         req.Content,
 		"conversation_id": req.ConversationID,
+		"ssh_host":        req.SSHHost,
+		"ssh_user":        req.SSHUser,
+		"ssh_port":        req.SSHPort,
+		"preconfirmed":    req.Preconfirmed,
 	})
 	if err != nil {
 		s.mu.Lock()

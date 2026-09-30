@@ -12,7 +12,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from .builtin_tools import BUILTIN_TOOL_DEFS
-from .deferral import CONTINUE_WORK, turn_unfinished
+from .openbot_api import ROUTINE_TOOL_DEFS
+from .deferral import CONTINUE_WORK, host_followup_prompt, turn_unfinished
 from .client_env import (
     ClientContext,
     format_environment_block,
@@ -65,14 +66,24 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "load_skill",
-            "description": "Load the full SKILL.md body for a skill by name.",
+            "description": (
+                "Load a skill package. Without path: returns SKILL.md body and the list of "
+                "package files (references/, scripts/, …). With path: returns that file's content."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
                         "description": "Skill name (directory / frontmatter name)",
-                    }
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Optional package-relative file (e.g. references/examples.md). "
+                            "Omit to load SKILL.md + file list."
+                        ),
+                    },
                 },
                 "required": ["name"],
             },
@@ -299,15 +310,18 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_ls",
             "description": (
-                "List a directory on a connected computer. Allowed roots: Downloads, Desktop, Documents. "
-                "Pass machine_id from list_machines. If the user did not name a computer, omit machine_id "
-                "so the most-used work computer is chosen. Empty path lists those three folders."
+                "List a directory on a connected computer. Absolute paths and ~/... are allowed anywhere "
+                "the OS user can read. Pass machine_id from list_machines. If the user did not name a computer, "
+                "omit machine_id so the most-used work computer is chosen. Empty path or ~ lists the home directory."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "machine_id": {"type": "string", "description": "Machine id from list_machines"},
-                    "path": {"type": "string", "description": "Path such as Downloads or Downloads/report"},
+                    "path": {
+                        "type": "string",
+                        "description": "Path such as /tmp, ~/Projects, Downloads, or /var/log",
+                    },
                 },
             },
         },
@@ -317,7 +331,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_read",
             "description": (
-                "Read a text file on a connected computer under Downloads, Desktop, or Documents. "
+                "Read a text file on a connected computer. Absolute paths and ~/... are allowed. "
                 "Pass machine_id when the user named a computer; otherwise omit it to use the usual work computer."
             ),
             "parameters": {
@@ -335,8 +349,9 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_write",
             "description": (
-                "Write a text file on a connected computer under Downloads, Desktop, or Documents. "
-                "Creating a new file runs immediately. Overwriting an existing file waits for confirmation "
+                "Write a text file on a connected computer. Absolute paths and ~/... are allowed. "
+                "Creating a new file under the home directory runs immediately. "
+                "Overwriting an existing file, or any write outside the home directory, waits for confirmation "
                 "in the chat. Any logged-in device can allow or deny; the write still happens on the target computer."
             ),
             "parameters": {
@@ -355,16 +370,28 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_delete",
             "description": (
-                "Delete a file on a connected computer under Downloads, Desktop, or Documents. "
-                "Always waits for confirmation in the chat. Any logged-in device can allow or deny."
+                "Delete one or more files on a connected computer. Absolute paths and ~/... are allowed. "
+                "When deleting multiple files, pass them all in paths (one confirmation card). "
+                "Do not call host_delete once per file — that creates multiple cards. "
+                "Call immediately when the user asks to delete; the chat shows an allow/deny card "
+                "(any logged-in client including the browser can click). Do not ask the user in plain text "
+                "to confirm on the computer — wait for the tool result after they click."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "machine_id": {"type": "string"},
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": "Single file path when deleting one file.",
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "All file paths to delete together (preferred for batch delete).",
+                    },
                 },
-                "required": ["path"],
+                "required": [],
             },
         },
     },
@@ -373,9 +400,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_move",
             "description": (
-                "Move or rename a file on a connected computer. Both paths must stay under "
-                "Downloads, Desktop, or Documents. Always waits for confirmation in the chat. "
-                "Any logged-in device can allow or deny."
+                "Move or rename a file on a connected computer. Absolute paths and ~/... are allowed. "
+                "Always waits for confirmation in the chat. Any logged-in device can allow or deny."
             ),
             "parameters": {
                 "type": "object",
@@ -412,29 +438,134 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run a command on a connected computer. Use this for ssh and other shell commands. "
-                "Set terminal=true for interactive sessions such as ssh, so a Terminal window opens on that computer. "
-                "Always waits for confirmation in the chat before running. "
-                "Any logged-in device can allow or deny; the command still runs on the target computer. "
-                "Pass machine_id when the user named a computer; otherwise omit it."
+                "Run a local command on a connected computer. Not for ssh/scp/sftp "
+                "(use host_ssh_* after load_skill host-ssh). "
+                "terminal=true only for a local interactive UI. Always confirms in chat."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "machine_id": {"type": "string"},
-                    "command": {"type": "string", "description": "Exact command, for example ssh user@host"},
+                    "command": {"type": "string", "description": "Local command only"},
                     "terminal": {
                         "type": "boolean",
-                        "description": "True to open the command in a visible terminal. Use for ssh and other interactive commands.",
+                        "description": "Open a visible local terminal",
                     },
                 },
                 "required": ["command"],
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_ssh_ls",
+            "description": (
+                "List a remote directory over SSH from a connected desktop app (headless). "
+                "Prefer load_skill host-ssh first. host: IP, domain, or ~/.ssh/config Host."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "path": {"type": "string"},
+                },
+                "required": ["host"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_ssh_read",
+            "description": "Read a remote text file over SSH/SFTP. Prefer load_skill host-ssh first.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "path": {"type": "string"},
+                },
+                "required": ["host", "path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_ssh_write",
+            "description": (
+                "Write a remote text file over SSH/SFTP. Confirms in chat. Prefer load_skill host-ssh first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["host", "path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_ssh_delete",
+            "description": (
+                "Delete one or more remote files over SSH/SFTP. Confirms in chat. "
+                "For multiple files use paths once; do not call repeatedly. Prefer load_skill host-ssh first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "path": {"type": "string"},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "All remote paths to delete together.",
+                    },
+                },
+                "required": ["host"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "host_ssh_exec",
+            "description": (
+                "Run one remote command over SSH (headless desktop client). Confirms in chat. "
+                "Prefer load_skill host-ssh first. Not for opening a system terminal."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "host": {"type": "string"},
+                    "user": {"type": "string"},
+                    "port": {"type": "integer"},
+                    "command": {"type": "string"},
+                },
+                "required": ["host", "command"],
+            },
+        },
+    },
 ]
 # Append built-in utility tools (time / calculator / http_fetch).
-TOOL_DEFS = list(TOOL_DEFS) + list(BUILTIN_TOOL_DEFS)
+TOOL_DEFS = list(TOOL_DEFS) + list(BUILTIN_TOOL_DEFS) + list(ROUTINE_TOOL_DEFS)
 
 
 def openai_config(override: LLMOverride | None = None) -> tuple[str, str, str]:
@@ -484,11 +615,17 @@ def build_system_prompt(
             tool_bits.append("可用 MCP 工具：" + "、".join(mcp_names) + "。")
         if any(n.startswith("sandbox_") for n in names):
             tool_bits.append(
+                "长任务：优先调用 defer_work(goal=…) 先确认再后台做完，同一会话交付；"
+                "例行任务用 create_routine/update_routine/pause_routine/resume_routine/delete_routine/list_routines"
+                "（可设 cron 与 Slack/GitHub triggers）。"
+            )
+            tool_bits.append(
                 "重要：sandbox_* 仅在内部执行环境操作，不是用户本机 Downloads/Desktop。"
                 "对用户完全透明：禁止提及 sandbox / Docker / 容器 / /workspace，"
                 "禁止把内部环境说成用户的另一台电脑；只谈结果（已生成、可预览、可下载）。"
                 "若用户要看「我的电脑 / Downloads / 桌面」，先 list_machines；"
-                "没有在线主机时如实说明，不要用 sandbox_ls 假装那是用户的 Downloads。"
+                "没有在线主机时如实说明要打开桌面应用，不要用 sandbox_ls 假装那是用户的 Downloads，"
+                "也不要凭记忆编造文件名或大小。"
             )
         parts.append("".join(tool_bits))
         routing = format_tools_routing_block(
@@ -739,41 +876,54 @@ async def run_tool_loop(
     if extra_tools:
         tools.extend(extra_tools)
     choice: str | None = "auto" if profile.tool_choice_auto else None
-    tools_fallback_done = False
+    # When upstream rejects tools+auto, keep running via XML/Hermes text tool calls
+    # instead of silently chatting with a "tools enabled" system prompt (hallucinates).
+    tools_via_markup = False
+    markup_hint_added = False
     continued = False
     for _ in range(max_rounds):
         await _checkpoint()
         try:
             data = await chat_completion(
-                msgs, api_key=api_key, tools=tools, tool_choice=choice, override=override
+                msgs,
+                api_key=api_key,
+                tools=None if tools_via_markup else tools,
+                tool_choice=None if tools_via_markup else choice,
+                override=override,
             )
         except AutoToolChoiceUnsupported:
-            # Local vLLM without --enable-auto-tool-choice: degrade to plain completion.
-            if tools_fallback_done:
+            if tools_via_markup:
                 raise
-            tools_fallback_done = True
+            tools_via_markup = True
             if on_status is not None:
                 await on_status(
                     {
                         "phase": "thinking",
-                        "label": "上游未启用 auto tool choice，本轮禁用 tools",
-                        "tools_disabled": True,
+                        "label": "上游未启用 auto tool choice，改用文本工具协议",
+                        "tools_disabled": False,
                         "reason": "auto_tool_choice_unsupported",
+                        "tools_via_markup": True,
                     }
                 )
-            await _checkpoint()
-            data = await chat_completion(
-                msgs, api_key=api_key, tools=None, override=override
-            )
-            _accumulate(data)
-            choices = data.get("choices") or []
-            if choices:
-                raw = str((choices[0].get("message") or {}).get("content") or "")
-                final = postprocess_text(
-                    strip_think(strip_tool_markup(raw)), profile
+            if not markup_hint_added:
+                markup_hint_added = True
+                msgs.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "当前上游不支持 OpenAI 原生 tool_calls（缺 enable-auto-tool-choice）。"
+                            "需要工具时，在回复里只输出如下 XML（系统会执行），"
+                            "不要编造工具结果，尤其不要编造本机文件名、大小或删除成功：\n"
+                            "<tool_call>\n"
+                            "<function=工具名>\n"
+                            "<parameter=参数名>参数值</parameter>\n"
+                            "</function>\n"
+                            "</tool_call>\n"
+                            "查本机文件先 list_machines 再 host_ls；删除用 host_delete（可传 paths）。"
+                        ),
+                    }
                 )
-                final = sanitize_fake_tool_narration(final)
-            return final, used, usage_acc
+            continue
         _accumulate(data)
         choices = data.get("choices") or []
         if not choices:
@@ -783,7 +933,7 @@ async def run_tool_loop(
         content = msg.get("content")
         content_str = str(content or "")
 
-        # Recover XML/Hermes-style tool calls leaked as plain text.
+        # Recover XML/Hermes/YAML-style tool calls leaked as plain text.
         if not tool_calls and content_has_tool_markup(content_str):
             parsed = parse_tool_markup(content_str)
             if parsed:
@@ -851,6 +1001,20 @@ async def run_tool_loop(
                 )
             msgs.append({"role": "assistant", "content": final or ""})
             msgs.append({"role": "user", "content": CONTINUE_WORK})
+            final = ""
+            continue
+        host_nudge = host_followup_prompt(used, msgs) if not continued else None
+        if host_nudge:
+            continued = True
+            if on_status is not None:
+                await on_status(
+                    {
+                        "phase": "thinking",
+                        "label": "需要先调用本机工具",
+                    }
+                )
+            msgs.append({"role": "assistant", "content": final or ""})
+            msgs.append({"role": "user", "content": host_nudge})
             final = ""
             continue
         break

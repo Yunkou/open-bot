@@ -21,6 +21,13 @@ export function hostConfirmReqId(content: string): string {
   return parseHostConfirm(content)?.req_id || "";
 }
 
+function pathList(path: string): string[] {
+  return path
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function actionCopy(item: HostConfirmPayload): { title: string; detail: string; danger: boolean } {
   if (item.op === "shell") {
     return {
@@ -29,8 +36,39 @@ function actionCopy(item: HostConfirmPayload): { title: string; detail: string; 
       danger: true,
     };
   }
+  if (item.op === "ssh_exec") {
+    return {
+      title: "在远程主机上运行？",
+      detail: item.dest ? `${item.dest}\n${item.path}` : item.path,
+      danger: true,
+    };
+  }
+  if (item.op === "ssh_delete") {
+    const n = pathList(item.path).length;
+    const files = n > 1 ? `删除这 ${n} 个远程文件？` : "删除远程文件？";
+    return {
+      title: files,
+      detail: item.dest ? `${item.dest}\n${item.path}` : item.path,
+      danger: true,
+    };
+  }
+  if (item.op === "ssh_write") {
+    return {
+      title: "写入远程文件？",
+      detail: item.dest ? `${item.dest} ${item.path}` : item.path,
+      danger: false,
+    };
+  }
+  if (item.op === "write") {
+    return { title: "写入这个文件？", detail: item.path, danger: false };
+  }
   if (item.op === "delete") {
-    return { title: "删除这个文件？", detail: item.path, danger: true };
+    const n = pathList(item.path).length;
+    return {
+      title: n > 1 ? `删除这 ${n} 个文件？` : "删除这个文件？",
+      detail: item.path,
+      danger: true,
+    };
   }
   if (item.op === "move") {
     return {
@@ -39,7 +77,7 @@ function actionCopy(item: HostConfirmPayload): { title: string; detail: string; 
       danger: true,
     };
   }
-  return { title: "覆盖已有文件？", detail: item.path, danger: false };
+  return { title: "确认这次操作？", detail: item.path, danger: false };
 }
 
 export function HostConfirmCard({
@@ -58,7 +96,7 @@ export function HostConfirmCard({
       <div className="host-confirm-kicker">需要你确认</div>
       <div className="host-confirm-title">{title}</div>
       {detail ? <div className="host-confirm-path">{detail}</div> : null}
-      {item.preview && (item.op === "write" || item.op === "shell") ? (
+      {item.preview && (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec") ? (
         <pre className="host-confirm-preview">{item.preview}</pre>
       ) : null}
       {pending && onDecide ? (

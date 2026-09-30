@@ -142,6 +142,27 @@ def clamp_tool_rounds(n: int | None) -> int:
     return n
 
 
+def _host_delete_paths(args: dict[str, Any]) -> str:
+    """Normalize path / paths into newline-joined paths for one confirm card."""
+    out: list[str] = []
+    seen: set[str] = set()
+    candidates: list[Any] = []
+    single = args.get("path")
+    if single is not None and str(single).strip():
+        candidates.append(single)
+    raw_paths = args.get("paths")
+    if isinstance(raw_paths, list):
+        candidates.extend(raw_paths)
+    for item in candidates:
+        for line in str(item or "").split("\n"):
+            p = line.strip()
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            out.append(p)
+    return "\n".join(out)
+
+
 def _override_from_body(llm: LLMConfig | None) -> LLMOverride | None:
     if llm is None:
         return None
@@ -659,14 +680,33 @@ async def openai_path(
             skill_name = str(args.get("name") or "")
             if allow is not None and skill_name not in allow:
                 return json.dumps({"error": "skill disabled", "name": skill_name})
+            rel = str(args.get("path") or "").strip()
+            if rel:
+                content = skill_reg.read_file(skill_name, rel)
+                if content is None:
+                    return json.dumps(
+                        {
+                            "error": "skill file not found",
+                            "name": skill_name,
+                            "path": rel,
+                            "files": skill_reg.file_paths(skill_name),
+                        },
+                        ensure_ascii=False,
+                    )
+                return json.dumps(
+                    {"name": skill_name, "path": rel, "content": content},
+                    ensure_ascii=False,
+                )
             full = skill_reg.load(skill_name)
             if not full:
                 return json.dumps({"error": "skill not found", "name": skill_name})
+            files = sorted(full.files.keys()) if full.files else ["SKILL.md"]
             return json.dumps(
                 {
                     "name": full.name,
                     "description": full.description,
                     "body": full.body,
+                    "files": files,
                 },
                 ensure_ascii=False,
             )
@@ -831,6 +871,11 @@ async def openai_path(
             "host_move",
             "host_open",
             "host_shell",
+            "host_ssh_ls",
+            "host_ssh_read",
+            "host_ssh_write",
+            "host_ssh_delete",
+            "host_ssh_exec",
         ):
             from . import machines as machines_mod
 
@@ -848,10 +893,40 @@ async def openai_path(
             if not chosen.get("ok"):
                 return json.dumps(chosen, ensure_ascii=False)
             machine = chosen["machine"]
-            path = str(args.get("path") or args.get("name") or args.get("command") or "")
-            dest = str(args.get("dest") or "")
-            if name == "host_shell" and bool(args.get("terminal")):
-                dest = "terminal"
+            ssh_host = ""
+            ssh_user = ""
+            ssh_port = 0
+            if name.startswith("host_ssh_"):
+                ssh_host = str(args.get("host") or "").strip()
+                ssh_user = str(args.get("user") or "").strip()
+                try:
+                    ssh_port = int(args.get("port") or 0)
+                except (TypeError, ValueError):
+                    ssh_port = 0
+                if not ssh_host:
+                    return json.dumps(
+                        {"ok": False, "error": "需要主机名、IP，或 ~/.ssh/config 里的 Host"},
+                        ensure_ascii=False,
+                    )
+                if ssh_port < 0 or ssh_port > 65535:
+                    return json.dumps({"ok": False, "error": "端口无效"}, ensure_ascii=False)
+                if name == "host_ssh_exec":
+                    path = str(args.get("command") or "")
+                else:
+                    path = _host_delete_paths(args) if name == "host_ssh_delete" else str(args.get("path") or "")
+                dest = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
+                if ssh_port and ssh_port != 22:
+                    dest = f"{dest}:{ssh_port}"
+            else:
+                if name == "host_delete":
+                    path = _host_delete_paths(args)
+                else:
+                    path = str(args.get("path") or args.get("name") or args.get("command") or "")
+                dest = str(args.get("dest") or "")
+                if name == "host_shell" and bool(args.get("terminal")):
+                    dest = "terminal"
+            if name in ("host_delete", "host_ssh_delete") and not path.strip():
+                return json.dumps({"ok": False, "error": "需要文件路径"}, ensure_ascii=False)
             result = machines_mod.exec_host(
                 str(user_id or ""),
                 str(machine.get("id") or ""),
@@ -860,10 +935,107 @@ async def openai_path(
                 dest=dest,
                 content=str(args.get("content") or ""),
                 conversation_id=str(conversation_id or ""),
+                ssh_host=ssh_host,
+                ssh_user=ssh_user,
+                ssh_port=ssh_port,
             )
             if result.get("ok"):
                 machines_mod.remember_usual_device(mem_store or mem, result.get("usual"))
             return json.dumps(result, ensure_ascii=False)
+        if name == "defer_work":
+            from . import openbot_api as obapi
+
+            try:
+                return json.dumps(
+                    obapi.defer_work(
+                        str(user_id or ""),
+                        str(conversation_id or ""),
+                        str(args.get("goal") or ""),
+                        agent_id=str(agent_id or "") or None,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)}, ensure_ascii=False)
+        if name == "list_routines":
+            from . import openbot_api as obapi
+
+            try:
+                return json.dumps(obapi.list_routines(str(user_id or "")), ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)}, ensure_ascii=False)
+        if name == "create_routine":
+            from . import openbot_api as obapi
+
+            try:
+                fields = {
+                    "name": str(args.get("name") or ""),
+                    "prompt": str(args.get("prompt") or ""),
+                    "schedule_cron": str(args.get("schedule_cron") or ""),
+                    "timezone": str(args.get("timezone") or "") or None,
+                    "agent_id": str(args.get("agent_id") or agent_id or "") or None,
+                }
+                if "enabled" in args:
+                    fields["enabled"] = bool(args.get("enabled"))
+                if args.get("triggers") is not None:
+                    fields["triggers"] = args.get("triggers")
+                if args.get("max_retries") is not None:
+                    fields["max_retries"] = int(args.get("max_retries"))
+                if "quiet_unchanged" in args:
+                    fields["quiet_unchanged"] = bool(args.get("quiet_unchanged"))
+                pin = args.get("pin_current_conversation")
+                if pin is None or pin is True:
+                    fields["conversation_id"] = str(conversation_id or "")
+                # drop Nones
+                fields = {k: v for k, v in fields.items() if v is not None}
+                return json.dumps(obapi.create_routine(str(user_id or ""), **fields), ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)}, ensure_ascii=False)
+        if name in ("update_routine", "pause_routine", "resume_routine"):
+            from . import openbot_api as obapi
+
+            try:
+                rid = str(args.get("id") or "")
+                fields = {}
+                if name == "pause_routine":
+                    fields["enabled"] = False
+                elif name == "resume_routine":
+                    fields["enabled"] = True
+                else:
+                    for key in (
+                        "name",
+                        "prompt",
+                        "schedule_cron",
+                        "timezone",
+                        "agent_id",
+                        "conversation_id",
+                    ):
+                        if key in args and args.get(key) is not None:
+                            fields[key] = args.get(key)
+                    if "enabled" in args:
+                        fields["enabled"] = bool(args.get("enabled"))
+                    if args.get("triggers") is not None:
+                        fields["triggers"] = args.get("triggers")
+                    if args.get("max_retries") is not None:
+                        fields["max_retries"] = int(args.get("max_retries"))
+                    if "quiet_unchanged" in args:
+                        fields["quiet_unchanged"] = bool(args.get("quiet_unchanged"))
+                return json.dumps(
+                    obapi.update_routine(str(user_id or ""), rid, **fields),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)}, ensure_ascii=False)
+        if name == "delete_routine":
+            from . import openbot_api as obapi
+
+            try:
+                return json.dumps(
+                    obapi.delete_routine(str(user_id or ""), str(args.get("id") or "")),
+                    ensure_ascii=False,
+                )
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"error": str(e)}, ensure_ascii=False)
         if name == "request_secret":
             from . import sandbox as sbx
 

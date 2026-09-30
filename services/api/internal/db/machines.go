@@ -123,12 +123,12 @@ func (d *DB) RegisterMachine(userID string, in MachineRegisterInput) (*Machine, 
 		return nil, err
 	}
 	if existingID != "" {
+		// Keep user-renamed label; only refresh platform metadata + online status.
 		_, err = d.SQL.Exec(
 			`UPDATE user_machines SET
-			   label = $1, platform = $2, os = $3, arch = $4, app = $5, app_version = $6,
-			   status = 'online', last_seen = $7, updated_at = $7
-			 WHERE id = $8 AND user_id = $9`,
-			label,
+			   platform = $1, os = $2, arch = $3, app = $4, app_version = $5,
+			   status = 'online', last_seen = $6, updated_at = $6
+			 WHERE id = $7 AND user_id = $8`,
 			platform,
 			strings.TrimSpace(in.OS),
 			strings.TrimSpace(in.Arch),
@@ -222,6 +222,30 @@ func (d *DB) UsualWorkMachine(userID string) (*Machine, error) {
 		}
 	}
 	return best, nil
+}
+
+func (d *DB) UpdateMachineLabel(userID, id, label string) (*Machine, error) {
+	name := strings.TrimSpace(label)
+	if name == "" {
+		return nil, errors.New("label required")
+	}
+	if len([]rune(name)) > 64 {
+		return nil, errors.New("label too long")
+	}
+	now := Now()
+	res, err := d.SQL.Exec(
+		`UPDATE user_machines SET label = $1, updated_at = $2
+		 WHERE id = $3 AND user_id = $4`,
+		name, now, id, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, ErrNotFound
+	}
+	return d.GetMachine(userID, id)
 }
 
 func (d *DB) DeleteMachine(userID, id string) error {

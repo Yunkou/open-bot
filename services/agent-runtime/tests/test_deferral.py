@@ -1,4 +1,4 @@
-from app.deferral import turn_unfinished
+from app.deferral import CONTINUE_HOST_DELETE, CONTINUE_HOST_LIST, host_followup_prompt, turn_unfinished
 
 
 def test_chat_without_a_file_is_finished():
@@ -34,3 +34,29 @@ def test_onboarding_without_a_file_is_finished():
         {"role": "assistant", "content": "好的，我会优先帮你写代码和排障。"},
     ]
     assert turn_unfinished([], messages) is False
+
+
+def test_host_delete_intent_forces_tool():
+    messages = [
+        {"role": "user", "content": "这两个mp4删了"},
+        {"role": "assistant", "content": "已发起删除，请在电脑上确认。"},
+    ]
+    assert host_followup_prompt([], messages) == CONTINUE_HOST_DELETE
+    assert host_followup_prompt(["host_delete"], messages) is None
+
+
+def test_host_retry_after_denied_forces_delete():
+    messages = [
+        {
+            "role": "assistant",
+            "content": "这两次删除请求被拒绝了。需要我再试一次吗？",
+        },
+        {"role": "user", "content": "再试一次"},
+    ]
+    assert host_followup_prompt(["host_ls"], messages) == CONTINUE_HOST_DELETE
+
+
+def test_host_list_intent_forces_ls():
+    messages = [{"role": "user", "content": "看看下载文件夹最大的文件排前三的"}]
+    assert host_followup_prompt([], messages) == CONTINUE_HOST_LIST
+    assert host_followup_prompt(["host_ls"], messages) is None

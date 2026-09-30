@@ -82,6 +82,13 @@ func resolveMentionedAgents(tokens []string, members []string, agents []*db.Agen
 
 	for _, tok := range tokens {
 		lower := strings.ToLower(tok)
+		// @everyone / @all → all channel members (group broadcast).
+		if lower == "everyone" || lower == "all" {
+			for _, id := range members {
+				add(id)
+			}
+			continue
+		}
 		if a, ok := byID[tok]; ok {
 			add(a.ID)
 			continue
@@ -111,6 +118,17 @@ func resolveMentionedAgents(tokens []string, members []string, agents []*db.Agen
 		}
 	}
 	return out
+}
+
+// mentionIncludesEveryone reports whether @everyone/@all appears in content.
+func mentionIncludesEveryone(content string) bool {
+	for _, tok := range parseMentionTokens(content) {
+		lower := strings.ToLower(tok)
+		if lower == "everyone" || lower == "all" {
+			return true
+		}
+	}
+	return false
 }
 
 // dedupeStrings preserves order.

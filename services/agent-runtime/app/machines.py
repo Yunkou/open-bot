@@ -142,6 +142,9 @@ def exec_host(
     dest: str = "",
     content: str = "",
     conversation_id: str = "",
+    ssh_host: str = "",
+    ssh_user: str = "",
+    ssh_port: int = 0,
     timeout: float = 100.0,
 ) -> dict[str, Any]:
     uid = (user_id or "").strip()
@@ -149,17 +152,20 @@ def exec_host(
     if not uid or not mid:
         return {"ok": False, "error": "user_id and machine_id required"}
     url = f"{_api_base()}/internal/machines/exec"
-    data = json.dumps(
-        {
-            "user_id": uid,
-            "machine_id": mid,
-            "op": op,
-            "path": path,
-            "dest": dest,
-            "content": content,
-            "conversation_id": conversation_id,
-        }
-    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "user_id": uid,
+        "machine_id": mid,
+        "op": op,
+        "path": path,
+        "dest": dest,
+        "content": content,
+        "conversation_id": conversation_id,
+    }
+    if ssh_host:
+        payload["ssh_host"] = ssh_host
+        payload["ssh_user"] = ssh_user
+        payload["ssh_port"] = ssh_port
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=data,

@@ -45,6 +45,7 @@ export function ChatMessage({ message, agentId, onHostDecide }: Props) {
       {time}
     </time>
   ) : null;
+  const speakerId = message.agent_id || agentId;
 
   if (message.streaming && !message.content && !isUser) {
     return null;
@@ -89,7 +90,7 @@ export function ChatMessage({ message, agentId, onHostDecide }: Props) {
         <ResultOrientedMessage
           content={message.content}
           streaming={message.streaming}
-          agentId={message.agent_id || agentId}
+          agentId={speakerId}
         />
       </div>
       {timeEl}
