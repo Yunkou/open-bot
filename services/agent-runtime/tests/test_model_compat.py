@@ -56,6 +56,11 @@ def test_detect_family() -> None:
     _ok(detect_family("Qwen3-32B-AWQ") == "qwen", "Qwen3-32B-AWQ → qwen")
     _ok(detect_family("qwq-32b") == "qwen", "qwq → qwen")
     _ok(detect_family("deepseek-chat") == "deepseek", "deepseek-chat → deepseek")
+    _ok(detect_family("kimi-k3") == "openai_chat", "kimi-k3 → openai_chat")
+    _ok(
+        detect_family("opaque", "https://api.moonshot.cn/v1") == "openai_chat",
+        "moonshot url → openai_chat",
+    )
 
     _ok(
         detect_family("opaque", "https://api.anthropic.com/v1") == "anthropic",

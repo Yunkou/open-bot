@@ -105,10 +105,75 @@ async def test_run_tool_loop_fallback() -> None:
     _ok(usage is not None and usage.get("total_tokens") == 8, f"usage accrued ({usage})")
 
 
+async def test_run_tool_loop_markup_after_fallback() -> None:
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    calls: list[dict[str, Any]] = []
+    ran: list[str] = []
+    n = {"i": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls.append({"tools": tools, "tool_choice": tool_choice})
+        if tools:
+            raise AutoToolChoiceUnsupported(
+                'upstream HTTP 400: "auto" tool choice requires --enable-auto-tool-choice'
+            )
+        n["i"] += 1
+        if n["i"] == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<tool_call>\n"
+                                "<function=list_machines>\n"
+                                "</function>\n"
+                                "</tool_call>"
+                            ),
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            }
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "目前没有已连接电脑"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9},
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        ran.append(name)
+        return '{"machines":[],"count":0}'
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://192.168.5.34:30632/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "我的设备有哪些"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(ran == ["list_machines"], f"markup tool ran (got {ran})")
+    _ok(used == ["list_machines"], f"used recorded (got {used})")
+    _ok(final == "目前没有已连接电脑", f"final text (got {final!r})")
+    _ok(calls[0]["tools"] is not None and calls[1]["tools"] is None, "fallback then markup")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
     asyncio.run(test_run_tool_loop_fallback())
+    asyncio.run(test_run_tool_loop_markup_after_fallback())
     print("all passed")
 
 

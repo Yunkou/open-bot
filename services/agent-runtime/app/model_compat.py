@@ -37,6 +37,8 @@ def detect_family(model: str, base_url: str = "") -> str:
         return "qwen"
     if "deepseek.com" in u:
         return "deepseek"
+    if "moonshot.cn" in u or "kimi" in u:
+        return "openai_chat"
     if "api.openai.com" in u and not m:
         return "openai_chat"
 
@@ -46,6 +48,8 @@ def detect_family(model: str, base_url: str = "") -> str:
     # Vendor substrings
     if m.startswith("claude") or "claude" in m:
         return "anthropic"
+    if m.startswith("kimi") or "moonshot" in m:
+        return "openai_chat"
     if m.startswith("qwen") or m.startswith("qwq") or "qwen" in m or "qwq" in m:
         return "qwen"
     if m.startswith("deepseek") or "deepseek" in m:

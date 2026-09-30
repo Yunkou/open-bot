@@ -86,6 +86,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/admin/members/{id}", s.requireOrgAdmin(s.handleAdminPatchMember))
 	mux.HandleFunc("GET /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminGetLLM))
 	mux.HandleFunc("PUT /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminPutLLM))
+	mux.HandleFunc("POST /v1/admin/org/llm/probe-tools", s.requireOrgAdmin(s.handleAdminProbeLLMTools))
 	mux.HandleFunc("GET /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminGetDecision))
 	mux.HandleFunc("PUT /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminPutDecision))
 	mux.HandleFunc("POST /v1/admin/org/decision/test", s.requireOrgAdmin(s.handleAdminTestDecision))
@@ -137,6 +138,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/llm-connections/{id}", s.requireAuth(s.handlePatchLLM))
 	mux.HandleFunc("DELETE /v1/llm-connections/{id}", s.requireAuth(s.handleDeleteLLM))
 	mux.HandleFunc("POST /v1/llm-connections/{id}/default", s.requireAuth(s.handleDefaultLLM))
+	mux.HandleFunc("POST /v1/llm/probe-tools", s.requireAuth(s.handleProbeLLMTools))
 
 	mux.HandleFunc("GET /v1/agents", s.requireAuth(s.handleListAgents))
 	mux.HandleFunc("GET /v1/agents/{id}/conversation", s.requireAuth(s.handlePrimaryAgentConversation))
@@ -457,6 +459,29 @@ type llmBody struct {
 	ContextWindow *int   `json:"context_window"`
 }
 
+func (s *Server) rejectIfToolsUnsupported(w http.ResponseWriter, r *http.Request, baseURL, apiKey, model string, enableTools bool) bool {
+	if !enableTools {
+		return false
+	}
+	res := probeLLMTools(r.Context(), baseURL, apiKey, model)
+	if res.CanEnableTools {
+		return false
+	}
+	msg := res.Detail
+	if msg == "" {
+		msg = "当前模型/网关不支持 tools，请关掉「启用 tools」或更换上游"
+	}
+	if res.Hint != "" {
+		msg = msg + " " + res.Hint
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]any{
+		"error":            msg,
+		"tools_probe":      res,
+		"can_enable_tools": false,
+	})
+	return true
+}
+
 func (s *Server) handleCreateLLM(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	var body llmBody
@@ -476,6 +501,9 @@ func (s *Server) handleCreateLLM(w http.ResponseWriter, r *http.Request) {
 	existing, _ := s.db.ListLLMConnections(uid)
 	if len(existing) > 0 && body.IsDefault == nil {
 		isDef = false
+	}
+	if s.rejectIfToolsUnsupported(w, r, body.BaseURL, body.APIKey, body.Model, enable) {
+		return
 	}
 	c, err := s.db.CreateLLMConnection(uid, body.Name, body.BaseURL, body.APIKey, body.Model, enable, isDef, body.ContextWindow)
 	if err != nil {
@@ -532,6 +560,34 @@ func (s *Server) handlePatchLLM(w http.ResponseWriter, r *http.Request) {
 				upd.ContextWindow = &v
 			}
 		}
+	}
+	cur, cerr := s.db.GetLLMConnection(uid, id)
+	if cerr != nil {
+		if errors.Is(cerr, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": cerr.Error()})
+		return
+	}
+	enable := cur.EnableTools
+	if upd.EnableTools != nil {
+		enable = *upd.EnableTools
+	}
+	baseURL := cur.BaseURL
+	if upd.BaseURL != nil {
+		baseURL = *upd.BaseURL
+	}
+	model := cur.Model
+	if upd.Model != nil {
+		model = *upd.Model
+	}
+	apiKey := cur.APIKey
+	if upd.APIKey != nil && strings.TrimSpace(*upd.APIKey) != "" {
+		apiKey = *upd.APIKey
+	}
+	if s.rejectIfToolsUnsupported(w, r, baseURL, apiKey, model, enable) {
+		return
 	}
 	c, err := s.db.UpdateLLMConnection(uid, id, upd)
 	if err != nil {

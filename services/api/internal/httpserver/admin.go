@@ -279,15 +279,24 @@ func (s *Server) handleAdminPutLLM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	apiKey := body.APIKey
+	if body.APIKey == "" {
+		if cur, err := s.db.GetOrgSettings(u.OrgID); err == nil {
+			apiKey = cur.LLMAPIKey
+		}
+	}
+	if s.rejectIfToolsUnsupported(w, r, body.BaseURL, apiKey, body.Model, body.EnableTools) {
+		return
+	}
 	settings, err := s.db.UpsertOrgLLM(u.OrgID, body.Name, body.BaseURL, body.APIKey, body.Model, body.EnableTools, body.ContextWindow, body.APIKey == "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	s.writeAudit(u.OrgID, u.ID, "org.llm_update", "org_settings", u.OrgID, map[string]any{
-		"llm_name":        settings.LLMName,
-		"llm_base_url":    settings.LLMBaseURL,
-		"llm_model":       settings.LLMModel,
+		"llm_name":         settings.LLMName,
+		"llm_base_url":     settings.LLMBaseURL,
+		"llm_model":        settings.LLMModel,
 		"llm_enable_tools": settings.LLMEnableTools,
 		"api_key_updated": body.APIKey != "",
 	})
