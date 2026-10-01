@@ -2,7 +2,7 @@
 .PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-runtime dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
 	build-web build-admin sync-mobile dev-mobile-ios open-mobile-android sandbox-image sandbox-image-desktop \
 	stop-api stop-runtime stop-web stop-worker stop-dev \
-	e2e-install e2e e2e-web e2e-admin
+	e2e-install e2e e2e-web e2e-admin backfill-embeddings dream-user
 
 API_ADDR ?= :18080
 AGENT_RUNTIME_URL ?= http://127.0.0.1:8001
@@ -167,3 +167,18 @@ e2e-web:
 
 e2e-admin:
 	pnpm --dir e2e e2e:admin
+
+
+# Backfill memories.embedding for rows missing vectors (idempotent).
+backfill-embeddings:
+	cd services/agent-runtime && \
+	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
+	  . .venv/bin/activate && \
+	  python -m app.backfill_embeddings $(BACKFILL_ARGS)
+
+# Local Dream consolidation for one user: make dream-user USER_ID=...
+dream-user:
+	cd services/agent-runtime && \
+	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
+	  . .venv/bin/activate && \
+	  MEM0_DREAM_ENABLED=1 python -m app.dream --user-id "$(USER_ID)"
