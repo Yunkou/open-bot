@@ -413,6 +413,12 @@ CREATE INDEX IF NOT EXISTS idx_conversation_tasks_conv
 	if err := d.migrateSoftDelete(); err != nil {
 		return err
 	}
+	if err := d.migrateA2ATasks(); err != nil {
+		return err
+	}
+	if err := d.migrateUsageRuns(); err != nil {
+		return err
+	}
 	return d.migrateVector()
 }
 

@@ -20,11 +20,11 @@ go run ./cmd/api
 
 发送消息时，Go 会把当前会话 `messages` + `agent_id` + `content` 一并 POST 到 runtime `/v1/runs`。客户端断开或 cancel 会取消 runtime 请求，并尽量落库已生成的部分 assistant 文本（空取消写「（已停止）」）；`cancel` / 同会话新 send 会短暂等待上一轮 flush（keep-partial-next-turn）。
 
-## A2A adapter
+## A2A gateway
 
 - `GET /.well-known/agent-card.json`（`?agent_id=` 可选）
-- `POST /a2a/v1` JSON-RPC：`message/send` / `SendMessage`
-- 可选 `A2A_TOKEN`；系统用户 `__a2a__`；适配层非完整协议
+- `POST /a2a/v1` JSON-RPC：`message/send`、`message/stream`、`tasks/get`、`tasks/cancel`、push config
+- 可选 `A2A_TOKEN`；系统用户 `__a2a__`；Task 持久化见 `docs/a2a-adapter.md`
 
 ## Routines
 
