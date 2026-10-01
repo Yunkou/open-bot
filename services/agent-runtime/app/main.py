@@ -36,6 +36,7 @@ from .memory import (
     scene_kind,
 )
 from . import mem0_store
+from . import dream
 from . import mcp_client
 from . import builtin_tools
 from .decision import DecisionSettings, bind_decision, build_client, reset_decision
@@ -199,6 +200,8 @@ async def healthz() -> dict:
         "mem0_collection": mem0_status.get("mem0_collection"),
         "mem0_auto_add": mem0_status.get("mem0_auto_add"),
         "mem0_init_error": mem0_status.get("mem0_init_error"),
+        "dream_mode": dream.status().get("dream_mode"),
+        "dream": dream.status(),
         "compact": compact_mod.compact_config(),
         "mcp_example": "POST /v1/mcp/test | /v1/mcp/list-tools | /v1/mcp/call-tool",
         **lf.status(),
@@ -1200,10 +1203,14 @@ async def openai_path(
                 except ValueError:
                     meta = mem0_store.scope_metadata("user")
                 mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
-            yield sse(
-                "done",
-                {"ok": True, "mode": "openai", "tools_used": used_tools},
-            )
+            done_payload: dict[str, Any] = {
+                "ok": True,
+                "mode": "openai",
+                "tools_used": used_tools,
+            }
+            if usage_details:
+                done_payload["usage"] = usage_details
+            yield sse("done", done_payload)
     except asyncio.CancelledError:
         raise
     except Exception as e:  # noqa: BLE001

@@ -284,7 +284,11 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		}
 		s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, conv.ChannelID, "running", label)
 	}
-	text, _, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap)
+	text, _, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap)
+	if runErr == nil {
+		_ = s.db.RecordUsageRun("", task.UserID, task.AgentID, task.ConversationID, "defer_work",
+			runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
+	}
 	return text, runErr
 }
 

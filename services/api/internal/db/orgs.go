@@ -293,6 +293,32 @@ WHERE (role IS NULL OR role = '') AND LOWER(username) <> LOWER($2)
 	return err
 }
 
+
+func (d *DB) CreateOrg(slug, name string) (*Org, error) {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	name = strings.TrimSpace(name)
+	if slug == "" || name == "" {
+		return nil, errors.New("slug and name required")
+	}
+	if _, err := d.GetOrgBySlug(slug); err == nil {
+		return nil, errors.New("org slug already exists")
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	org := &Org{ID: uuid.NewString(), Slug: slug, Name: name, CreatedAt: Now()}
+	_, err := d.SQL.Exec(`INSERT INTO orgs (id, slug, name, created_at) VALUES ($1,$2,$3,$4)`,
+		org.ID, org.Slug, org.Name, org.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = d.SQL.Exec(`
+INSERT INTO org_settings (org_id, llm_name, llm_base_url, llm_api_key, llm_model, llm_enable_tools, feature_flags_json, updated_at)
+VALUES ($1, '', '', '', '', false, '{}', $2)
+ON CONFLICT (org_id) DO NOTHING
+`, org.ID, Now())
+	return org, nil
+}
+
 func (d *DB) GetOrgByID(id string) (*Org, error) {
 	row := d.SQL.QueryRow(`SELECT id, slug, name, created_at FROM orgs WHERE id = $1`, id)
 	var o Org

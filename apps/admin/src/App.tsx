@@ -12,6 +12,7 @@ import TracesPage from "./pages/TracesPage";
 import LLMPage from "./pages/LLMPage";
 import DecisionPage from "./pages/DecisionPage";
 import UsagePage from "./pages/UsagePage";
+import OrgsPage from "./pages/OrgsPage";
 import FlagsPage from "./pages/FlagsPage";
 import AuditPage from "./pages/AuditPage";
 import MemoryPage from "./pages/MemoryPage";
@@ -93,6 +94,7 @@ function AppRoutes() {
         <Route path="llm" element={<LLMPage />} />
         <Route path="decision" element={<DecisionPage />} />
         <Route path="usage" element={<UsagePage />} />
+        <Route path="orgs" element={<OrgsPage />} />
         <Route path="flags" element={<FlagsPage />} />
         <Route path="audit" element={<AuditPage />} />
       </Route>

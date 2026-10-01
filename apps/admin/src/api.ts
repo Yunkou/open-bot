@@ -51,12 +51,47 @@ export type OrgLLMSettings = {
   updated_at?: string;
 };
 
+export type UsageRunDay = {
+  day?: string;
+  org_id?: string;
+  user_id?: string;
+  username?: string;
+  agent_id?: string;
+  agent_name?: string;
+  run_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
 export type OrgUsage = {
   org_id: string;
   member_count: number;
   conversation_count: number;
   message_count: number;
   agent_count: number;
+  run_count?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  by_day?: UsageRunDay[];
+  by_user?: UsageRunDay[];
+  by_bot?: UsageRunDay[];
+};
+
+export type PlatformOrgSummary = {
+  org_id: string;
+  slug: string;
+  name: string;
+  member_count: number;
+  conversation_count: number;
+  message_count: number;
+  agent_count: number;
+  run_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  created_at: string;
 };
 
 export type AuditLog = {
@@ -310,8 +345,12 @@ export async function adminTestDecision(body: {
   return res.json();
 }
 
-export async function adminGetUsage(): Promise<OrgUsage> {
-  const res = await fetch(`${API_BASE}/v1/admin/usage`, { headers: authHeaders() });
+export async function adminGetUsage(days = 30, orgId?: string): Promise<OrgUsage> {
+  const q = new URLSearchParams({ days: String(days) });
+  if (orgId) q.set("org_id", orgId);
+  const headers: HeadersInit = { ...authHeaders() };
+  if (orgId) (headers as Record<string, string>)["X-Admin-Org-Id"] = orgId;
+  const res = await fetch(`${API_BASE}/v1/admin/usage?${q}`, { headers });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
 }
@@ -843,4 +882,39 @@ export async function adminGetTrace(id: string): Promise<{
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.json();
+}
+
+export async function adminListPlatformOrgs(days = 30): Promise<{
+  orgs: PlatformOrgSummary[];
+  days: number;
+  count: number;
+}> {
+  const res = await fetch(`${API_BASE}/v1/admin/platform/orgs?days=${days}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export async function adminCreatePlatformOrg(slug: string, name: string): Promise<{
+  id: string;
+  slug: string;
+  name: string;
+}> {
+  const res = await fetch(`${API_BASE}/v1/admin/platform/orgs`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ slug, name }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+export function getAdminScopeOrgId(): string | null {
+  return localStorage.getItem("openbot_admin_scope_org") || null;
+}
+
+export function setAdminScopeOrgId(orgId: string | null) {
+  if (!orgId) localStorage.removeItem("openbot_admin_scope_org");
+  else localStorage.setItem("openbot_admin_scope_org", orgId);
 }

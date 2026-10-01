@@ -99,6 +99,9 @@ type OIDCUserInfo struct {
 	Email             string `json:"email"`
 	DisplayName       string `json:"displayName"`
 	Username          string // normalized
+	// Roles / Groups from Casdoor userinfo (or mapped claims). Used for local RBAC sync.
+	Roles  []string `json:"-"`
+	Groups []string `json:"-"`
 }
 
 func (c OIDCConfig) ExchangeCode(ctx context.Context, code string) (*OIDCTokenResult, error) {
@@ -194,7 +197,189 @@ func (c OIDCConfig) FetchUserInfo(ctx context.Context, accessToken string) (*OID
 	}
 	// sanitize username for local unique constraint
 	info.Username = sanitizeUsername(info.Username)
+	info.Roles = extractStringList(raw, "roles", "role")
+	info.Groups = extractStringList(raw, "groups", "group")
+	// Casdoor often puts roles under "roles" as []any of strings or objects with "name"
+	if len(info.Roles) == 0 {
+		info.Roles = extractCasdoorNamedList(raw, "roles")
+	}
+	if len(info.Groups) == 0 {
+		info.Groups = extractCasdoorNamedList(raw, "groups")
+	}
 	return &info, nil
+}
+
+func extractStringList(raw map[string]any, keys ...string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		v, ok := raw[key]
+		if !ok || v == nil {
+			continue
+		}
+		switch t := v.(type) {
+		case string:
+			for _, part := range strings.Split(t, ",") {
+				part = strings.TrimSpace(part)
+				if part == "" {
+					continue
+				}
+				if _, ok := seen[part]; ok {
+					continue
+				}
+				seen[part] = struct{}{}
+				out = append(out, part)
+			}
+		case []any:
+			for _, item := range t {
+				s := strings.TrimSpace(fmt.Sprint(item))
+				if s == "" || s == "<nil>" {
+					continue
+				}
+				if _, ok := seen[s]; ok {
+					continue
+				}
+				seen[s] = struct{}{}
+				out = append(out, s)
+			}
+		case []string:
+			for _, s := range t {
+				s = strings.TrimSpace(s)
+				if s == "" {
+					continue
+				}
+				if _, ok := seen[s]; ok {
+					continue
+				}
+				seen[s] = struct{}{}
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func extractCasdoorNamedList(raw map[string]any, key string) []string {
+	v, ok := raw[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range arr {
+		switch t := item.(type) {
+		case string:
+			if s := strings.TrimSpace(t); s != "" {
+				out = append(out, s)
+			}
+		case map[string]any:
+			name := stringFromAny(t["name"], t["displayName"], t["title"])
+			if name != "" {
+				out = append(out, name)
+			}
+		}
+	}
+	return out
+}
+
+// MapOIDCRolesToLocal maps Casdoor role/group names to local users.role via env.
+// CASDOOR_ROLE_MAP example: "admin=platform_admin,org-admin=org_admin,*=member"
+// Also accepts CASDOOR_ROLE_PLATFORM_ADMIN / CASDOOR_ROLE_ORG_ADMIN as comma lists.
+func MapOIDCRolesToLocal(roles, groups []string) (mapped string, matched bool) {
+	combined := append([]string{}, roles...)
+	combined = append(combined, groups...)
+	for i, c := range combined {
+		combined[i] = strings.ToLower(strings.TrimSpace(c))
+	}
+	explicit := strings.TrimSpace(os.Getenv("CASDOOR_ROLE_MAP"))
+	if explicit != "" {
+		best := ""
+		bestRank := 0
+		for _, part := range strings.Split(explicit, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			kv := strings.SplitN(part, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			from := strings.ToLower(strings.TrimSpace(kv[0]))
+			to := NormalizeOIDCLocalRole(strings.TrimSpace(kv[1]))
+			rank := rankLocalRole(to)
+			if from == "*" {
+				if bestRank == 0 {
+					best = to
+					bestRank = rank
+				}
+				continue
+			}
+			for _, c := range combined {
+				if c == from && rank >= bestRank {
+					best = to
+					bestRank = rank
+					matched = true
+				}
+			}
+		}
+		if matched || best != "" {
+			return best, matched || best != ""
+		}
+	}
+	platformList := splitCSV(firstNonEmpty(os.Getenv("CASDOOR_ROLE_PLATFORM_ADMIN"), "platform_admin,admin"))
+	orgList := splitCSV(firstNonEmpty(os.Getenv("CASDOOR_ROLE_ORG_ADMIN"), "org_admin,org-admin"))
+	for _, c := range combined {
+		for _, p := range platformList {
+			if c == p {
+				return "platform_admin", true
+			}
+		}
+	}
+	for _, c := range combined {
+		for _, p := range orgList {
+			if c == p {
+				return "org_admin", true
+			}
+		}
+	}
+	// Unknown Casdoor roles do not force a local role change.
+	return "member", false
+}
+
+func NormalizeOIDCLocalRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "platform_admin":
+		return "platform_admin"
+	case "org_admin":
+		return "org_admin"
+	default:
+		return "member"
+	}
+}
+
+func rankLocalRole(role string) int {
+	switch NormalizeOIDCLocalRole(role) {
+	case "platform_admin":
+		return 3
+	case "org_admin":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func stringFromAny(vals ...any) string {

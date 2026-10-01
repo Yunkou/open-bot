@@ -91,6 +91,10 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PUT /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminPutDecision))
 	mux.HandleFunc("POST /v1/admin/org/decision/test", s.requireOrgAdmin(s.handleAdminTestDecision))
 	mux.HandleFunc("GET /v1/admin/usage", s.requireOrgAdmin(s.handleAdminUsage))
+	mux.HandleFunc("GET /v1/admin/me/scope", s.requireOrgAdmin(s.handleAdminMeScope))
+	mux.HandleFunc("GET /v1/admin/platform/orgs", s.requirePlatformAdmin(s.handlePlatformListOrgs))
+	mux.HandleFunc("POST /v1/admin/platform/orgs", s.requirePlatformAdmin(s.handlePlatformCreateOrg))
+	mux.HandleFunc("GET /v1/admin/platform/orgs/{id}/usage", s.requirePlatformAdmin(s.handlePlatformOrgUsage))
 	mux.HandleFunc("GET /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
 	mux.HandleFunc("PUT /v1/admin/feature-flags", s.requireOrgAdmin(s.handleAdminFeatureFlags))
 	mux.HandleFunc("GET /v1/admin/audit-logs", s.requireOrgAdmin(s.handleAdminAuditLogs))
@@ -1294,7 +1298,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if body.Client != nil {
 			payloadMap["client"] = body.Client
 		}
-		assistantText, pendingSummary, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap)
+		assistantText, pendingSummary, runUsage, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap)
 		if pendingSummary != "" {
 			sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
 			_, _ = s.db.AddMessageAt(conv.ID, "summary", pendingSummary, sumAt)
@@ -1325,6 +1329,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"agent_id": agentID,
 			"index":    i,
 		})
+		_ = s.db.RecordUsageRun("", uid, agentID, conv.ID, "chat",
+			runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
 	}
 	if cancelled {
 		emit("meta", map[string]any{"phase": "cancelled"})
@@ -1385,34 +1391,80 @@ func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit 
 	return []string{targets[0]}, nil
 }
 
+type runtimeUsage struct {
+	PromptTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+}
+
+func usageFromDonePayload(payload map[string]any) runtimeUsage {
+	var u runtimeUsage
+	raw, _ := payload["usage"].(map[string]any)
+	if raw == nil {
+		raw, _ = payload["usage_details"].(map[string]any)
+	}
+	if raw == nil {
+		return u
+	}
+	asInt := func(v any) int64 {
+		switch t := v.(type) {
+		case float64:
+			return int64(t)
+		case int64:
+			return t
+		case int:
+			return int64(t)
+		case json.Number:
+			n, _ := t.Int64()
+			return n
+		default:
+			return 0
+		}
+	}
+	u.PromptTokens = asInt(raw["prompt_tokens"])
+	if u.PromptTokens == 0 {
+		u.PromptTokens = asInt(raw["input_tokens"])
+	}
+	u.CompletionTokens = asInt(raw["completion_tokens"])
+	if u.CompletionTokens == 0 {
+		u.CompletionTokens = asInt(raw["output_tokens"])
+	}
+	u.TotalTokens = asInt(raw["total_tokens"])
+	if u.TotalTokens == 0 && (u.PromptTokens > 0 || u.CompletionTokens > 0) {
+		u.TotalTokens = u.PromptTokens + u.CompletionTokens
+	}
+	return u
+}
+
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text + optional summary.
 // emit must not cancel the run on client write failure — disconnect is not stop.
-func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any) (string, string, error) {
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any) (string, string, runtimeUsage, error) {
 	payload, _ := json.Marshal(payloadMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
 	if err != nil {
-		return "", "", err
+		return "", "", runtimeUsage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("runtime unreachable: %v", err)
+		return "", "", runtimeUsage{}, fmt.Errorf("runtime unreachable: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", "", fmt.Errorf("runtime error: %s", string(b))
+		return "", "", runtimeUsage{}, fmt.Errorf("runtime error: %s", string(b))
 	}
 
 	var assistant strings.Builder
 	var eventName string
 	var pendingSummary string
+	var usage runtimeUsage
 	reader := bufio.NewReader(resp.Body)
 	for {
 		if err := ctx.Err(); err != nil {
-			return assistant.String(), pendingSummary, err
+			return assistant.String(), pendingSummary, usage, err
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -1449,6 +1501,7 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 							emit("error", payload)
 						}
 					case "done":
+						usage = usageFromDonePayload(payload)
 						// swallow per-agent done; outer handler emits final done
 					default:
 						if emit != nil && eventName != "" {
@@ -1463,14 +1516,14 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 		if err != nil {
 			if err != io.EOF {
 				if ctx.Err() != nil {
-					return assistant.String(), pendingSummary, ctx.Err()
+					return assistant.String(), pendingSummary, usage, ctx.Err()
 				}
-				return assistant.String(), pendingSummary, err
+				return assistant.String(), pendingSummary, usage, err
 			}
 			break
 		}
 	}
-	return assistant.String(), pendingSummary, nil
+	return assistant.String(), pendingSummary, usage, nil
 }
 
 func isCancelErr(err error) bool {

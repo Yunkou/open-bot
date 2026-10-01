@@ -53,6 +53,7 @@ const menuRoutes = {
       routes: [
         { path: "/traces", name: "调用追踪" },
         { path: "/usage", name: "用量" },
+        { path: "/orgs", name: "组织（平台）" },
         { path: "/flags", name: "功能开关" },
         { path: "/audit", name: "审计日志" },
       ],

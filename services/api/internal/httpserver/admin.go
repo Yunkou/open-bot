@@ -35,6 +35,34 @@ func (s *Server) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+func (s *Server) requirePlatformAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		u, ok := s.loadAuthUser(w, r)
+		if !ok {
+			return
+		}
+		if db.NormalizeRole(u.Role) != db.RolePlatformAdmin {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "需要平台管理员权限"})
+			return
+		}
+		next(w, r)
+	})
+}
+
+// adminScopeOrgID returns the org to operate on. platform_admin may pass
+// X-Admin-Org-Id / ?org_id= to view another tenant; org_admin stays own-org.
+func (s *Server) adminScopeOrgID(r *http.Request, u *db.User) string {
+	if db.NormalizeRole(u.Role) == db.RolePlatformAdmin {
+		if v := strings.TrimSpace(r.Header.Get("X-Admin-Org-Id")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(r.URL.Query().Get("org_id")); v != "" {
+			return v
+		}
+	}
+	return u.OrgID
+}
+
 func (s *Server) writeAudit(orgID, actorID, action, targetType, targetID string, meta map[string]any) {
 	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(action) == "" {
 		return
@@ -308,7 +336,14 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	usage, err := s.db.GetOrgUsage(u.OrgID)
+	orgID := s.adminScopeOrgID(r, u)
+	days := 30
+	if q := strings.TrimSpace(r.URL.Query().Get("days")); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			days = n
+		}
+	}
+	usage, err := s.db.GetOrgUsageDetailed(orgID, days)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

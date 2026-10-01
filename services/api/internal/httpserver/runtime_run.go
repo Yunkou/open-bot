@@ -174,6 +174,11 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	if reply != "" {
 		_, _ = s.db.AddMessage(conv.ID, "assistant", reply)
 	}
+	source := "run_once"
+	if strings.HasPrefix(title, "A2A ") {
+		source = "a2a"
+	}
+	_ = s.db.RecordUsageRun("", userID, agentID, conv.ID, source, 0, 0, 0)
 	return &runOnceResult{
 		ConversationID: conv.ID,
 		Reply:          reply,
