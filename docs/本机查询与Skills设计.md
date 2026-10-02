@@ -1,6 +1,6 @@
 # 本机查询：host_ls vs host_shell vs Skill 脚本（设计草案）
 
-> 状态：**A+B+C 已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`）。Phase D（只读 shell 放行）未做。
+> 状态：**A+B+C+D 已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`、只读 `host_shell` allowlist 软放行）。
 > 对齐 Cursor Grok Bot（`ListMachines` + 本机 Shell/Read；Skills 可带 `scripts/`）。
 > 相关实现：`apps/desktop/.../host_fs.rs`、`host_cmd.rs`；runtime `llm.py` / `client_env.py` / `deferral.py`；`skills/host-file-query/`。
 
@@ -11,7 +11,7 @@
 | `list_machines` | 已登记电脑 + `connected` | 小 |
 | `host_ls` | 浅层列目录 | 默认 **50**（最大 200）；`sort`=`mtime|size|name`；可选 `glob`；响应含 `total`/`truncated` |
 | `host_read` | 读文本 | ≤200KB |
-| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；30s；**对话确认**；禁 ssh/scp/sftp |
+| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；30s；只读 allowlist **免确认**，其余/terminal **对话确认**；禁 ssh/scp/sftp |
 | `host_ssh_*` | 远程（先 `load_skill host-ssh`） | 与上类似 |
 | `load_skill` | 加载 `SKILL.md` / `scripts/` **内容** | **不自动执行**脚本；模型再经 `host_shell` / `sandbox_*` 跑 |
 
@@ -70,26 +70,25 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
    - 聚合查询 → `host_shell` 或相关 skill 脚本，**只汇报摘要行**；
    - `host_ls` → 浅层列举、已知小目录、需要条目元数据且预期条目不多时。
 2. `host_ls` description：写明「非排序/筛选/递归汇总工具；大目录请用 host_shell」。
-3. `host_shell` description：点名适合 `find`/`du`/`stat` 等只读汇总（仍走确认策略，见下）。
+3. `host_shell` description：点名适合 `find`/`du`/`stat` 等只读汇总（只读 allowlist 免确认，见下）。
 4. Skills 目录加一条 `host-file-query`（或并入现有 host 相关 skill）。
 
-## 安全
+## 安全 / 确认策略
 
-- **现状**：写/删/移/`host_shell`/`host_ssh_exec` 已走**对话允许/拒绝卡**（任意端可点）；本机执行仍在目标机。
-- **建议**：
-  - **默认保持**：凡 `host_shell` 均确认（简单、可审）。
-  - **可选 Phase**：只读模式软放行——命令匹配 allowlist 前缀（如 `find`/`ls`/`du`/`stat`/`md5`/`wc`，且无重定向写文件、无 `rm`/`mv`/`chmod`/`curl|sh` 等）时可 `preconfirmed` 或单独「只读 shell」工具；**deny-by-default**，匹配失败仍弹卡。
-  - Skill 脚本视为「提示的推荐命令」，**不**绕过确认；脚本内容经 `load_skill` 可见，便于审计。
-  - 继续截断 stdout（已有 ~4k）；可对 `host_ls` 再降默认条数（如 50）并返回 `truncated`/`total`。
+- **免确认（读）**：`host_ls` / `host_read` / `host_ssh_ls` / `host_ssh_read`；以及本机 `host_shell` 且命令匹配**只读 allowlist**（`ls`/`find`/`du`/`stat`/`md5`/`wc`/`cat`/`head`/`grep`… 的管道组合；无写重定向、无 `$()`/`rm`/`curl|sh`/`find -delete` 等）。实现：`services/api/.../readonly_shell.go` + 客户端 `apps/web/src/lib/hostExec.ts`（deny-by-default）。
+- **仍确认**：写/删/移、非 allowlist 的 `host_shell`、`terminal=true` 的 shell、全部 `host_ssh_write|delete|exec`。对话卡任意端可点；本机执行仍在目标机。
+- **设置**：桌面端「只读本机命令免确认」可关（localStorage）；关掉后客户端对 shell 仍弹卡（API 对 allowlist 仍可能直接下发执行请求）。
+- Skill 脚本（`bash`/`sh script.sh`）**不**在 allowlist 内，仍确认；脚本内容经 `load_skill` 可见。
+- 继续截断 stdout（~4k）；`host_ls` 默认 50 + `truncated`/`total`。
 
-## 可选实现阶段
+## 实现阶段
 
 | 阶段 | 内容 | 风险 |
 |------|------|------|
 | **A 文档+提示词** | ✅ 改 `client_env` / tool description / deferral；本设计文档 | 低 |
 | **B Skill 脚本** | ✅ `host-file-query` + `largest-by-size` / `largest-by-ext` / `list-by-ext` | 低 |
 | **C 收窄 host_ls** | ✅ `limit`/`sort`/`glob`；默认 50；响应 `truncated`/`total` | 中（兼容） |
-| **D 只读 shell 放行** | allowlist + 测试；设置项可关 | 中高（安全面） |
+| **D 只读 shell 放行** | ✅ allowlist + 测试；桌面设置项可关 | 中高（安全面） |
 
 不建议新增与 `host_shell` 重复的 `host_exec` 名称；对外统一 `host_shell`，对内已是 `op=shell`。
 

@@ -46,6 +46,181 @@ export function setHostWritesEnabled(on: boolean): void {
   }
 }
 
+
+export const HOST_SHELL_READONLY_AUTO_KEY = "openbot_host_shell_readonly_auto";
+
+/** Default on: allowlisted read-only host_shell commands skip the chat confirm card. */
+export function hostShellReadonlyAutoEnabled(): boolean {
+  try {
+    return localStorage.getItem(HOST_SHELL_READONLY_AUTO_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+export function setHostShellReadonlyAutoEnabled(on: boolean): void {
+  try {
+    localStorage.setItem(HOST_SHELL_READONLY_AUTO_KEY, on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+}
+
+const READONLY_SHELL_ALLOW = new Set([
+  "ls", "find", "du", "stat",
+  "md5", "md5sum", "shasum", "sha1sum", "sha256sum",
+  "wc", "cat", "head", "tail", "file",
+  "pwd", "which", "type", "dirname", "basename",
+  "realpath", "readlink", "uname", "date", "whoami",
+  "id", "df", "hostname", "echo", "printf",
+  "true", "false", "test", "[",
+  "grep", "egrep", "fgrep",
+  "sort", "uniq", "cut", "tr", "awk",
+  "tree", "arch", "sw_vers", "printenv", "locale",
+]);
+
+const READONLY_SHELL_DENY_SUBSTR = [
+  "$(", "`", "$((", "<<",
+  " -exec", "-exec ", "-ok ", " -ok", "-delete",
+  "sudo", "doas", " pkexec",
+  "|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
+  "|fish", "| fish",
+  "curl ", "wget ", " nc ", "ncat ", "netcat ",
+  "ssh ", "scp ", "sftp ",
+  "rm ", "rm\t", "mv ", "mv\t", "cp ", "cp\t",
+  "chmod ", "chown ", "chgrp ", "unlink ",
+  "mkdir ", "rmdir ", "touch ", "ln ", "dd ",
+  "tee ", "truncate ", "shred ",
+  "kill ", "pkill ", "killall ",
+  "reboot", "shutdown", "halt ",
+  "eval ", "source ", " exec ",
+  "sed -i", "perl -i", "ruby -i",
+];
+
+function baseName(tok: string): string {
+  const norm = tok.replace(/\\/g, "/");
+  const i = norm.lastIndexOf("/");
+  return i >= 0 ? norm.slice(i + 1) : norm;
+}
+
+function takeToken(s: string): [string, string] {
+  const trimmed = s.replace(/^\s+/, "");
+  if (!trimmed) return ["", ""];
+  if (trimmed[0] === "'" || trimmed[0] === '"') {
+    const q = trimmed[0];
+    let end = 1;
+    while (end < trimmed.length && trimmed[end] !== q) end++;
+    if (end < trimmed.length) return [trimmed.slice(1, end), trimmed.slice(end + 1)];
+    return [trimmed.slice(1), ""];
+  }
+  let end = 0;
+  while (end < trimmed.length && !/\s/.test(trimmed[end]!)) end++;
+  return [trimmed.slice(0, end), trimmed.slice(end)];
+}
+
+function firstShellToken(s: string): string {
+  let rest = s;
+  for (;;) {
+    const [tok, next] = takeToken(rest);
+    if (!tok) return "";
+    if (tok.includes("=") && !tok.startsWith("-") && !tok.includes("/")) {
+      rest = next;
+      continue;
+    }
+    return tok;
+  }
+}
+
+function splitShellSegments(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === "'" && !inDouble) {
+      inSingle = !inSingle;
+      cur += c;
+      continue;
+    }
+    if (c === '"' && !inSingle) {
+      inDouble = !inDouble;
+      cur += c;
+      continue;
+    }
+    if (!inSingle && !inDouble) {
+      if (c === "|" || c === ";") {
+        if (c === "|" && cmd[i + 1] === "|") {
+          const seg = cur.trim();
+          if (seg) out.push(seg);
+          cur = "";
+          i++;
+          continue;
+        }
+        const seg = cur.trim();
+        if (seg) out.push(seg);
+        cur = "";
+        continue;
+      }
+      if (c === "&" && cmd[i + 1] === "&") {
+        const seg = cur.trim();
+        if (seg) out.push(seg);
+        cur = "";
+        i++;
+        continue;
+      }
+    }
+    cur += c;
+  }
+  const seg = cur.trim();
+  if (seg) out.push(seg);
+  return out;
+}
+
+function hasNonNullWriteRedirect(cmd: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (c === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (c === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble || c !== ">") continue;
+    let j = i;
+    while (j < cmd.length && cmd[j] === ">") j++;
+    const target = firstShellToken(cmd.slice(j));
+    if (target !== "/dev/null" && target !== "nul") return true;
+    i = j - 1;
+  }
+  return false;
+}
+
+/** Mirror of API isReadonlyShellCommand — keep deny-by-default in sync with readonly_shell.go. */
+export function isReadonlyShellCommand(command: string): boolean {
+  const cmd = command.trim();
+  if (!cmd || cmd.length > 2000) return false;
+  const lower = cmd.toLowerCase();
+  for (const bad of READONLY_SHELL_DENY_SUBSTR) {
+    if (lower.includes(bad)) return false;
+  }
+  if (hasNonNullWriteRedirect(cmd)) return false;
+  const segments = splitShellSegments(cmd);
+  if (segments.length === 0) return false;
+  for (const seg of segments) {
+    const s = seg.trim();
+    if (!s || s.endsWith("&")) return false;
+    const tok = firstShellToken(s);
+    if (!tok) return false;
+    if (!READONLY_SHELL_ALLOW.has(baseName(tok).toLowerCase())) return false;
+  }
+  return true;
+}
+
 function isWriteOp(op: string): boolean {
   return op === "write" || op === "delete" || op === "move" || op === "ssh_write" || op === "ssh_delete" || op === "ssh_exec";
 }
@@ -119,8 +294,14 @@ async function probeSsh(req: HostExecRequest): Promise<Record<string, unknown>> 
 }
 
 async function needsConfirm(req: HostExecRequest): Promise<boolean> {
+  if (req.op === "shell") {
+    if (req.dest === "terminal") return true;
+    if (hostShellReadonlyAutoEnabled() && isReadonlyShellCommand(req.path || "")) {
+      return false;
+    }
+    return true;
+  }
   if (
-    req.op === "shell" ||
     req.op === "delete" ||
     req.op === "move" ||
     req.op === "ssh_write" ||

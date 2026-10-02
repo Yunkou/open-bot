@@ -17,7 +17,7 @@ func TestHostSSHOps(t *testing.T) {
 	if !hostOpNeedsConfirm("ssh_write") || hostOpNeedsConfirm("ssh_ls") {
 		t.Fatal("ssh confirm")
 	}
-	label := hostActivityLabel("Mac", "ssh_exec")
+	label := hostActivityLabel("Mac", "ssh_exec", "ls", "")
 	if label == "" || len(label) < 8 {
 		t.Fatal(label)
 	}

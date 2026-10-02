@@ -221,7 +221,7 @@ func hostOpNeedsConfirm(op string) bool {
 	}
 }
 
-func hostActivityLabel(label, op string) string {
+func hostActivityLabel(label, op, path, dest string) string {
 	action := "处理文件"
 	switch op {
 	case "ls":
@@ -250,7 +250,7 @@ func hostActivityLabel(label, op string) string {
 		action = "在远程主机上运行命令"
 	}
 	msg := "正在" + label + "上" + action
-	if hostOpNeedsConfirm(op) {
+	if hostExecNeedsChatConfirm(op, path, dest) {
 		msg += "。若需要确认，在对话里点允许或拒绝"
 	}
 	return msg
@@ -338,7 +338,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	conversationID := strings.TrimSpace(body.ConversationID)
 	preconfirmed := false
 	confirmReqID := ""
-	if hostOpNeedsConfirm(op) && conversationID != "" {
+	if hostExecNeedsChatConfirm(op, body.Path, body.Dest) && conversationID != "" {
 		preview := ""
 		if op == "shell" || op == "ssh_exec" || op == "write" || op == "ssh_write" {
 			preview = body.Content
@@ -372,7 +372,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 			"type":       "host_activity",
 			"active":     true,
 			"machine_id": mid,
-			"label":      hostActivityLabel(m.Label, op),
+			"label":      hostActivityLabel(m.Label, op, body.Path, body.Dest),
 		})
 	}
 	result, err := s.hosts.Call(r.Context(), uid, mid, hostExecRequest{

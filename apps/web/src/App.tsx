@@ -109,7 +109,7 @@ import {
   defaultMachineLabel,
   resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
-import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, type HostExecRequest } from "./lib/hostExec";
+import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, hostShellReadonlyAutoEnabled, setHostShellReadonlyAutoEnabled, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
 import { AccountMenu } from "./components/AccountMenu";
 import {
@@ -480,6 +480,7 @@ export default function App() {
   const [renameDraft, setRenameDraft] = useState("");
   const [hostMachineId, setHostMachineId] = useState<string | null>(() => getStoredMachineId());
   const [hostWritesOn, setHostWritesOn] = useState(() => hostWritesEnabled());
+  const [hostShellReadonlyAuto, setHostShellReadonlyAuto] = useState(() => hostShellReadonlyAutoEnabled());
   const [hostActivity, setHostActivity] = useState("");
   const hostConfirmResolvers = useRef(new Map<string, (ok: boolean) => void>());
   const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
@@ -4142,22 +4143,35 @@ export default function App() {
             {settingsTab === "machines" && (
               <SettingsPage>
                 <SettingsHint>
-                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。覆盖、删除、移动，以及主目录外写入会在对话里请你确认。当前客户端：{clientEnv.platform} / {clientEnv.app}
+                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。覆盖、删除、移动、主目录外写入，以及非只读的本机命令会在对话里请你确认；host_ls / host_read 与 allowlist 只读 shell（如 ls/find/du）默认免确认。当前客户端：{clientEnv.platform} / {clientEnv.app}
                   {deviceDisplayName ? ` · 本机名称「${deviceDisplayName}」` : ""}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
                 </SettingsHint>
                 {clientEnv.app === "tauri" ? (
-                  <label className="settings-inline-check">
-                    <input
-                      type="checkbox"
-                      checked={hostWritesOn}
-                      onChange={(e) => {
-                        setHostWritesEnabled(e.target.checked);
-                        setHostWritesOn(e.target.checked);
-                      }}
-                    />
-                    允许写入这台电脑
-                  </label>
+                  <>
+                    <label className="settings-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={hostWritesOn}
+                        onChange={(e) => {
+                          setHostWritesEnabled(e.target.checked);
+                          setHostWritesOn(e.target.checked);
+                        }}
+                      />
+                      允许写入这台电脑
+                    </label>
+                    <label className="settings-inline-check">
+                      <input
+                        type="checkbox"
+                        checked={hostShellReadonlyAuto}
+                        onChange={(e) => {
+                          setHostShellReadonlyAutoEnabled(e.target.checked);
+                          setHostShellReadonlyAuto(e.target.checked);
+                        }}
+                      />
+                      只读本机命令免确认（ls / find / du 等 allowlist；关则每条 shell 都确认）
+                    </label>
+                  </>
                 ) : null}
                 <SettingsSection
                   title="已注册"
