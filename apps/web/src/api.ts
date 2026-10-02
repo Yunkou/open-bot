@@ -883,7 +883,7 @@ export type ChatServerEvent =
 
 export async function createHostConfirm(
   conversationId: string,
-  body: { req_id: string; op: string; path: string; dest?: string; preview?: string },
+  body: { req_id: string; op: string; path: string; dest?: string; preview?: string; reason?: string; review_tier?: string },
 ): Promise<Message> {
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/host-confirms`, {
     method: "POST",

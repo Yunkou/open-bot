@@ -221,6 +221,111 @@ export function isReadonlyShellCommand(command: string): boolean {
   return true;
 }
 
+
+/** Grok-aligned Auto-review tiers: deterministic, no LLM judgment. */
+export type HostExecReviewTier = "auto" | "confirm" | "deny";
+
+export type HostExecReview = {
+  tier: HostExecReviewTier;
+  reason: string;
+  code: string;
+};
+
+const HARD_DENY_PIPE_SHELL = [
+  "|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash", "|fish", "| fish",
+];
+
+function isWipeRootCommand(lower: string): boolean {
+  for (const prefix of ["rm -rf ", "rm -fr "]) {
+    let idx = lower.indexOf(prefix);
+    while (idx >= 0) {
+      const rest = lower.slice(idx + prefix.length).replace(/^[ \t]+/, "");
+      if (rest === "/" || rest === "/*") return true;
+      if (rest.startsWith("/")) {
+        const after = rest.slice(1);
+        if (!after || after === "*") return true;
+        const c = after[0];
+        if (c === " " || c === "\t" || c === ";" || c === "&" || c === "|" || c === "\n") return true;
+      }
+      const next = lower.indexOf(prefix, idx + prefix.length);
+      if (next < 0) break;
+      idx = next;
+    }
+  }
+  return false;
+}
+
+function matchHardDenyShell(command: string): HostExecReview | null {
+  const lower = command.trim().toLowerCase();
+  if (!lower) return null;
+  if (isWipeRootCommand(lower)) {
+    return { tier: "deny", code: "wipe_root", reason: "Auto-review 硬拒绝：疑似清空根目录" };
+  }
+  const pipedShell = HARD_DENY_PIPE_SHELL.some((s) => lower.includes(s));
+  if (pipedShell && (lower.includes("curl ") || lower.includes("wget "))) {
+    return { tier: "deny", code: "pipe_download_shell", reason: "Auto-review 硬拒绝：下载管道进 shell（如 curl|sh）" };
+  }
+  if (pipedShell) {
+    return { tier: "deny", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器" };
+  }
+  if (lower.includes(":(){")) {
+    return { tier: "deny", code: "fork_bomb", reason: "Auto-review 硬拒绝：疑似 fork bomb" };
+  }
+  if (lower.includes("mkfs")) {
+    return { tier: "deny", code: "format_disk", reason: "Auto-review 硬拒绝：格式化磁盘" };
+  }
+  if (lower.includes("of=/dev/") || lower.includes(">/dev/sd") || lower.includes("> /dev/sd") ||
+      lower.includes(">/dev/disk") || lower.includes("> /dev/disk")) {
+    return { tier: "deny", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备" };
+  }
+  if (lower.includes("dd if=")) {
+    return { tier: "deny", code: "dd_image", reason: "Auto-review 硬拒绝：dd 磁盘镜像类命令" };
+  }
+  return null;
+}
+
+/** Mirror of API classifyHostExecReview — keep in sync with readonly_shell.go. */
+export function classifyHostExecReview(op: string, path = "", dest = ""): HostExecReview {
+  const o = op.trim();
+  const p = path.trim();
+  const d = dest.trim();
+  switch (o) {
+    case "ls":
+    case "read":
+    case "ssh_ls":
+    case "ssh_read":
+    case "open":
+      return { tier: "auto", reason: "只读/可逆操作，Auto-review 自动放行", code: "readonly_op" };
+    case "write":
+      return { tier: "confirm", reason: "写入本机文件，需你确认", code: "write" };
+    case "delete":
+      return { tier: "confirm", reason: "删除本机文件，需你确认", code: "delete" };
+    case "move":
+      return { tier: "confirm", reason: "移动或重命名，需你确认", code: "move" };
+    case "ssh_write":
+      return { tier: "confirm", reason: "写入远程文件，需你确认", code: "ssh_write" };
+    case "ssh_delete":
+      return { tier: "confirm", reason: "删除远程文件，需你确认", code: "ssh_delete" };
+    case "ssh_exec":
+      return { tier: "confirm", reason: "远程执行命令，需你确认", code: "ssh_exec" };
+    case "shell":
+      if (d === "terminal") {
+        return { tier: "confirm", reason: "将打开终端窗口，需你确认", code: "terminal" };
+      }
+      {
+        const hard = matchHardDenyShell(p);
+        if (hard) return hard;
+      }
+      if (isReadonlyShellCommand(p)) {
+        return { tier: "auto", reason: "只读 allowlist 命令，Auto-review 自动放行", code: "readonly_shell" };
+      }
+      return { tier: "confirm", reason: "非只读本机命令（不在 Auto-review allowlist），需你确认", code: "shell_confirm" };
+    default:
+      return { tier: "confirm", reason: "未知操作，需你确认", code: "unknown_op" };
+  }
+}
+
+
 function isWriteOp(op: string): boolean {
   return op === "write" || op === "delete" || op === "move" || op === "ssh_write" || op === "ssh_delete" || op === "ssh_exec";
 }
@@ -293,37 +398,59 @@ async function probeSsh(req: HostExecRequest): Promise<Record<string, unknown>> 
   }
 }
 
-async function needsConfirm(req: HostExecRequest): Promise<boolean> {
-  if (req.op === "shell") {
-    if (req.dest === "terminal") return true;
-    if (hostShellReadonlyAutoEnabled() && isReadonlyShellCommand(req.path || "")) {
-      return false;
-    }
-    return true;
-  }
+/** Client Auto-review gate. Kill switch forces readonly shell auto → confirm. */
+function reviewForRequest(req: HostExecRequest): HostExecReview {
+  const rev = classifyHostExecReview(req.op, req.path || "", req.dest || "");
   if (
-    req.op === "delete" ||
-    req.op === "move" ||
-    req.op === "ssh_write" ||
-    req.op === "ssh_delete" ||
-    req.op === "ssh_exec"
+    rev.tier === "auto" &&
+    rev.code === "readonly_shell" &&
+    !hostShellReadonlyAutoEnabled()
   ) {
-    return true;
+    return {
+      tier: "confirm",
+      reason: "只读免确认已关闭，本机命令需你确认",
+      code: "readonly_shell_kill_switch",
+    };
   }
-  if (req.op !== "write") return false;
+  // write: keep prior home/overwrite heuristic (confirm overwrite or outside home).
+  if (rev.code === "write") {
+    return rev; // async refinement happens in needsConfirm
+  }
+  return rev;
+}
+
+async function refineWriteReview(req: HostExecRequest, base: HostExecReview): Promise<HostExecReview> {
+  if (req.op !== "write") return base;
   const invoke = tauriInvoke();
-  if (!invoke) return true;
+  if (!invoke) return base;
   try {
     const stat = (await invoke("host_stat", { path: req.path || "" })) as {
       exists?: boolean;
       is_dir?: boolean;
       under_home?: boolean;
     };
-    if (stat.under_home === false) return true;
-    return Boolean(stat.exists && !stat.is_dir);
+    if (stat.under_home === false) {
+      return { tier: "confirm", reason: "主目录外写入，需你确认", code: "write_outside_home" };
+    }
+    if (stat.exists && !stat.is_dir) {
+      return { tier: "confirm", reason: "覆盖已有文件，需你确认", code: "write_overwrite" };
+    }
+    // New file under home: still confirm via API hostOpNeedsConfirm; keep confirm.
+    return base;
   } catch {
-    return true;
+    return base;
   }
+}
+
+async function needsConfirm(req: HostExecRequest): Promise<boolean> {
+  let rev = reviewForRequest(req);
+  if (rev.code === "write") rev = await refineWriteReview(req, rev);
+  return rev.tier === "confirm";
+}
+
+function hardDenyReview(req: HostExecRequest): HostExecReview | null {
+  const rev = reviewForRequest(req);
+  return rev.tier === "deny" ? rev : null;
 }
 
 export function startHostExecSession(opts: {
@@ -350,7 +477,16 @@ export function startHostExecSession(opts: {
         if (req.type !== "exec" || !req.req_id) return;
         let result: Record<string, unknown>;
         try {
-          if (isWriteOp(req.op) && !hostWritesEnabled()) {
+          const hard = hardDenyReview(req);
+          if (hard) {
+            result = {
+              ok: false,
+              denied: true,
+              auto_review: "deny",
+              review_code: hard.code,
+              error: hard.reason,
+            };
+          } else if (isWriteOp(req.op) && !hostWritesEnabled()) {
             result = {
               ok: false,
               error: req.op.startsWith("ssh_") ? "写入已关闭，远程写入、删除和命令也停着" : "本机写入已关闭",

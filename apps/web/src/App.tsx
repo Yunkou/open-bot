@@ -109,7 +109,7 @@ import {
   defaultMachineLabel,
   resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
-import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, hostShellReadonlyAutoEnabled, setHostShellReadonlyAutoEnabled, type HostExecRequest } from "./lib/hostExec";
+import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, hostShellReadonlyAutoEnabled, setHostShellReadonlyAutoEnabled, classifyHostExecReview, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
 import { AccountMenu } from "./components/AccountMenu";
 import {
@@ -1095,12 +1095,15 @@ export default function App() {
       if (req.op === "shell" && req.dest === "terminal" && !preview) {
         preview = "会打开终端窗口，你可以在里面输入密码或继续操作";
       }
+      const review = classifyHostExecReview(req.op, req.path || "", req.dest || "");
       void createHostConfirm(conversationId, {
         req_id: req.req_id,
         op: req.op,
         path: req.path || "",
         dest: req.dest || "",
         preview,
+        reason: review.reason,
+        review_tier: review.tier,
       })
         .then((msg) => acceptServerMessage(msg))
         .catch(() => {
@@ -1115,6 +1118,8 @@ export default function App() {
               path: req.path || "",
               dest: req.dest || "",
               preview,
+              reason: review.reason,
+              review_tier: review.tier,
               status: "pending",
             }),
           });
@@ -4143,7 +4148,7 @@ export default function App() {
             {settingsTab === "machines" && (
               <SettingsPage>
                 <SettingsHint>
-                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。覆盖、删除、移动、主目录外写入，以及非只读的本机命令会在对话里请你确认；host_ls / host_read 与 allowlist 只读 shell（如 ls/find/du）默认免确认。当前客户端：{clientEnv.platform} / {clientEnv.app}
+                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。确认策略对齐 Grok Bot Auto-review（确定性规则，不用对话模型自行批准）：只读免确认；危险模式硬拒绝；其余需你点确认卡。当前客户端：{clientEnv.platform} / {clientEnv.app}
                   {deviceDisplayName ? ` · 本机名称「${deviceDisplayName}」` : ""}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
                 </SettingsHint>
@@ -4169,7 +4174,7 @@ export default function App() {
                           setHostShellReadonlyAuto(e.target.checked);
                         }}
                       />
-                      只读本机命令免确认（ls / find / du 等 allowlist；关则每条 shell 都确认）
+                      只读免确认 / 风险自动审（ls/find/du 等 allowlist 自动放行；关则每条 shell 都确认。硬危险仍直接拒绝）
                     </label>
                   </>
                 ) : null}

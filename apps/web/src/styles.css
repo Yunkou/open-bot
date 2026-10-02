@@ -2448,6 +2448,13 @@ button.ghost {
   font-weight: 650;
   color: var(--text);
 }
+.host-confirm-reason {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted, #6b7280);
+}
+
 .host-confirm-path {
   margin-top: 8px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

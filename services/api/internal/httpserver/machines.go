@@ -212,15 +212,6 @@ func supportedHostOp(op string) bool {
 	}
 }
 
-func hostOpNeedsConfirm(op string) bool {
-	switch op {
-	case "write", "delete", "move", "shell", "ssh_write", "ssh_delete", "ssh_exec":
-		return true
-	default:
-		return false
-	}
-}
-
 func hostActivityLabel(label, op, path, dest string) string {
 	action := "处理文件"
 	switch op {
@@ -338,6 +329,14 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	conversationID := strings.TrimSpace(body.ConversationID)
 	preconfirmed := false
 	confirmReqID := ""
+	if denied, rev := hostExecHardDenied(op, body.Path, body.Dest); denied {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "denied": true, "auto_review": "deny",
+			"error": rev.Reason, "review_code": rev.Code,
+			"machine_id": mid, "label": m.Label,
+		})
+		return
+	}
 	if hostExecNeedsChatConfirm(op, body.Path, body.Dest) && conversationID != "" {
 		preview := ""
 		if op == "shell" || op == "ssh_exec" || op == "write" || op == "ssh_write" {
@@ -433,12 +432,14 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 }
 
 type hostConfirmPayload struct {
-	ReqID   string `json:"req_id"`
-	Op      string `json:"op"`
-	Path    string `json:"path"`
-	Dest    string `json:"dest,omitempty"`
-	Preview string `json:"preview,omitempty"`
-	Status  string `json:"status"`
+	ReqID      string `json:"req_id"`
+	Op         string `json:"op"`
+	Path       string `json:"path"`
+	Dest       string `json:"dest,omitempty"`
+	Preview    string `json:"preview,omitempty"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason,omitempty"`      // Auto-review why confirm
+	ReviewTier string `json:"review_tier,omitempty"` // always "confirm" when card shown
 }
 
 // hostConfirmGate parks dangerous host ops until the chat UI allows/denies.
@@ -574,13 +575,16 @@ func (s *Server) requestChatHostConfirm(
 	}
 
 	reqID = uuid.NewString()
+	rev := classifyHostExecReview(op, path, dest)
 	payload := hostConfirmPayload{
-		ReqID:   reqID,
-		Op:      op,
-		Path:    path,
-		Dest:    dest,
-		Preview: clipRunes(preview, 180),
-		Status:  "pending",
+		ReqID:      reqID,
+		Op:         op,
+		Path:       path,
+		Dest:       dest,
+		Preview:    clipRunes(preview, 180),
+		Status:     "pending",
+		Reason:     rev.Reason,
+		ReviewTier: string(rev.Tier),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -717,6 +721,15 @@ func (s *Server) handleCreateHostConfirm(w http.ResponseWriter, r *http.Request)
 	body.Dest = strings.TrimSpace(body.Dest)
 	body.Preview = clipRunes(body.Preview, 180)
 	body.Status = "pending"
+	if body.Reason == "" || body.ReviewTier == "" {
+		rev := classifyHostExecReview(body.Op, body.Path, body.Dest)
+		if body.Reason == "" {
+			body.Reason = rev.Reason
+		}
+		if body.ReviewTier == "" {
+			body.ReviewTier = string(rev.Tier)
+		}
+	}
 	if body.ReqID == "" || body.Path == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "req_id and path required"})
 		return

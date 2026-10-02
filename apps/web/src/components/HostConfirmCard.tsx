@@ -5,6 +5,9 @@ export type HostConfirmPayload = {
   dest?: string;
   preview?: string;
   status: "pending" | "allowed" | "denied" | string;
+  /** Auto-review structured reason (why confirm). */
+  reason?: string;
+  review_tier?: string;
 };
 
 export function parseHostConfirm(content: string): HostConfirmPayload | null {
@@ -93,8 +96,9 @@ export function HostConfirmCard({
 
   return (
     <div className="host-confirm-card" role="region" aria-label={title}>
-      <div className="host-confirm-kicker">需要你确认</div>
+      <div className="host-confirm-kicker">需要你确认 · Auto-review</div>
       <div className="host-confirm-title">{title}</div>
+      {item.reason ? <div className="host-confirm-reason">{item.reason}</div> : null}
       {detail ? <div className="host-confirm-path">{detail}</div> : null}
       {item.preview && (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec") ? (
         <pre className="host-confirm-preview">{item.preview}</pre>

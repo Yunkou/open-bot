@@ -6,10 +6,33 @@ import (
 	"unicode"
 )
 
+// Host-exec Auto-review (Grok Bot–aligned): deterministic tiers, no LLM judgment.
+//
+//  1. hard deny  — clearly dangerous patterns rejected without a confirm card
+//  2. auto       — read-only / reversible ops skip confirm (Phase D allowlist + ls/read)
+//  3. confirm    — everything else needs the user (chat card), with a structured reason
+//
+// Settings kill-switch on the desktop client can force shell auto → confirm locally;
+// the API always applies the same deny/auto/confirm table.
+
+type hostExecReviewTier string
+
+const (
+	hostExecReviewAuto    hostExecReviewTier = "auto"
+	hostExecReviewConfirm hostExecReviewTier = "confirm"
+	hostExecReviewDeny    hostExecReviewTier = "deny"
+)
+
+type hostExecReview struct {
+	Tier   hostExecReviewTier
+	Reason string // short, user-visible / card copy
+	Code   string // stable machine code for tests / logs
+}
+
 // Read-only host_shell soft-allow (Phase D).
 // Deny-by-default: only simple pipelines of allowlisted commands skip chat confirm.
 // Skill scripts (bash/sh script.sh), terminal=true, ssh_exec, and anything with
-// redirects / substitutions / dangerous tokens still require confirmation.
+// redirects / substitutions / dangerous tokens still require confirmation (or hard deny).
 
 var readonlyShellAllow = map[string]struct{}{
 	"ls": {}, "find": {}, "du": {}, "stat": {},
@@ -24,7 +47,8 @@ var readonlyShellAllow = map[string]struct{}{
 	"tree": {}, "arch": {}, "sw_vers": {}, "printenv": {}, "locale": {},
 }
 
-// Substrings that always force confirm (checked case-insensitively on the raw command).
+// Substrings that exclude a command from the read-only allowlist (forces confirm
+// unless a harder deny rule matches first). Checked case-insensitively on the raw command.
 var readonlyShellDenySubstrings = []string{
 	"$(", "`", // command substitution
 	"$((",     // arithmetic (rarely needed; avoid cleverness)
@@ -45,19 +69,157 @@ var readonlyShellDenySubstrings = []string{
 	"sed -i", "perl -i", "ruby -i",
 }
 
-func hostExecNeedsChatConfirm(op, path, dest string) bool {
-	if !hostOpNeedsConfirm(op) {
-		return false
-	}
-	if op == "shell" {
-		if strings.TrimSpace(dest) == "terminal" {
-			return true
+// Hard-deny patterns: never execute, no confirm card (Auto-review hard block).
+// Keep this list narrow — ordinary deletes/writes stay in the confirm tier.
+type hardDenyRule struct {
+	substr string
+	code   string
+	reason string
+}
+
+var hostExecHardDenyRules = []hardDenyRule{
+	{substr: "curl ", code: "pipe_download_shell", reason: "Auto-review 硬拒绝：下载管道进 shell（如 curl|sh）"},
+	{substr: "wget ", code: "pipe_download_shell", reason: "Auto-review 硬拒绝：下载管道进 shell（如 wget|sh）"},
+	{substr: "|sh", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "| sh", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "|bash", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "| bash", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "|zsh", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "| zsh", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "|dash", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "| dash", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "|fish", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: "| fish", code: "pipe_to_shell", reason: "Auto-review 硬拒绝：管道进 shell 解释器"},
+	{substr: ":(){", code: "fork_bomb", reason: "Auto-review 硬拒绝：疑似 fork bomb"},
+	{substr: "mkfs", code: "format_disk", reason: "Auto-review 硬拒绝：格式化磁盘"},
+	{substr: "of=/dev/", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备"},
+	{substr: "> /dev/sd", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备"},
+	{substr: ">/dev/sd", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备"},
+	{substr: "> /dev/disk", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备"},
+	{substr: ">/dev/disk", code: "raw_disk_write", reason: "Auto-review 硬拒绝：写入块设备"},
+	{substr: "dd if=", code: "dd_image", reason: "Auto-review 硬拒绝：dd 磁盘镜像类命令"},
+}
+
+func classifyHostExecReview(op, path, dest string) hostExecReview {
+	op = strings.TrimSpace(op)
+	path = strings.TrimSpace(path)
+	dest = strings.TrimSpace(dest)
+
+	switch op {
+	case "ls", "read", "ssh_ls", "ssh_read", "open":
+		return hostExecReview{Tier: hostExecReviewAuto, Reason: "只读/可逆操作，Auto-review 自动放行", Code: "readonly_op"}
+	case "write":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "写入本机文件，需你确认", Code: "write"}
+	case "delete":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "删除本机文件，需你确认", Code: "delete"}
+	case "move":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "移动或重命名，需你确认", Code: "move"}
+	case "ssh_write":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "写入远程文件，需你确认", Code: "ssh_write"}
+	case "ssh_delete":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "删除远程文件，需你确认", Code: "ssh_delete"}
+	case "ssh_exec":
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "远程执行命令，需你确认", Code: "ssh_exec"}
+	case "shell":
+		if dest == "terminal" {
+			return hostExecReview{Tier: hostExecReviewConfirm, Reason: "将打开终端窗口，需你确认", Code: "terminal"}
+		}
+		if hit, rule := matchHardDenyShell(path); hit {
+			return hostExecReview{Tier: hostExecReviewDeny, Reason: rule.reason, Code: rule.code}
 		}
 		if isReadonlyShellCommand(path) {
-			return false
+			return hostExecReview{Tier: hostExecReviewAuto, Reason: "只读 allowlist 命令，Auto-review 自动放行", Code: "readonly_shell"}
+		}
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "非只读本机命令（不在 Auto-review allowlist），需你确认", Code: "shell_confirm"}
+	default:
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "未知操作，需你确认", Code: "unknown_op"}
+	}
+}
+
+func matchHardDenyShell(command string) (bool, hardDenyRule) {
+	lower := strings.ToLower(strings.TrimSpace(command))
+	if lower == "" {
+		return false, hardDenyRule{}
+	}
+	if isWipeRootCommand(lower) {
+		return true, hardDenyRule{
+			code:   "wipe_root",
+			reason: "Auto-review 硬拒绝：疑似清空根目录",
 		}
 	}
-	return true
+	pipedShell := strings.Contains(lower, "|sh") || strings.Contains(lower, "| sh") ||
+		strings.Contains(lower, "|bash") || strings.Contains(lower, "| bash") ||
+		strings.Contains(lower, "|zsh") || strings.Contains(lower, "| zsh") ||
+		strings.Contains(lower, "|dash") || strings.Contains(lower, "| dash") ||
+		strings.Contains(lower, "|fish") || strings.Contains(lower, "| fish")
+	// Prefer a clearer code when download is piped into a shell.
+	if pipedShell && (strings.Contains(lower, "curl ") || strings.Contains(lower, "wget ")) {
+		return true, hardDenyRule{
+			code:   "pipe_download_shell",
+			reason: "Auto-review 硬拒绝：下载管道进 shell（如 curl|sh）",
+		}
+	}
+	for _, rule := range hostExecHardDenyRules {
+		if rule.code == "pipe_download_shell" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(rule.substr)) {
+			return true, rule
+		}
+	}
+	return false, hardDenyRule{}
+}
+
+// isWipeRootCommand matches rm -rf / or rm -rf /* (and -fr), but not rm -rf /tmp.
+func isWipeRootCommand(lower string) bool {
+	for _, prefix := range []string{"rm -rf ", "rm -fr "} {
+		idx := strings.Index(lower, prefix)
+		for idx >= 0 {
+			rest := strings.TrimLeft(lower[idx+len(prefix):], " \t")
+			if rest == "/" || rest == "/*" {
+				return true
+			}
+			if strings.HasPrefix(rest, "/") {
+				after := rest[1:]
+				if after == "" || after == "*" {
+					return true
+				}
+				// "/" followed by path chars → not wipe root (e.g. /tmp)
+				if after[0] == ' ' || after[0] == '\t' || after[0] == ';' || after[0] == '&' || after[0] == '|' || after[0] == '\n' {
+					return true
+				}
+			}
+			next := strings.Index(lower[idx+len(prefix):], prefix)
+			if next < 0 {
+				break
+			}
+			idx = idx + len(prefix) + next
+		}
+	}
+	return false
+}
+
+// hostExecNeedsChatConfirm reports whether the chat confirm card is required.
+// Hard-deny ops return false here (they are rejected before confirm).
+func hostExecNeedsChatConfirm(op, path, dest string) bool {
+	return classifyHostExecReview(op, path, dest).Tier == hostExecReviewConfirm
+}
+
+func hostExecHardDenied(op, path, dest string) (bool, hostExecReview) {
+	rev := classifyHostExecReview(op, path, dest)
+	if rev.Tier == hostExecReviewDeny {
+		return true, rev
+	}
+	return false, rev
+}
+
+func hostOpNeedsConfirm(op string) bool {
+	switch op {
+	case "write", "delete", "move", "shell", "ssh_write", "ssh_delete", "ssh_exec":
+		return true
+	default:
+		return false
+	}
 }
 
 func isReadonlyShellCommand(command string) bool {

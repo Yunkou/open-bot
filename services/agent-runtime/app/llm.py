@@ -458,7 +458,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "(find/du/stat/ls, or scripts from load_skill host-file-query). "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
                 "terminal=true only for a local interactive UI. "
-                "Read-only allowlisted commands (ls/find/du/stat/wc/cat/…) run without chat confirm; "
+                "Auto-review (deterministic, no LLM self-approval): read-only allowlisted commands "
+                "(ls/find/du/stat/wc/cat/…) auto-run; curl|sh / wipe-root hard-deny; "
                 "other commands and terminal=true still confirm in chat. "
                 "Stdout is truncated; keep commands that print short summaries."
             ),

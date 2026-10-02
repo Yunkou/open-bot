@@ -1,6 +1,6 @@
 # 本机查询：host_ls vs host_shell vs Skill 脚本（设计草案）
 
-> 状态：**A+B+C+D 已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`、只读 `host_shell` allowlist 软放行）。
+> 状态：**A+B+C+D + Auto-review 档位已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`、只读 allowlist + 硬拒绝/确认档位，对齐 Grok）。
 > 对齐 Cursor Grok Bot（`ListMachines` + 本机 Shell/Read；Skills 可带 `scripts/`）。
 > 相关实现：`apps/desktop/.../host_fs.rs`、`host_cmd.rs`；runtime `llm.py` / `client_env.py` / `deferral.py`；`skills/host-file-query/`。
 
@@ -73,12 +73,20 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 3. `host_shell` description：点名适合 `find`/`du`/`stat` 等只读汇总（只读 allowlist 免确认，见下）。
 4. Skills 目录加一条 `host-file-query`（或并入现有 host 相关 skill）。
 
-## 安全 / 确认策略
+## 安全 / 确认策略（Grok Bot 对齐 · Auto-review）
 
-- **免确认（读）**：`host_ls` / `host_read` / `host_ssh_ls` / `host_ssh_read`；以及本机 `host_shell` 且命令匹配**只读 allowlist**（`ls`/`find`/`du`/`stat`/`md5`/`wc`/`cat`/`head`/`grep`… 的管道组合；无写重定向、无 `$()`/`rm`/`curl|sh`/`find -delete` 等）。实现：`services/api/.../readonly_shell.go` + 客户端 `apps/web/src/lib/hostExec.ts`（deny-by-default）。
-- **仍确认**：写/删/移、非 allowlist 的 `host_shell`、`terminal=true` 的 shell、全部 `host_ssh_write|delete|exec`。对话卡任意端可点；本机执行仍在目标机。
-- **设置**：桌面端「只读本机命令免确认」可关（localStorage）；关掉后客户端对 shell 仍弹卡（API 对 allowlist 仍可能直接下发执行请求）。
-- Skill 脚本（`bash`/`sh script.sh`）**不**在 allowlist 内，仍确认；脚本内容经 `load_skill` 可见。
+对齐 Cursor Grok Bot：**确定性规则门禁，不用对话 LLM 自行批准/拒绝。**
+
+| 档位 `review_tier` | 含义 | 典型例子 |
+|--------------------|------|----------|
+| **auto** | 自动放行，不弹确认卡 | `host_ls` / `host_read` / `host_ssh_ls|read` / `host_open`；只读 allowlist `host_shell`（`ls`/`find`/`du`/`stat`/`grep`… 管道组合） |
+| **confirm** | 对话确认卡（任意已登录端可点「允许/拒绝」）；卡上展示 `reason` | 写/删/移、非 allowlist shell、`terminal=true`、全部 `host_ssh_write|delete|exec`、Skill 脚本 `bash/sh script.sh` |
+| **deny** | Auto-review **硬拒绝**（不弹允许卡、不执行） | `curl\|sh` / 管道进 shell、`rm -rf /`、fork bomb、`mkfs`、写块设备、`dd if=` |
+
+实现：`classifyHostExecReview` — `services/api/.../readonly_shell.go` 与 `apps/web/src/lib/hostExec.ts` 镜像（deny → confirm 排除 → auto allowlist）。
+
+- **设置**：桌面「只读免确认 / 风险自动审」可关（localStorage）；关掉后客户端把只读 shell 从 auto 降为 confirm。硬 deny 不受此开关影响。API 对 allowlist 仍可能直接下发（`preconfirmed` 路径）；关开关主要作用在本机二次闸。
+- Skill 脚本内容经 `load_skill` 可见，但仍走 **confirm**。
 - 继续截断 stdout（~4k）；`host_ls` 默认 50 + `truncated`/`total`。
 
 ## 实现阶段
@@ -89,6 +97,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 | **B Skill 脚本** | ✅ `host-file-query` + `largest-by-size` / `largest-by-ext` / `list-by-ext` | 低 |
 | **C 收窄 host_ls** | ✅ `limit`/`sort`/`glob`；默认 50；响应 `truncated`/`total` | 中（兼容） |
 | **D 只读 shell 放行** | ✅ allowlist + 测试；桌面设置项可关 | 中高（安全面） |
+| **D′ Auto-review 档位** | ✅ `auto`/`confirm`/`deny` + `reason` 确认卡；硬拒绝模式；文档 | 中（策略清晰化） |
 
 不建议新增与 `host_shell` 重复的 `host_exec` 名称；对外统一 `host_shell`，对内已是 `op=shell`。
 
@@ -97,4 +106,5 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 1. 「下载里最大的 mp4」→ 不出现数百条 `host_ls` entries；工具结果为十余行摘要。
 2. 「随便看看桌面有什么」→ 可用 `host_ls`。
 3. 无已连接电脑 → 仍如实说明，不编造。
-4. `host_shell` 危险命令 → 仍出确认卡。
+4. `host_shell` 普通危险命令 → 仍出确认卡（带 reason）。
+5. `curl|sh` / `rm -rf /` → **硬拒绝**，不出「允许」卡。
