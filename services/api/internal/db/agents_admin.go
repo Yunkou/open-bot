@@ -167,3 +167,27 @@ WHERE id = $1 AND is_builtin = FALSE AND deleted_at IS NULL
 	}
 	return nil
 }
+
+// LookupAgentNames returns id→name for agents (includes soft-deleted rows).
+// soft-delete: include deleted — hard-purged agents will simply be missing.
+func (d *DB) LookupAgentNames(ids []string) map[string]string {
+	out := map[string]string{}
+	clean := uniqueNonEmpty(ids)
+	if d == nil || d.SQL == nil || len(clean) == 0 {
+		return out
+	}
+	q, args := buildIDInQuery(`SELECT id, name FROM agents WHERE id IN (`, clean)
+	rows, err := d.SQL.Query(q, args...)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		out[id] = name
+	}
+	return out
+}

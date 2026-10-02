@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,4 +198,61 @@ func (u *User) PublicMap() map[string]any {
 		m["deleted_at"] = u.DeletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return m
+}
+
+// LookupUsernames returns id→username for the given ids (includes soft-deleted).
+// soft-delete: include deleted
+func (d *DB) LookupUsernames(ids []string) map[string]string {
+	out := map[string]string{}
+	clean := uniqueNonEmpty(ids)
+	if d == nil || d.SQL == nil || len(clean) == 0 {
+		return out
+	}
+	q, args := buildIDInQuery(`SELECT id, username FROM users WHERE id IN (`, clean)
+	rows, err := d.SQL.Query(q, args...)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		out[id] = name
+	}
+	return out
+}
+
+func uniqueNonEmpty(ids []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func buildIDInQuery(prefix string, ids []string) (string, []any) {
+	args := make([]any, len(ids))
+	b := strings.Builder{}
+	b.WriteString(prefix)
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('$')
+		b.WriteString(strconv.Itoa(i + 1))
+		args[i] = id
+	}
+	b.WriteByte(')')
+	return b.String(), args
 }

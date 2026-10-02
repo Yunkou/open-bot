@@ -163,18 +163,37 @@ export default function TracesPage() {
       defaultSortOrder: "descend",
       sorter: (a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")),
     },
-    { title: "名称", dataIndex: "name", ellipsis: true },
+    { title: "名称", dataIndex: "name", ellipsis: true, width: 140 },
     {
-      title: "用户 ID",
-      dataIndex: "userId",
-      width: 160,
+      title: "Bot",
+      dataIndex: "agentName",
+      width: 140,
       ellipsis: true,
-      copyable: true,
+      render: (_, row) => row.agentName || row.agentId || "—",
+    },
+    {
+      title: "用户",
+      dataIndex: "userName",
+      width: 140,
+      ellipsis: true,
+      render: (_, row) =>
+        row.userName ? (
+          <span>
+            {row.userName}
+            {row.userId ? (
+              <Text type="secondary" style={{ marginLeft: 6, fontSize: 12 }}>
+                {row.userId.slice(0, 8)}…
+              </Text>
+            ) : null}
+          </span>
+        ) : (
+          row.userId || "—"
+        ),
     },
     {
       title: "会话",
       dataIndex: "sessionId",
-      width: 160,
+      width: 140,
       ellipsis: true,
       copyable: true,
       render: (_, row) => row.sessionId || "—",
@@ -316,8 +335,26 @@ export default function TracesPage() {
               <div>{detail.trace.name || "—"}</div>
             </div>
             <div>
+              <Text type="secondary">Bot</Text>
+              <div>
+                {detail.trace.agentName || "—"}
+                {detail.trace.agentId ? (
+                  <Text type="secondary" style={{ marginLeft: 8 }} copyable={{ text: detail.trace.agentId }}>
+                    {detail.trace.agentId.slice(0, 8)}…
+                  </Text>
+                ) : null}
+              </div>
+            </div>
+            <div>
               <Text type="secondary">用户</Text>
-              <div>{detail.trace.userId || "—"}</div>
+              <div>
+                {detail.trace.userName || "—"}
+                {detail.trace.userId ? (
+                  <Text type="secondary" style={{ marginLeft: 8 }} copyable={{ text: detail.trace.userId }}>
+                    {detail.trace.userId.slice(0, 8)}…
+                  </Text>
+                ) : null}
+              </div>
             </div>
             <div>
               <Text type="secondary">会话（conversation_id）</Text>

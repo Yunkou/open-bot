@@ -143,8 +143,11 @@ export default function UsersPage() {
           okButtonProps={{ danger: true }}
           onConfirm={async () => {
             try {
-              await adminPurgeUserData(row.id);
-              message.success("已清空业务数据，账号已保留");
+              const res = await adminPurgeUserData(row.id);
+              const lf = res.side_effects?.langfuse;
+              message.success(
+                lf ? `已清空业务数据（Langfuse: ${lf}）` : "已清空业务数据，账号已保留",
+              );
               reload();
             } catch (err) {
               message.error(err instanceof Error ? err.message : String(err));
@@ -374,8 +377,11 @@ export default function UsersPage() {
                         okButtonProps={{ danger: true }}
                         onConfirm={async () => {
                           try {
-                            await adminPurgeUserData(editing.id);
-                            message.success("已清空业务数据，账号已保留");
+                            const res = await adminPurgeUserData(editing.id);
+                            const lf = res.side_effects?.langfuse;
+                            message.success(
+                              lf ? `已清空业务数据（Langfuse: ${lf}）` : "已清空业务数据，账号已保留",
+                            );
                             setEditOpen(false);
                             setEditing(null);
                             reload();

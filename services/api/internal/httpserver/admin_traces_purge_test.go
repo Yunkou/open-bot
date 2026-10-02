@@ -72,15 +72,18 @@ func TestPurgeLangfuseUserTracesListsAndBatchDeletes(t *testing.T) {
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v2/observations":
+			w.Header().Set("Content-Type", "application/json")
+			q := r.URL.Query()
+			// Metadata fallback pass — primary already collected IDs; return empty.
+			if q.Get("userId") == "" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+				return
+			}
 			mu.Lock()
 			listCalls++
 			page := listCalls
-			sawUserID = r.URL.Query().Get("userId")
+			sawUserID = q.Get("userId")
 			mu.Unlock()
-			if r.URL.Query().Get("isRootObservation") != "true" {
-				t.Errorf("expected isRootObservation=true")
-			}
-			w.Header().Set("Content-Type", "application/json")
 			if page == 1 {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"data": []map[string]any{
@@ -121,8 +124,8 @@ func TestPurgeLangfuseUserTracesListsAndBatchDeletes(t *testing.T) {
 	withLangfuseEnv(t, srv.URL, "pk-test", "sk-test")
 	s := &Server{}
 	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
-	if got != "purged:3" {
-		t.Fatalf("got %q want purged:3", got)
+	if !strings.HasPrefix(got, "deleted:3") {
+		t.Fatalf("got %q want deleted:3…", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -191,6 +194,83 @@ func TestPurgeLangfuseUserTracesPartialOnDeleteFailure(t *testing.T) {
 	s := &Server{}
 	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
 	if !strings.HasPrefix(got, "partial: deleted=0 delete_http=500") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestPurgeLangfuseUserTracesMetadataFallback(t *testing.T) {
+	var mu sync.Mutex
+	var sawUserIDFilter bool
+	var sawMetaFilter bool
+	var deleted []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v2/observations":
+			w.Header().Set("Content-Type", "application/json")
+			q := r.URL.Query()
+			if q.Get("userId") == "u-meta" {
+				mu.Lock()
+				sawUserIDFilter = true
+				mu.Unlock()
+				// Primary userId filter finds nothing (trace only has metadata.user_id).
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+				return
+			}
+			if strings.Contains(q.Get("filter"), "user_id") && strings.Contains(q.Get("filter"), "u-meta") {
+				mu.Lock()
+				sawMetaFilter = true
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": []map[string]any{
+						{"id": "o1", "traceId": "tr-meta", "metadata": map[string]any{"user_id": "u-meta", "agent_id": "a1"}},
+					},
+					"meta": map[string]any{},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/public/traces":
+			b, _ := io.ReadAll(r.Body)
+			var body struct {
+				TraceIDs []string `json:"traceIds"`
+			}
+			_ = json.Unmarshal(b, &body)
+			mu.Lock()
+			deleted = append(deleted, body.TraceIDs...)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Traces deleted successfully"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	withLangfuseEnv(t, srv.URL, "pk", "sk")
+	s := &Server{}
+	got := s.purgeLangfuseUserTraces(context.Background(), "u-meta")
+	if !strings.HasPrefix(got, "deleted:1") {
+		t.Fatalf("got %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawUserIDFilter || !sawMetaFilter {
+		t.Fatalf("filters userId=%v meta=%v", sawUserIDFilter, sawMetaFilter)
+	}
+	if len(deleted) != 1 || deleted[0] != "tr-meta" {
+		t.Fatalf("deleted=%v", deleted)
+	}
+}
+
+func TestPurgeLangfuseUserTracesEmptyMatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+	}))
+	defer srv.Close()
+	withLangfuseEnv(t, srv.URL, "pk", "sk")
+	s := &Server{}
+	got := s.purgeLangfuseUserTraces(context.Background(), "nobody")
+	if !strings.HasPrefix(got, "deleted:0") {
 		t.Fatalf("got %q", got)
 	}
 }

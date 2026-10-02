@@ -406,6 +406,9 @@ export type AdminTrace = {
   id: string;
   name?: string;
   userId?: string;
+  userName?: string;
+  agentId?: string;
+  agentName?: string;
   sessionId?: string;
   timestamp?: string;
   latency?: number | null;
