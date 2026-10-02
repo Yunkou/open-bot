@@ -176,7 +176,8 @@ backfill-embeddings:
 	  . .venv/bin/activate && \
 	  python -m app.backfill_embeddings $(BACKFILL_ARGS)
 
-# Local Dream consolidation for one user: make dream-user USER_ID=...
+# Ops escape hatch: force one-shot local Dream (normal chat auto-runs when enabled).
+# make dream-user USER_ID=...
 dream-user:
 	cd services/agent-runtime && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \

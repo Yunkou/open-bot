@@ -1203,6 +1203,8 @@ async def openai_path(
                 except ValueError:
                     meta = mem0_store.scope_metadata("user")
                 mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
+            if user_id and assistant_reply.strip():
+                dream.maybe_consolidate_user_bg(str(user_id).strip())
             done_payload: dict[str, Any] = {
                 "ok": True,
                 "mode": "openai",

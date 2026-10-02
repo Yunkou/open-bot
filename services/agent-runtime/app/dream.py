@@ -1,13 +1,16 @@
 """Local Dream-equivalent memory consolidation (OSS path).
 
-Mem0 Platform / Dream is a hosted product. This module provides an optional
-local consolidation job that:
+Mem0 Platform / Dream is a hosted product. This module provides a local
+consolidation job that (default on):
   1) lists recent Mem0 facts (when Mem0 OSS is enabled) and/or MemoryStore notes
   2) asks the chat LLM to distill a durable profile summary
   3) upserts it into MemoryStore as tier=profile tag=dream
 
-Enable with MEM0_DREAM_ENABLED=1 (default off). Prefer Mem0 Platform when
-MEM0_PLATFORM_API_KEY / MEM0_API_KEY is set and MEM0_PLATFORM_DREAM=1.
+Default: MEM0_DREAM_ENABLED truthy (same pattern as MEM0_ENABLED). Set
+MEM0_DREAM_ENABLED=0 to disable. Optional MEM0_DREAM_INTERVAL_SECONDS controls
+per-user auto rate limit after chat (default 3600). Prefer Mem0 Platform when
+MEM0_PLATFORM_API_KEY / MEM0_API_KEY is set and MEM0_PLATFORM_DREAM=1 (Platform
+mode is opt-in; OSS runtime does not call hosted Dream API yet).
 
 Honesty: this is NOT Mem0 Platform Dream; it is an OSS-compatible substitute.
 """
@@ -16,6 +19,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,9 +32,19 @@ from .memory import get_store
 
 logger = logging.getLogger("open-bot.dream")
 
+_rate_lock = threading.Lock()
+# user_id -> monotonic timestamp of last successful/attempted consolidate start
+_last_run_mono: dict[str, float] = {}
+_in_flight: set[str] = set()
+
 
 def _truthy(name: str, default: str = "0") -> bool:
-    return (os.getenv(name) or default).strip().lower() in {"1", "true", "yes", "on"}
+    """Match MEM0_ENABLED / mem0_store._env_truthy semantics."""
+    raw = os.getenv(name)
+    if raw is None:
+        raw = default
+    raw = (raw or default).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def platform_dream_available() -> bool:
@@ -38,7 +53,17 @@ def platform_dream_available() -> bool:
 
 
 def local_dream_enabled() -> bool:
-    return _truthy("MEM0_DREAM_ENABLED", "0")
+    """Local Dream on by default (MEM0_DREAM_ENABLED default 1)."""
+    return _truthy("MEM0_DREAM_ENABLED", "1")
+
+
+def dream_interval_seconds() -> int:
+    """Min seconds between auto consolidations per user (chat path)."""
+    raw = (os.getenv("MEM0_DREAM_INTERVAL_SECONDS") or "3600").strip()
+    try:
+        return max(60, min(int(raw), 86400 * 7))
+    except ValueError:
+        return 3600
 
 
 def dream_mode() -> str:
@@ -56,9 +81,12 @@ def status() -> dict[str, Any]:
         "mem0_wanted": mem0_store.mem0_wanted(),
         "platform_available": platform_dream_available(),
         "local_enabled": local_dream_enabled(),
+        "interval_seconds": dream_interval_seconds(),
         "note": (
-            "Platform Dream requires MEM0_PLATFORM_API_KEY + MEM0_PLATFORM_DREAM=1; "
-            "otherwise optional local consolidation via MEM0_DREAM_ENABLED=1."
+            "Local Dream defaults on (MEM0_DREAM_ENABLED=1); set 0 to disable. "
+            "Auto-runs after chat with MEM0_DREAM_INTERVAL_SECONDS rate limit. "
+            "Platform Dream requires MEM0_PLATFORM_API_KEY + MEM0_PLATFORM_DREAM=1 "
+            "(opt-in; OSS runtime does not call hosted Dream API yet)."
         ),
     }
 
@@ -112,7 +140,7 @@ def consolidate_user(user_id: str, *, max_facts: int = 60) -> dict[str, Any]:
             "ok": False,
             "error": (
                 "Mem0 Platform Dream configured but open-bot OSS runtime does not call "
-                "hosted Dream API yet; use MEM0_DREAM_ENABLED=1 for local consolidation "
+                "hosted Dream API yet; set MEM0_PLATFORM_DREAM=0 to use local consolidation "
                 "or run Dream in the Mem0 Platform console."
             ),
             "status": status(),
@@ -190,10 +218,71 @@ def consolidate_user(user_id: str, *, max_facts: int = 60) -> dict[str, Any]:
     }
 
 
+def _should_auto_run(uid: str) -> bool:
+    """Rate-limit + single-flight gate. Caller must hold _rate_lock when mutating."""
+    if dream_mode() != "local":
+        return False
+    if uid in _in_flight:
+        return False
+    now = time.monotonic()
+    last = _last_run_mono.get(uid)
+    if last is not None and (now - last) < float(dream_interval_seconds()):
+        return False
+    return True
+
+
+def maybe_consolidate_user_bg(user_id: str) -> bool:
+    """Fire-and-forget local Dream after chat if enabled and past interval.
+
+    Returns True if a background job was started.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        return False
+    with _rate_lock:
+        if not _should_auto_run(uid):
+            return False
+        _in_flight.add(uid)
+        _last_run_mono[uid] = time.monotonic()
+
+    def _run() -> None:
+        try:
+            result = consolidate_user(uid)
+            if result.get("ok"):
+                logger.info(
+                    "dream auto ok user=%s facts=%s chars=%s",
+                    uid,
+                    result.get("facts_used"),
+                    result.get("summary_chars"),
+                )
+            else:
+                logger.debug(
+                    "dream auto skip/fail user=%s: %s",
+                    uid,
+                    result.get("error"),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("dream auto failed user=%s: %s", uid, e)
+        finally:
+            with _rate_lock:
+                _in_flight.discard(uid)
+
+    t = threading.Thread(target=_run, name=f"dream-consolidate-{uid[:8]}", daemon=True)
+    t.start()
+    return True
+
+
+def reset_rate_limits_for_tests() -> None:
+    """Clear in-memory rate state (tests only)."""
+    with _rate_lock:
+        _last_run_mono.clear()
+        _in_flight.clear()
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
-    ap = argparse.ArgumentParser(description="Local Dream consolidation")
+    ap = argparse.ArgumentParser(description="Local Dream consolidation (ops / one-shot)")
     ap.add_argument("--user-id", required=True)
     ap.add_argument("--max-facts", type=int, default=60)
     args = ap.parse_args(argv)
