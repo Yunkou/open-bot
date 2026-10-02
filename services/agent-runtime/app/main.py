@@ -938,6 +938,17 @@ async def openai_path(
                     dest = "terminal"
             if name in ("host_delete", "host_ssh_delete") and not path.strip():
                 return json.dumps({"ok": False, "error": "需要文件路径"}, ensure_ascii=False)
+            ls_limit = None
+            ls_sort = ""
+            ls_glob = ""
+            if name in ("host_ls", "host_ssh_ls"):
+                if args.get("limit") is not None:
+                    try:
+                        ls_limit = int(args.get("limit"))
+                    except (TypeError, ValueError):
+                        ls_limit = None
+                ls_sort = str(args.get("sort") or "").strip()
+                ls_glob = str(args.get("glob") or "").strip()
             result = machines_mod.exec_host(
                 str(user_id or ""),
                 str(machine.get("id") or ""),
@@ -949,6 +960,9 @@ async def openai_path(
                 ssh_host=ssh_host,
                 ssh_user=ssh_user,
                 ssh_port=ssh_port,
+                limit=ls_limit,
+                sort=ls_sort,
+                glob=ls_glob,
             )
             if result.get("ok"):
                 machines_mod.remember_usual_device(mem_store or mem, result.get("usual"))

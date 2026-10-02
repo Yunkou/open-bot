@@ -268,6 +268,9 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		SSHHost        string `json:"ssh_host"`
 		SSHUser        string `json:"ssh_user"`
 		SSHPort        int    `json:"ssh_port"`
+		Limit          int    `json:"limit"`
+		Sort           string `json:"sort"`
+		Glob           string `json:"glob"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -378,6 +381,9 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		SSHHost:        sshHost,
 		SSHUser:        sshUser,
 		SSHPort:        body.SSHPort,
+		Limit:          body.Limit,
+		Sort:           strings.TrimSpace(body.Sort),
+		Glob:           strings.TrimSpace(body.Glob),
 		Preconfirmed:   preconfirmed,
 	})
 	if s.events != nil {

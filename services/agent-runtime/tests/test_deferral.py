@@ -60,3 +60,5 @@ def test_host_list_intent_forces_ls():
     messages = [{"role": "user", "content": "看看下载文件夹最大的文件排前三的"}]
     assert host_followup_prompt([], messages) == CONTINUE_HOST_LIST
     assert host_followup_prompt(["host_ls"], messages) is None
+    assert host_followup_prompt(["host_shell"], messages) is None
+    assert host_followup_prompt(["load_skill"], messages) is None

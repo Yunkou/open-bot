@@ -14,6 +14,10 @@ export type HostExecRequest = {
   ssh_user?: string;
   ssh_port?: number;
   ssh_fingerprint?: string;
+  /** Optional shallow-list filters for host_ls. */
+  limit?: number;
+  sort?: string;
+  glob?: string;
   /** API already got allow/deny in chat; execute without asking again. */
   preconfirmed?: boolean;
 };
@@ -52,7 +56,14 @@ async function runOp(req: HostExecRequest): Promise<Record<string, unknown>> {
     return { ok: false, error: "当前窗口不能操作本机文件" };
   }
   const path = req.path || "";
-  if (req.op === "ls") return (await invoke("host_ls", { path })) as Record<string, unknown>;
+  if (req.op === "ls") {
+    return (await invoke("host_ls", {
+      path,
+      limit: req.limit,
+      sort: req.sort,
+      glob: req.glob,
+    })) as Record<string, unknown>;
+  }
   if (req.op === "read") return (await invoke("host_read", { path })) as Record<string, unknown>;
   if (req.op === "write") {
     return (await invoke("host_write", { path, content: req.content || "" })) as Record<string, unknown>;

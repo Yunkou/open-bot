@@ -145,6 +145,9 @@ def exec_host(
     ssh_host: str = "",
     ssh_user: str = "",
     ssh_port: int = 0,
+    limit: int | None = None,
+    sort: str = "",
+    glob: str = "",
     timeout: float = 100.0,
 ) -> dict[str, Any]:
     uid = (user_id or "").strip()
@@ -165,6 +168,15 @@ def exec_host(
         payload["ssh_host"] = ssh_host
         payload["ssh_user"] = ssh_user
         payload["ssh_port"] = ssh_port
+    if limit is not None:
+        try:
+            payload["limit"] = int(limit)
+        except (TypeError, ValueError):
+            pass
+    if sort:
+        payload["sort"] = str(sort).strip()
+    if glob:
+        payload["glob"] = str(glob).strip()
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         url,

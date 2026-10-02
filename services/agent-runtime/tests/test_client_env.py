@@ -102,6 +102,8 @@ def test_system_prompt_routing() -> None:
     _ok("工作电脑" not in prompt, "no 工作电脑 in prompt")
     _ok("沙箱电脑" not in prompt, "no 沙箱电脑 in prompt")
     _ok("完全透明" in prompt or "只谈结果" in prompt, "instructs outcome-only user speech")
+    _ok("必须 host_ls" not in prompt, "no longer forces host_ls for largest/newest")
+    _ok("host-file-query" in prompt, "routing mentions host-file-query skill")
 
 
 
@@ -124,10 +126,23 @@ def test_machine_label_in_env_block() -> None:
     _ok("已登记的电脑：" in block and "公司本" in block, "lists other machines by name")
     _ok("工作电脑" not in block, "no 工作电脑 wording")
 
+
+def test_host_ls_tool_is_shallow_browse() -> None:
+    ls = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_ls")
+    desc = str((ls.get("function") or {}).get("description") or "")
+    props = ((ls.get("function") or {}).get("parameters") or {}).get("properties") or {}
+    _ok("Not for largest" in desc or "shallow" in desc.lower() or "Shallow" in desc, "host_ls desc is shallow-browse")
+    _ok("limit" in props and "sort" in props and "glob" in props, "host_ls has limit/sort/glob params")
+    shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
+    sdesc = str((shell.get("function") or {}).get("description") or "")
+    _ok("host-file-query" in sdesc or "find" in sdesc.lower() or "summar" in sdesc.lower(), "host_shell mentions summaries")
+
+
 if __name__ == "__main__":
     test_from_any_and_env_block()
     test_browser_ignores_stale_machine_label()
     test_tool_defs_include_list_machines()
     test_system_prompt_routing()
     test_machine_label_in_env_block()
+    test_host_ls_tool_is_shallow_browse()
     print("all passed")

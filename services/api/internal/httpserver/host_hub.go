@@ -25,6 +25,10 @@ type hostExecRequest struct {
 	SSHHost        string `json:"ssh_host,omitempty"`
 	SSHUser        string `json:"ssh_user,omitempty"`
 	SSHPort        int    `json:"ssh_port,omitempty"`
+	// Optional ls filters (host_ls / ssh_ls shallow browse).
+	Limit int    `json:"limit,omitempty"`
+	Sort  string `json:"sort,omitempty"`
+	Glob  string `json:"glob,omitempty"`
 	// Preconfirmed: chat UI already allowed this op; host client must execute without asking again.
 	Preconfirmed bool `json:"preconfirmed,omitempty"`
 }

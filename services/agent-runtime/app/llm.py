@@ -310,9 +310,13 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_ls",
             "description": (
-                "List a directory on a connected computer. Absolute paths and ~/... are allowed anywhere "
-                "the OS user can read. Pass machine_id from list_machines. If the user did not name a computer, "
-                "omit machine_id so the most-used work computer is chosen. Empty path or ~ lists the home directory."
+                "Shallow directory listing on a connected computer (browse a known small folder). "
+                "Not for largest/newest/filter-by-extension/recursive summaries — use load_skill "
+                "host-file-query then host_shell (or a short find/du/stat) and report compact lines. "
+                "Default limit is small; response may set truncated=true with total. "
+                "Optional limit (1–200), sort (mtime|size|name), glob (e.g. *.mp4, name only). "
+                "Pass machine_id from list_machines; omit it to use the usual work computer. "
+                "Empty path or ~ lists the home directory."
             ),
             "parameters": {
                 "type": "object",
@@ -321,6 +325,18 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     "path": {
                         "type": "string",
                         "description": "Path such as /tmp, ~/Projects, Downloads, or /var/log",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max entries to return (default 50, max 200).",
+                    },
+                    "sort": {
+                        "type": "string",
+                        "description": "mtime (default), size, or name",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional filename glob such as *.mp4 (not a recursive find).",
                     },
                 },
             },
@@ -438,9 +454,11 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run a local command on a connected computer. Not for ssh/scp/sftp "
-                "(use host_ssh_* after load_skill host-ssh). "
-                "terminal=true only for a local interactive UI. Always confirms in chat."
+                "Run a local command on a connected computer. Good for compact read-only summaries "
+                "(find/du/stat, or scripts from load_skill host-file-query). "
+                "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
+                "terminal=true only for a local interactive UI. Always confirms in chat. "
+                "Stdout is truncated; keep commands that print short summaries."
             ),
             "parameters": {
                 "type": "object",
@@ -919,7 +937,7 @@ async def run_tool_loop(
                             "<parameter=参数名>参数值</parameter>\n"
                             "</function>\n"
                             "</tool_call>\n"
-                            "查本机文件先 list_machines 再 host_ls；删除用 host_delete（可传 paths）。"
+                            "查本机：先 list_machines；聚合/最大/按扩展名用 load_skill host-file-query + host_shell；浅层浏览才 host_ls。删除用 host_delete（可传 paths）。"
                         ),
                     }
                 )

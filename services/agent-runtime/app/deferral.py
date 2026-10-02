@@ -13,7 +13,13 @@ import re
 DELIVERY_TOOLS = frozenset({"sandbox_write", "sandbox_shell"})
 
 HOST_DELETE_TOOLS = frozenset({"host_delete", "host_ssh_delete"})
-HOST_LIST_TOOLS = frozenset({"host_ls", "host_ssh_ls", "list_machines"})
+HOST_LIST_TOOLS = frozenset({
+    "host_ls",
+    "host_ssh_ls",
+    "list_machines",
+    "host_shell",
+    "load_skill",
+})
 
 # Fed back into the same run. Not shown to the user and not matched against
 # the model's previous sentence.
@@ -31,8 +37,9 @@ CONTINUE_HOST_DELETE = (
 
 CONTINUE_HOST_LIST = (
     "用户在问本机目录/文件（如最大、最新、排行），但本轮还没有调用 "
-    "list_machines / host_ls（或对应 host_ssh_ls）。"
-    "请先调用工具取实时结果，禁止根据摘要或记忆编造文件名和大小。"
+    "list_machines / host_shell / load_skill（host-file-query）/ host_ls（或对应 host_ssh_ls）。"
+    "聚合查询优先 load_skill host-file-query + host_shell 取摘要；"
+    "host_ls 仅浅层浏览。禁止根据摘要或记忆编造文件名和大小。"
 )
 
 _CONTINUE_MARKERS = frozenset({CONTINUE_WORK, CONTINUE_HOST_DELETE, CONTINUE_HOST_LIST})

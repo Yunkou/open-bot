@@ -123,15 +123,77 @@ pub fn host_stat(path: String) -> Result<Value, String> {
     }))
 }
 
+fn name_glob_match(pattern: &str, name: &str) -> bool {
+    let pat = pattern.trim();
+    if pat.is_empty() || pat == "*" {
+        return true;
+    }
+    let name_l = name.to_ascii_lowercase();
+    let pat_l = pat.to_ascii_lowercase();
+    // Simple * and ? matcher (filename only, not path).
+    fn match_rec(p: &[u8], t: &[u8]) -> bool {
+        let mut i = 0;
+        let mut j = 0;
+        let mut star_p: Option<usize> = None;
+        let mut star_t: usize = 0;
+        while j < t.len() {
+            if i < p.len() && (p[i] == b'?' || p[i] == t[j]) {
+                i += 1;
+                j += 1;
+            } else if i < p.len() && p[i] == b'*' {
+                star_p = Some(i);
+                star_t = j;
+                i += 1;
+            } else if let Some(sp) = star_p {
+                i = sp + 1;
+                star_t += 1;
+                j = star_t;
+            } else {
+                return false;
+            }
+        }
+        while i < p.len() && p[i] == b'*' {
+            i += 1;
+        }
+        i == p.len()
+    }
+    match_rec(pat_l.as_bytes(), name_l.as_bytes())
+}
+
+const HOST_LS_DEFAULT_LIMIT: usize = 50;
+const HOST_LS_MAX_LIMIT: usize = 200;
+
 #[tauri::command]
-pub fn host_ls(path: String) -> Result<Value, String> {
+pub fn host_ls(
+    path: String,
+    limit: Option<u32>,
+    sort: Option<String>,
+    glob: Option<String>,
+) -> Result<Value, String> {
     let dir = resolve_path(&path)?;
     if !dir.is_dir() {
         return Err("不是目录".into());
     }
+    let sort_key = sort
+        .as_deref()
+        .unwrap_or("mtime")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(sort_key.as_str(), "mtime" | "size" | "name") {
+        return Err("sort 只能是 mtime、size 或 name".into());
+    }
+    let max = limit
+        .map(|n| (n as usize).clamp(1, HOST_LS_MAX_LIMIT))
+        .unwrap_or(HOST_LS_DEFAULT_LIMIT);
+    let glob_pat = glob.as_deref().unwrap_or("").trim().to_string();
+
     let mut entries = Vec::new();
     for item in fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let item = item.map_err(|e| e.to_string())?;
+        let name = item.file_name().to_string_lossy().to_string();
+        if !glob_pat.is_empty() && !name_glob_match(&glob_pat, &name) {
+            continue;
+        }
         let meta = item.metadata().map_err(|e| e.to_string())?;
         let modified = meta
             .modified()
@@ -139,7 +201,6 @@ pub fn host_ls(path: String) -> Result<Value, String> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let name = item.file_name().to_string_lossy().to_string();
         entries.push(json!({
             "name": name,
             "path": display_path(&item.path()),
@@ -148,15 +209,39 @@ pub fn host_ls(path: String) -> Result<Value, String> {
             "modified": modified,
         }));
     }
-    entries.sort_by(|a, b| {
-        let mb = b.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
-        let ma = a.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
-        mb.cmp(&ma)
-    });
-    if entries.len() > 200 {
-        entries.truncate(200);
+    let total = entries.len();
+    match sort_key.as_str() {
+        "size" => entries.sort_by(|a, b| {
+            let sb = b.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            let sa = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            sb.cmp(&sa)
+        }),
+        "name" => entries.sort_by(|a, b| {
+            let na = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let nb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            na.to_ascii_lowercase()
+                .cmp(&nb.to_ascii_lowercase())
+        }),
+        _ => entries.sort_by(|a, b| {
+            let mb = b.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ma = a.get("modified").and_then(|v| v.as_u64()).unwrap_or(0);
+            mb.cmp(&ma)
+        }),
     }
-    Ok(json!({ "ok": true, "path": display_path(&dir), "entries": entries }))
+    let truncated = total > max;
+    if truncated {
+        entries.truncate(max);
+    }
+    Ok(json!({
+        "ok": true,
+        "path": display_path(&dir),
+        "entries": entries,
+        "total": total,
+        "truncated": truncated,
+        "limit": max,
+        "sort": sort_key,
+        "glob": if glob_pat.is_empty() { Value::Null } else { json!(glob_pat) },
+    }))
 }
 
 #[tauri::command]
@@ -266,5 +351,13 @@ mod tests {
     fn normalizes_parent_components() {
         let path = logical_path("/tmp/a/../b").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/b"));
+    }
+
+    #[test]
+    fn name_glob_matches_simple_patterns() {
+        assert!(name_glob_match("*.mp4", "clip.MP4"));
+        assert!(name_glob_match("report.*", "report.pdf"));
+        assert!(!name_glob_match("*.mp4", "clip.mov"));
+        assert!(name_glob_match("*", "anything"));
     }
 }
