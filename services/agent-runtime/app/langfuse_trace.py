@@ -531,6 +531,16 @@ def merge_usage_details(
     return acc or None
 
 
+def trace_id_of(obs: Any) -> str:
+    """Best-effort Langfuse/OTEL trace id from a root observation (empty if noop/off)."""
+    if obs is None or isinstance(obs, _Noop):
+        return ""
+    tid = getattr(obs, "trace_id", None)
+    if isinstance(tid, str) and tid.strip():
+        return tid.strip()
+    return ""
+
+
 def update_obs(obs: Any, **kwargs: Any) -> None:
     _safe_update(obs, **kwargs)
 

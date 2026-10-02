@@ -46,7 +46,7 @@ func TestInsertAndListMemoryRecalls(t *testing.T) {
 
 	score := 0.91
 	rec, err := d.InsertMemoryRecall(
-		orgID, userID, agentID, convID, "msg-1", "", "chat", "dm",
+		orgID, userID, agentID, convID, "msg-1", "run-1", "lf-trace-1", "chat", "dm",
 		2, 1,
 		[]MemoryRecallItem{
 			{Source: "explicit", Scope: "bot", Tier: "profile", Content: "likes tea", Snippet: "[bot] [profile] likes tea", MemoryID: "m1"},
@@ -80,6 +80,23 @@ func TestInsertAndListMemoryRecalls(t *testing.T) {
 	}
 	if len(got.Items) != 2 || got.Items[0].Source != "explicit" {
 		t.Fatalf("get items = %+v", got.Items)
+	}
+	if got.RunID != "run-1" || got.LangfuseTraceID != "lf-trace-1" {
+		t.Fatalf("ids run=%q lf=%q", got.RunID, got.LangfuseTraceID)
+	}
+	byRun, err := d.ListOrgMemoryRecalls(orgID, MemoryRecallFilter{RunID: "run-1", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byRun) < 1 || byRun[0].ID != rec.ID {
+		t.Fatalf("by run = %+v", byRun)
+	}
+	byLF, err := d.ListOrgMemoryRecalls(orgID, MemoryRecallFilter{LangfuseTraceID: "lf-trace-1", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byLF) < 1 || byLF[0].ID != rec.ID {
+		t.Fatalf("by lf = %+v", byLF)
 	}
 
 	// time filter excludes future window start

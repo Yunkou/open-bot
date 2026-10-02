@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 import contextlib
 import json
 import sys
@@ -412,6 +413,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
 
     # Throw-safe enter/exit: helpers yield once, but avoid relying on `with`
     # across async generator yields (GeneratorExit + cleanup raise).
+    run_id = str(uuid.uuid4())
     _trace_cm = lf.trace_run(
         body.conversation_id,
         body.agent_id,
@@ -420,9 +422,13 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
         metadata={
             "mode": "openai" if api_key else "echo",
             "model": model if api_key else None,
+            "run_id": run_id,
         },
     )
     root_obs = _trace_cm.__enter__()
+    langfuse_trace_id = lf.trace_id_of(root_obs)
+    if langfuse_trace_id:
+        lf.update_obs(root_obs, metadata={"run_id": run_id, "langfuse_trace_id": langfuse_trace_id})
     decision_token = bind_decision(body.decision)
     try:
         scene = scene_kind(body.channel_id, body.peer_agent_id)
@@ -458,6 +464,9 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             recalled=recalled,
             mem0_hits=mem0_hits,
         )
+        recall_payload["run_id"] = run_id
+        if langfuse_trace_id:
+            recall_payload["langfuse_trace_id"] = langfuse_trace_id
         memory_snippets = [r["snippet"] for r in recall_payload["items"]]
 
         # None = all skills (legacy); explicit list (incl. empty) = filter.

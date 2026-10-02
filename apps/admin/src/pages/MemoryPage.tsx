@@ -300,7 +300,7 @@ export default function MemoryPage() {
     <PageContainer title="记忆与压缩">
       <Paragraph type="secondary">
         一次对话先用本会话近期消息和压缩摘要，再按场景取长期记忆：私聊是 Bot 然后用户；群聊是群组、当前 Bot、然后用户；Bot 之间是这一对、当前 Bot、然后用户。历史记忆没有 Bot 或群信息，已归入用户档。Bot 之间要有显式写入才会出现。
-        「本轮召回」记录每次运行真正注入提示词的记忆片段，不依赖 Langfuse。
+        「本轮召回」为全量库存/检索；按聊天轮次看注入片段请优先用「调用追踪」详情里的本轮召回（不依赖 Langfuse 即可落库）。
       </Paragraph>
       <Space wrap style={{ marginBottom: 16 }}>
         <Segmented

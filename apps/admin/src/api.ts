@@ -687,6 +687,7 @@ export type AdminMemoryRecall = {
   conversation_id?: string;
   message_id?: string;
   run_id?: string;
+  langfuse_trace_id?: string;
   source?: string;
   scene?: string;
   explicit_count?: number;
@@ -700,6 +701,8 @@ export type MemoryRecallQuery = {
   user_id?: string;
   conversation_id?: string;
   agent_id?: string;
+  run_id?: string;
+  langfuse_trace_id?: string;
   from?: string;
   to?: string;
   limit?: number;
@@ -710,6 +713,8 @@ function memoryRecallQuery(params: MemoryRecallQuery): string {
   if (params.user_id) q.set("user_id", params.user_id);
   if (params.conversation_id) q.set("conversation_id", params.conversation_id);
   if (params.agent_id) q.set("agent_id", params.agent_id);
+  if (params.run_id) q.set("run_id", params.run_id);
+  if (params.langfuse_trace_id) q.set("langfuse_trace_id", params.langfuse_trace_id);
   if (params.from) q.set("from", params.from);
   if (params.to) q.set("to", params.to);
   if (params.limit) q.set("limit", String(params.limit));

@@ -17,6 +17,7 @@ test.describe("admin traces", () => {
     if (await detailLink.count()) {
       await detailLink.first().click();
       await expect(page.locator(".ant-drawer")).toBeVisible();
+      await expect(page.getByText("本轮召回").first()).toBeVisible();
       const lf = page.locator('a[href*="traces"], a[href*="langfuse"], a[href*="/project/"]');
       if (await lf.count()) {
         const href = await lf.first().getAttribute("href");

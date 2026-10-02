@@ -153,6 +153,7 @@ func (s *Server) persistMemoryRecallFromMeta(payload map[string]any, ctx recallP
 		convID,
 		ctx.MessageID,
 		asString(block["run_id"]),
+		asString(block["langfuse_trace_id"]),
 		source,
 		asString(block["scene"]),
 		explicit,
@@ -188,9 +189,10 @@ func memoryRecallToJSON(item db.MemoryRecall) map[string]any {
 		"agent_id":        item.AgentID,
 		"agent_name":      item.AgentName,
 		"conversation_id": item.ConversationID,
-		"message_id":      item.MessageID,
-		"run_id":          item.RunID,
-		"source":          item.Source,
+		"message_id":         item.MessageID,
+		"run_id":             item.RunID,
+		"langfuse_trace_id":  item.LangfuseTraceID,
+		"source":             item.Source,
 		"scene":           item.Scene,
 		"explicit_count":  item.ExplicitCount,
 		"mem0_count":      item.Mem0Count,
@@ -208,10 +210,12 @@ func (s *Server) handleAdminListMemoryRecalls(w http.ResponseWriter, r *http.Req
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	f := db.MemoryRecallFilter{
-		UserID:         strings.TrimSpace(q.Get("user_id")),
-		ConversationID: strings.TrimSpace(q.Get("conversation_id")),
-		AgentID:        strings.TrimSpace(q.Get("agent_id")),
-		Limit:          limit,
+		UserID:          strings.TrimSpace(q.Get("user_id")),
+		ConversationID:  strings.TrimSpace(q.Get("conversation_id")),
+		AgentID:         strings.TrimSpace(q.Get("agent_id")),
+		RunID:           strings.TrimSpace(q.Get("run_id")),
+		LangfuseTraceID: strings.TrimSpace(q.Get("langfuse_trace_id")),
+		Limit:           limit,
 	}
 	if raw := strings.TrimSpace(q.Get("from")); raw != "" {
 		if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
@@ -282,17 +286,18 @@ func (s *Server) handleAdminGetMemoryRecall(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleInternalRecordMemoryRecall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		UserID         string                `json:"user_id"`
-		AgentID        string                `json:"agent_id"`
-		ConversationID string                `json:"conversation_id"`
-		MessageID      string                `json:"message_id"`
-		RunID          string                `json:"run_id"`
-		Source         string                `json:"source"`
-		Scene          string                `json:"scene"`
-		ExplicitCount  int                   `json:"explicit_count"`
-		Mem0Count      int                   `json:"mem0_count"`
-		Items          []db.MemoryRecallItem `json:"items"`
-		MemoryRecall   map[string]any        `json:"memory_recall"`
+		UserID           string                `json:"user_id"`
+		AgentID          string                `json:"agent_id"`
+		ConversationID   string                `json:"conversation_id"`
+		MessageID        string                `json:"message_id"`
+		RunID            string                `json:"run_id"`
+		LangfuseTraceID  string                `json:"langfuse_trace_id"`
+		Source           string                `json:"source"`
+		Scene            string                `json:"scene"`
+		ExplicitCount    int                   `json:"explicit_count"`
+		Mem0Count        int                   `json:"mem0_count"`
+		Items            []db.MemoryRecallItem `json:"items"`
+		MemoryRecall     map[string]any        `json:"memory_recall"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -303,6 +308,7 @@ func (s *Server) handleInternalRecordMemoryRecall(w http.ResponseWriter, r *http
 	explicit := body.ExplicitCount
 	mem0 := body.Mem0Count
 	runID := body.RunID
+	lfTraceID := body.LangfuseTraceID
 	if body.MemoryRecall != nil {
 		if len(items) == 0 {
 			items = parseRecallItems(body.MemoryRecall["items"])
@@ -319,6 +325,9 @@ func (s *Server) handleInternalRecordMemoryRecall(w http.ResponseWriter, r *http
 		if runID == "" {
 			runID = asString(body.MemoryRecall["run_id"])
 		}
+		if lfTraceID == "" {
+			lfTraceID = asString(body.MemoryRecall["langfuse_trace_id"])
+		}
 	}
 	rec, err := s.db.InsertMemoryRecall(
 		"",
@@ -327,6 +336,7 @@ func (s *Server) handleInternalRecordMemoryRecall(w http.ResponseWriter, r *http
 		body.ConversationID,
 		body.MessageID,
 		runID,
+		lfTraceID,
 		body.Source,
 		scene,
 		explicit,
