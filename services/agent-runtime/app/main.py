@@ -18,6 +18,7 @@ from . import compact as compact_mod
 from .llm import (
     LLMOverride,
     TOOL_DEFS,
+    assemble_llm_messages,
     build_system_prompt,
     chat_text,
     normalize_messages,
@@ -524,10 +525,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             model=llm_model,
         )
 
-        llm_messages: list[dict[str, Any]] = [
-            {"role": "system", "content": system},
-            *compacted,
-        ]
+        llm_messages: list[dict[str, Any]] = assemble_llm_messages(system, compacted)
 
         meta = {
             "conversation_id": body.conversation_id,

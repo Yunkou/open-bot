@@ -725,6 +725,43 @@ def normalize_messages(
 
 
 
+
+def assemble_llm_messages(
+    system: str,
+    compacted: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Final LLM messages with **one** leading system turn.
+
+    ``compact_messages`` may prepend ``role=system`` conversation summaries.
+    Merging those into the persona / tools / memory / client_env system prompt
+    avoids dual system messages (confusing in Langfuse and some gateways).
+    """
+    summary_bits: list[str] = []
+    dialog: list[dict[str, Any]] = []
+    for m in compacted or []:
+        role = str(m.get("role") or "")
+        if role == "system":
+            bit = str(m.get("content") or "").strip()
+            if bit:
+                summary_bits.append(bit)
+            continue
+        dialog.append(m)
+
+    sys_text = (system or "").strip()
+    if summary_bits:
+        block = "\n\n".join(summary_bits)
+        if sys_text:
+            sys_text = f"{sys_text}\n\n## 对话摘要（更早轮次）\n{block}"
+        else:
+            sys_text = block
+
+    out: list[dict[str, Any]] = []
+    if sys_text:
+        out.append({"role": "system", "content": sys_text})
+    out.extend(dialog)
+    return out
+
+
 def _raw_usage_from_response(data: dict[str, Any] | None) -> Any | None:
     """Return upstream `usage` object/dict if present; else None."""
     if not isinstance(data, dict):
