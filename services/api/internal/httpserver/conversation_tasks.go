@@ -284,7 +284,14 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		}
 		s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, conv.ChannelID, "running", label)
 	}
-	text, _, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap)
+	recallCtx := &recallPersistContext{
+		UserID:         task.UserID,
+		AgentID:        task.AgentID,
+		ConversationID: task.ConversationID,
+		MessageID:      task.SourceMessageID,
+		Source:         "defer_work",
+	}
+	text, _, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap, recallCtx)
 	if runErr == nil {
 		_ = s.db.RecordUsageRun("", task.UserID, task.AgentID, task.ConversationID, "defer_work",
 			runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)

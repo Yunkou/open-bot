@@ -228,3 +228,8 @@ ROUTINE_TOOL_DEFS: list[dict[str, Any]] = [
 ROUTINE_TOOL_NAMES = frozenset(
     str((t.get("function") or {}).get("name") or "") for t in ROUTINE_TOOL_DEFS
 )
+
+def record_memory_recall(payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+    """Persist one run's recall payload via Go internal API (optional / fallback)."""
+    return _post("/internal/memory-recalls", payload, timeout=timeout)
+

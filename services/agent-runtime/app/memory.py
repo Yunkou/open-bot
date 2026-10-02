@@ -124,6 +124,18 @@ def _content_key(text: str) -> str:
     return " ".join(s.lower().split())
 
 
+# Caps for durable per-run recall payloads (admin inventory is separate).
+MAX_RECALL_ITEMS = 32
+MAX_RECALL_SNIPPET_CHARS = 500
+
+
+def _clip_snippet(text: str, limit: int = MAX_RECALL_SNIPPET_CHARS) -> str:
+    s = (text or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)] + "…"
+
+
 def merge_scoped_snippets(
     explicit: dict[str, list[MemoryItem]],
     mem0_by_scope: dict[str, list[str]],
@@ -133,17 +145,28 @@ def merge_scoped_snippets(
 
     Unused quota spills to the next scope. Duplicate text keeps the earlier copy.
     """
+    return [r["snippet"] for r in build_recall_records(explicit, mem0_by_scope, scene)]
+
+
+def build_recall_records(
+    explicit: dict[str, list[MemoryItem]],
+    mem0_by_scope: dict[str, list[str]],
+    scene: str,
+) -> list[dict[str, Any]]:
+    """Structured items actually injected into the prompt (same quotas as snippets)."""
     plan = SCENE_QUOTAS.get(scene) or SCENE_QUOTAS["dm"]
     spill = 0
-    out: list[str] = []
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    def push(text: str) -> bool:
+    def push(record: dict[str, Any], text: str) -> bool:
         key = _content_key(text)
         if not key or key in seen:
             return False
+        if len(out) >= min(TOTAL_MEMORY_BUDGET, MAX_RECALL_ITEMS):
+            return False
         seen.add(key)
-        out.append(text.strip())
+        out.append(record)
         return True
 
     for scope, quota in plan:
@@ -152,18 +175,69 @@ def merge_scoped_snippets(
         for item in explicit.get(scope) or []:
             if taken >= budget or len(out) >= TOTAL_MEMORY_BUDGET:
                 break
-            if push(format_memory_snippet(item)):
+            snippet = format_memory_snippet(item)
+            content = _clip_snippet(item.content)
+            record = {
+                "source": "explicit",
+                "scope": item.scope or scope,
+                "tier": item.tier or "",
+                "content": content,
+                "snippet": _clip_snippet(snippet),
+                "memory_id": item.id or "",
+                "agent_id": item.agent_id or "",
+                "channel_id": item.channel_id or "",
+                "peer_agent_id": item.peer_agent_id or "",
+            }
+            if push(record, snippet):
                 taken += 1
         label = scope_label(scope)
         for text in mem0_by_scope.get(scope) or []:
             if taken >= budget or len(out) >= TOTAL_MEMORY_BUDGET:
                 break
-            if push(f"[{label}] [mem0] {text.strip()}"):
+            raw = (text or "").strip()
+            snippet = f"[{label}] [mem0] {raw}"
+            record = {
+                "source": "mem0",
+                "scope": scope,
+                "tier": "",
+                "content": _clip_snippet(raw),
+                "snippet": _clip_snippet(snippet),
+                "memory_id": "",
+                "agent_id": "",
+                "channel_id": "",
+                "peer_agent_id": "",
+            }
+            if push(record, snippet):
                 taken += 1
         spill = max(0, budget - taken)
         if len(out) >= TOTAL_MEMORY_BUDGET:
             break
-    return out[:TOTAL_MEMORY_BUDGET]
+    return out[: min(TOTAL_MEMORY_BUDGET, MAX_RECALL_ITEMS)]
+
+
+def build_recall_payload(
+    explicit: dict[str, list[MemoryItem]],
+    mem0_by_scope: dict[str, list[str]],
+    scene: str,
+    *,
+    recalled: list[MemoryItem] | None = None,
+    mem0_hits: list[str] | None = None,
+) -> dict[str, Any]:
+    """Admin-facing per-run recall payload (counts + capped items)."""
+    items = build_recall_records(explicit, mem0_by_scope, scene)
+    explicit_n = len(recalled) if recalled is not None else sum(
+        1 for i in items if i.get("source") == "explicit"
+    )
+    mem0_n = len(mem0_hits) if mem0_hits is not None else sum(
+        1 for i in items if i.get("source") == "mem0"
+    )
+    return {
+        "scene": scene,
+        "explicit_count": explicit_n,
+        "mem0_count": mem0_n,
+        "item_count": len(items),
+        "items": items,
+    }
 
 
 def default_store_path() -> Path:

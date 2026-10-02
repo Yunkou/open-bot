@@ -663,6 +663,78 @@ export async function adminListChannels(): Promise<{ channels: AdminChannel[] }>
   return res.json();
 }
 
+
+export type AdminMemoryRecallItem = {
+  source: string;
+  scope?: string;
+  tier?: string;
+  content?: string;
+  snippet?: string;
+  memory_id?: string;
+  agent_id?: string;
+  channel_id?: string;
+  peer_agent_id?: string;
+  score?: number;
+};
+
+export type AdminMemoryRecall = {
+  id: string;
+  org_id?: string;
+  user_id: string;
+  username?: string;
+  agent_id?: string;
+  agent_name?: string;
+  conversation_id?: string;
+  message_id?: string;
+  run_id?: string;
+  source?: string;
+  scene?: string;
+  explicit_count?: number;
+  mem0_count?: number;
+  item_count?: number;
+  items?: AdminMemoryRecallItem[];
+  created_at?: string;
+};
+
+export type MemoryRecallQuery = {
+  user_id?: string;
+  conversation_id?: string;
+  agent_id?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+};
+
+function memoryRecallQuery(params: MemoryRecallQuery): string {
+  const q = new URLSearchParams();
+  if (params.user_id) q.set("user_id", params.user_id);
+  if (params.conversation_id) q.set("conversation_id", params.conversation_id);
+  if (params.agent_id) q.set("agent_id", params.agent_id);
+  if (params.from) q.set("from", params.from);
+  if (params.to) q.set("to", params.to);
+  if (params.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export async function adminListMemoryRecalls(
+  params: MemoryRecallQuery = {},
+): Promise<{ recalls: AdminMemoryRecall[] }> {
+  const res = await fetch(`${API_BASE}/v1/admin/memory-recalls${memoryRecallQuery(params)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminGetMemoryRecall(id: string): Promise<{ recall: AdminMemoryRecall }> {
+  const res = await fetch(`${API_BASE}/v1/admin/memory-recalls/${encodeURIComponent(id)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function adminGetCompactConfig(): Promise<{ compact?: Record<string, unknown> }> {
   const res = await fetch(`${API_BASE}/v1/admin/compact-config`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));

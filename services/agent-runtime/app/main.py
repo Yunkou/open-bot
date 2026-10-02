@@ -31,7 +31,7 @@ from .tool_markup import strip_tool_markup
 from .memory import (
     MemoryStore,
     get_store,
-    merge_scoped_snippets,
+    build_recall_payload,
     resolve_write_scope,
     scene_kind,
 )
@@ -449,8 +449,15 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 )
                 mem0_by_scope[scope_name] = hits
                 mem0_hits.extend(hits)
-        memory_snippets = merge_scoped_snippets(recalled_buckets, mem0_by_scope, scene)
         recalled = [item for items in recalled_buckets.values() for item in items]
+        recall_payload = build_recall_payload(
+            recalled_buckets,
+            mem0_by_scope,
+            scene,
+            recalled=recalled,
+            mem0_hits=mem0_hits,
+        )
+        memory_snippets = [r["snippet"] for r in recall_payload["items"]]
 
         # None = all skills (legacy); explicit list (incl. empty) = filter.
         enabled = body.enabled_skills
@@ -530,6 +537,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             "enabled_skills": [s.name for s in active_skills],
             "memory_recalled": len(recalled),
             "mem0_recalled": len(mem0_hits),
+            "memory_recall": recall_payload,
             "compacted": compact_meta.get("compacted", False),
             "compact_reason": compact_meta.get("compact_reason") or "",
             "summary_new": bool(compact_meta.get("summary_new")),

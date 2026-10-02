@@ -1,19 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Descriptions, Drawer, Segmented, Select, Space, Tabs, Typography, message } from "antd";
+import {
+  Alert,
+  Descriptions,
+  Drawer,
+  Input,
+  Segmented,
+  Select,
+  Space,
+  Table,
+  Tabs,
+  Tag,
+  Typography,
+  message,
+  type TableColumnsType,
+} from "antd";
 import { PageContainer, ProTable, type ActionType, type ProColumns } from "@ant-design/pro-components";
 import {
   adminGetCompactConfig,
+  adminGetMemoryRecall,
   adminListAutoMemories,
   adminListBots,
   adminListChannels,
   adminListCompactions,
   adminListMemories,
+  adminListMemoryRecalls,
   adminListUsers,
   type AdminAutoMemory,
   type AdminBot,
   type AdminChannel,
   type AdminCompaction,
   type AdminMemory,
+  type AdminMemoryRecall,
+  type AdminMemoryRecallItem,
   type AdminUser,
   type MemoryQuery,
 } from "../api";
@@ -42,6 +60,11 @@ const TIER_LABEL: Record<string, string> = {
   note: "note",
 };
 
+const SOURCE_LABEL: Record<string, string> = {
+  explicit: "显式",
+  mem0: "Mem0",
+};
+
 function preview(text: string, n = 80) {
   const s = (text || "").replace(/\s+/g, " ").trim();
   return s.length > n ? `${s.slice(0, n)}…` : s || "—";
@@ -51,6 +74,7 @@ export default function MemoryPage() {
   const memoryRef = useRef<ActionType>(null);
   const autoRef = useRef<ActionType>(null);
   const compactRef = useRef<ActionType>(null);
+  const recallRef = useRef<ActionType>(null);
 
   const [scope, setScope] = useState<Scope>("user");
   const [compactScope, setCompactScope] = useState<CompactScope>("bot");
@@ -58,10 +82,13 @@ export default function MemoryPage() {
   const [agentId, setAgentId] = useState<string>();
   const [peerAgentId, setPeerAgentId] = useState<string>();
   const [channelId, setChannelId] = useState<string>();
+  const [conversationId, setConversationId] = useState<string>();
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [bots, setBots] = useState<AdminBot[]>([]);
   const [channels, setChannels] = useState<AdminChannel[]>([]);
   const [drawer, setDrawer] = useState<{ title: string; body: string } | null>(null);
+  const [recallDetail, setRecallDetail] = useState<AdminMemoryRecall | null>(null);
+  const [recallDetailLoading, setRecallDetailLoading] = useState(false);
   const [autoReason, setAutoReason] = useState("");
   const [compactNote, setCompactNote] = useState("");
   const [compactConfig, setCompactConfig] = useState<Record<string, unknown> | null>(null);
@@ -88,6 +115,10 @@ export default function MemoryPage() {
     compactRef.current?.reload();
   }, [compactScope, userId, agentId, channelId]);
 
+  useEffect(() => {
+    recallRef.current?.reload();
+  }, [userId, agentId, conversationId]);
+
   const userBots = useMemo(
     () => (userId ? bots.filter((b) => b.user_id === userId) : bots),
     [bots, userId],
@@ -104,6 +135,19 @@ export default function MemoryPage() {
     if (scope === "agent_pair") q.peer_agent_id = peerAgentId;
     return q;
   }, [scope, userId, agentId, channelId, peerAgentId]);
+
+  const openRecallDetail = async (id: string) => {
+    setRecallDetailLoading(true);
+    setRecallDetail(null);
+    try {
+      const data = await adminGetMemoryRecall(id);
+      setRecallDetail(data.recall);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRecallDetailLoading(false);
+    }
+  };
 
   const memoryColumns: ProColumns<AdminMemory>[] = [
     { title: "用户", dataIndex: "username", width: 120, render: (_, row) => row.username || row.user_id },
@@ -175,10 +219,87 @@ export default function MemoryPage() {
     },
   ];
 
+  const recallColumns: ProColumns<AdminMemoryRecall>[] = [
+    {
+      title: "时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
+    { title: "用户", dataIndex: "username", width: 120, render: (_, row) => row.username || row.user_id || "—" },
+    { title: "Bot", dataIndex: "agent_name", width: 140, render: (_, row) => row.agent_name || row.agent_id || "—" },
+    {
+      title: "会话",
+      dataIndex: "conversation_id",
+      width: 180,
+      ellipsis: true,
+      copyable: true,
+    },
+    {
+      title: "显式/Mem0",
+      width: 110,
+      render: (_, row) => `${row.explicit_count ?? 0} / ${row.mem0_count ?? 0}`,
+    },
+    {
+      title: "注入条数",
+      dataIndex: "item_count",
+      width: 90,
+    },
+    {
+      title: "场景",
+      dataIndex: "scene",
+      width: 100,
+      render: (_, row) => row.scene || "—",
+    },
+    {
+      title: "操作",
+      valueType: "option",
+      width: 100,
+      render: (_, row) => [
+        <a key="detail" onClick={() => void openRecallDetail(row.id)}>
+          本轮召回
+        </a>,
+      ],
+    },
+  ];
+
+  const recallItemColumns: TableColumnsType<AdminMemoryRecallItem> = [
+    {
+      title: "来源",
+      dataIndex: "source",
+      width: 90,
+      render: (_, row) => (
+        <Tag color={row.source === "mem0" ? "purple" : "blue"}>{SOURCE_LABEL[row.source] || row.source}</Tag>
+      ),
+    },
+    { title: "作用域", dataIndex: "scope", width: 100, render: (_, row) => row.scope || "—" },
+    { title: "层级", dataIndex: "tier", width: 90, render: (_, row) => row.tier || "—" },
+    {
+      title: "内容",
+      dataIndex: "content",
+      ellipsis: true,
+      render: (_, row) => (
+        <a
+          onClick={() =>
+            setDrawer({
+              title: row.source === "mem0" ? "Mem0 召回" : "显式召回",
+              body: row.snippet || row.content || "",
+            })
+          }
+        >
+          {preview(row.snippet || row.content || "")}
+        </a>
+      ),
+    },
+  ];
+
   return (
     <PageContainer title="记忆与压缩">
       <Paragraph type="secondary">
         一次对话先用本会话近期消息和压缩摘要，再按场景取长期记忆：私聊是 Bot 然后用户；群聊是群组、当前 Bot、然后用户；Bot 之间是这一对、当前 Bot、然后用户。历史记忆没有 Bot 或群信息，已归入用户档。Bot 之间要有显式写入才会出现。
+        「本轮召回」记录每次运行真正注入提示词的记忆片段，不依赖 Langfuse。
       </Paragraph>
       <Space wrap style={{ marginBottom: 16 }}>
         <Segmented
@@ -323,6 +444,60 @@ export default function MemoryPage() {
             ),
           },
           {
+            key: "recall",
+            label: "本轮召回",
+            children: (
+              <>
+                <Space wrap style={{ marginBottom: 12 }}>
+                  <Input
+                    allowClear
+                    placeholder="会话 ID"
+                    style={{ width: 280 }}
+                    value={conversationId}
+                    onChange={(e) => setConversationId(e.target.value.trim() || undefined)}
+                  />
+                  <Select
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    placeholder="按 Bot 过滤"
+                    style={{ width: 200 }}
+                    value={agentId}
+                    onChange={setAgentId}
+                    options={userBots.map((b) => ({
+                      value: b.id,
+                      label: `${b.name}${b.owner_username ? `（${b.owner_username}）` : ""}`,
+                    }))}
+                  />
+                  <Text type="secondary">按用户 / 会话 / Bot 查看每次运行注入提示词的记忆片段。</Text>
+                </Space>
+                <ProTable<AdminMemoryRecall>
+                  headerTitle="本轮召回"
+                  actionRef={recallRef}
+                  rowKey="id"
+                  search={false}
+                  options={{ reload: true }}
+                  pagination={{ pageSize: 20 }}
+                  columns={recallColumns}
+                  request={async () => {
+                    try {
+                      const data = await adminListMemoryRecalls({
+                        user_id: userId,
+                        agent_id: agentId,
+                        conversation_id: conversationId,
+                        limit: 100,
+                      });
+                      return { data: data.recalls || [], success: true };
+                    } catch (err) {
+                      message.error(err instanceof Error ? err.message : String(err));
+                      return { data: [], success: false };
+                    }
+                  }}
+                />
+              </>
+            ),
+          },
+          {
             key: "compact",
             label: "压缩",
             children: (
@@ -376,6 +551,49 @@ export default function MemoryPage() {
         onClose={() => setDrawer(null)}
       >
         <Paragraph style={{ whiteSpace: "pre-wrap" }}>{drawer?.body}</Paragraph>
+      </Drawer>
+      <Drawer
+        title="本轮召回详情"
+        open={!!recallDetail || recallDetailLoading}
+        width={720}
+        onClose={() => {
+          setRecallDetail(null);
+          setRecallDetailLoading(false);
+        }}
+      >
+        {recallDetailLoading && <Text type="secondary">加载中…</Text>}
+        {recallDetail && (
+          <>
+            <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="时间">{recallDetail.created_at || "—"}</Descriptions.Item>
+              <Descriptions.Item label="用户">
+                {recallDetail.username || recallDetail.user_id || "—"}
+              </Descriptions.Item>
+              <Descriptions.Item label="Bot">
+                {recallDetail.agent_name || recallDetail.agent_id || "—"}
+              </Descriptions.Item>
+              <Descriptions.Item label="场景">{recallDetail.scene || "—"}</Descriptions.Item>
+              <Descriptions.Item label="会话">
+                <Text copyable={!!recallDetail.conversation_id}>
+                  {recallDetail.conversation_id || "—"}
+                </Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="消息">
+                <Text copyable={!!recallDetail.message_id}>{recallDetail.message_id || "—"}</Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="显式召回数">{recallDetail.explicit_count ?? 0}</Descriptions.Item>
+              <Descriptions.Item label="Mem0 召回数">{recallDetail.mem0_count ?? 0}</Descriptions.Item>
+            </Descriptions>
+            <Table<AdminMemoryRecallItem>
+              size="small"
+              rowKey={(_, i) => String(i)}
+              pagination={false}
+              dataSource={recallDetail.items || []}
+              columns={recallItemColumns}
+              locale={{ emptyText: "本轮未注入记忆片段" }}
+            />
+          </>
+        )}
       </Drawer>
     </PageContainer>
   );

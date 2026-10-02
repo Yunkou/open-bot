@@ -79,3 +79,33 @@ def test_channel_order_and_cap():
     assert sum(1 for s in out if s.startswith("[channel]")) == 4
     assert sum(1 for s in out if s.startswith("[bot]")) == 3
     assert sum(1 for s in out if s.startswith("[user]")) == 1
+
+
+def test_build_recall_payload_matches_injected_snippets():
+    from app.memory import build_recall_payload, merge_scoped_snippets
+
+    explicit = {
+        "bot": [_item("bot", "likes tea", tier="profile")],
+        "user": [_item("user", "lives in shanghai")],
+    }
+    mem0 = {"bot": ["likes coffee"], "user": []}
+    snippets = merge_scoped_snippets(explicit, mem0, "dm")
+    payload = build_recall_payload(explicit, mem0, "dm", recalled=explicit["bot"] + explicit["user"], mem0_hits=mem0["bot"])
+    assert payload["scene"] == "dm"
+    assert payload["explicit_count"] == 2
+    assert payload["mem0_count"] == 1
+    assert [i["snippet"] for i in payload["items"]] == snippets
+    assert payload["items"][0]["source"] == "explicit"
+    assert payload["items"][0]["tier"] == "profile"
+    assert any(i["source"] == "mem0" for i in payload["items"])
+
+
+def test_build_recall_records_clips_long_content():
+    from app.memory import MAX_RECALL_SNIPPET_CHARS, build_recall_records
+
+    long = "x" * (MAX_RECALL_SNIPPET_CHARS + 80)
+    explicit = {"bot": [_item("bot", long)], "user": []}
+    items = build_recall_records(explicit, {}, "dm")
+    assert len(items) == 1
+    assert len(items[0]["content"]) <= MAX_RECALL_SNIPPET_CHARS
+    assert items[0]["content"].endswith("…")

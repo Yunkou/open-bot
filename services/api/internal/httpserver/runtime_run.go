@@ -148,6 +148,13 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 								pendingSummary = sum
 							}
 						}
+						s.persistMemoryRecallFromMeta(payload, recallPersistContext{
+							UserID:         userID,
+							AgentID:        agentID,
+							ConversationID: conv.ID,
+							MessageID:      userMsg.ID,
+							Source:         sourceHint(title),
+						})
 					case "error":
 						if msg, ok := payload["message"].(string); ok && msg != "" {
 							return nil, errors.New(msg)
@@ -174,14 +181,21 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	if reply != "" {
 		_, _ = s.db.AddMessage(conv.ID, "assistant", reply)
 	}
-	source := "run_once"
-	if strings.HasPrefix(title, "A2A ") {
-		source = "a2a"
-	}
+	source := sourceHint(title)
 	_ = s.db.RecordUsageRun("", userID, agentID, conv.ID, source, 0, 0, 0)
 	return &runOnceResult{
 		ConversationID: conv.ID,
 		Reply:          reply,
 		Summary:        pendingSummary,
 	}, nil
+}
+
+func sourceHint(title string) string {
+	if strings.HasPrefix(title, "A2A ") {
+		return "a2a"
+	}
+	if strings.Contains(title, "例行") || strings.Contains(strings.ToLower(title), "routine") {
+		return "routine"
+	}
+	return "run_once"
 }

@@ -131,6 +131,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 
 	mux.HandleFunc("GET /v1/admin/memories", s.requireOrgAdmin(s.handleAdminListMemories))
 	mux.HandleFunc("GET /v1/admin/memories/auto", s.requireOrgAdmin(s.handleAdminListAutoMemories))
+	mux.HandleFunc("GET /v1/admin/memory-recalls", s.requireOrgAdmin(s.handleAdminListMemoryRecalls))
+	mux.HandleFunc("GET /v1/admin/memory-recalls/{id}", s.requireOrgAdmin(s.handleAdminGetMemoryRecall))
 	mux.HandleFunc("GET /v1/admin/compactions", s.requireOrgAdmin(s.handleAdminListCompactions))
 	mux.HandleFunc("GET /v1/admin/channels", s.requireOrgAdmin(s.handleAdminListChannels))
 	mux.HandleFunc("GET /v1/admin/compact-config", s.requireOrgAdmin(s.handleCompactConfig))
@@ -237,6 +239,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/bot-secrets/http", s.requireInternal(s.handleInternalSecretHTTP))
 	mux.HandleFunc("POST /internal/routines/run", s.requireInternal(s.handleInternalRunRoutine))
 	mux.HandleFunc("POST /internal/conversation-tasks/enqueue", s.requireInternal(s.handleInternalEnqueueTask))
+	mux.HandleFunc("POST /internal/memory-recalls", s.requireInternal(s.handleInternalRecordMemoryRecall))
 	mux.HandleFunc("POST /internal/routines/list", s.requireInternal(s.handleInternalListRoutines))
 	mux.HandleFunc("POST /internal/routines/create", s.requireInternal(s.handleInternalCreateRoutine))
 	mux.HandleFunc("POST /internal/routines/update", s.requireInternal(s.handleInternalUpdateRoutine))
@@ -1298,7 +1301,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if body.Client != nil {
 			payloadMap["client"] = body.Client
 		}
-		assistantText, pendingSummary, runUsage, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap)
+		recallCtx := &recallPersistContext{
+			UserID:         uid,
+			AgentID:        agentID,
+			ConversationID: conv.ID,
+			MessageID:      userMsg.ID,
+			Source:         "chat",
+		}
+		assistantText, pendingSummary, runUsage, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap, recallCtx)
 		if pendingSummary != "" {
 			sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
 			_, _ = s.db.AddMessageAt(conv.ID, "summary", pendingSummary, sumAt)
@@ -1438,7 +1448,7 @@ func usageFromDonePayload(payload map[string]any) runtimeUsage {
 
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text + optional summary.
 // emit must not cancel the run on client write failure — disconnect is not stop.
-func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any) (string, string, runtimeUsage, error) {
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (string, string, runtimeUsage, error) {
 	payload, _ := json.Marshal(payloadMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
 	if err != nil {
@@ -1492,6 +1502,9 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 							if sum, ok := payload["summary"].(string); ok && strings.TrimSpace(sum) != "" {
 								pendingSummary = sum
 							}
+						}
+						if recallCtx != nil {
+							s.persistMemoryRecallFromMeta(payload, *recallCtx)
 						}
 						if emit != nil {
 							emit("meta", payload)

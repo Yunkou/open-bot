@@ -133,7 +133,7 @@ export default function TracesPage() {
       ) : (
         <>
           <Paragraph type="secondary">
-            数据来自本地 Langfuse（经管理 API 代理）。详细分析请使用「在 Langfuse 打开」。
+            数据来自本地 Langfuse（经管理 API 代理）。详细分析请使用「在 Langfuse 打开」。每轮注入提示词的记忆片段见「记忆与压缩 → 本轮召回」（不依赖 Langfuse）。
             {status?.reason ? `（${status.reason}）` : ""}
           </Paragraph>
           <ProTable<AdminTrace>
