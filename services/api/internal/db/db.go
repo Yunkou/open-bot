@@ -422,6 +422,9 @@ CREATE INDEX IF NOT EXISTS idx_conversation_tasks_conv
 	if err := d.migrateMemoryRecalls(); err != nil {
 		return err
 	}
+	if err := d.migrateUserSettings(); err != nil {
+		return err
+	}
 	return d.migrateVector()
 }
 

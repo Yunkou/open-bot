@@ -1,4 +1,12 @@
 import { hostExecWebSocketUrl } from "../api";
+import {
+  readCachedUserSettings,
+  writeCachedUserSettings,
+  type UserSettings,
+  type AutoReviewRule,
+  normalizeMachineExecPolicy,
+  type MachineExecPolicy,
+} from "./userSettings";
 
 export const HOST_WRITES_KEY = "openbot_host_writes";
 
@@ -284,6 +292,113 @@ function matchHardDenyShell(command: string): HostExecReview | null {
   return null;
 }
 
+
+let cachedUserSettings: UserSettings = readCachedUserSettings();
+let cachedExecPolicy: MachineExecPolicy = "allow";
+
+/** Sync Auto-review prefs from server/settings UI into the host-exec gate. */
+export function setHostExecUserSettings(settings: UserSettings): void {
+  cachedUserSettings = settings;
+  writeCachedUserSettings(settings);
+}
+
+export function getHostExecUserSettings(): UserSettings {
+  return cachedUserSettings;
+}
+
+/** Per-machine exec policy for the currently connected desktop host. */
+export function setHostExecMachinePolicy(policy: MachineExecPolicy | string): void {
+  cachedExecPolicy = normalizeMachineExecPolicy(policy);
+}
+
+export function getHostExecMachinePolicy(): MachineExecPolicy {
+  return cachedExecPolicy;
+}
+
+function buildAutoReviewHaystack(op: string, path: string, dest: string, reason: string): string {
+  const labels: Record<string, string> = {
+    ls: "本机只读 打开文件 列表",
+    read: "本机只读 打开文件 列表",
+    open: "本机只读 打开文件 列表",
+    write: "写入本机文件",
+    delete: "删除本机文件",
+    move: "移动重命名",
+    shell: "本机命令 shell 运行命令",
+    ssh_ls: "远程只读",
+    ssh_read: "远程只读",
+    ssh_write: "远程写入 远程删除 远程命令",
+    ssh_delete: "远程写入 远程删除 远程命令",
+    ssh_exec: "远程写入 远程删除 远程命令",
+  };
+  const parts = [op, path, dest, reason, labels[op] || op];
+  if (dest === "terminal") parts.push("终端", "terminal");
+  return parts.join(" ").toLowerCase();
+}
+
+function ruleMatchesHaystack(when: string, haystack: string): boolean {
+  let w = when.trim().toLowerCase();
+  if (!w) return false;
+  if (haystack.includes(w)) return true;
+  for (const sep of [" ", "\t", "，", ",", "、", "/", "|", "；", ";", "：", ":", "。"]) {
+    w = w.split(sep).join(" ");
+  }
+  for (const tok of w.split(/\s+/)) {
+    const t = tok.trim();
+    if ([...t].length < 2) continue;
+    if (haystack.includes(t)) return true;
+  }
+  return false;
+}
+
+function matchUserRules(rules: AutoReviewRule[], haystack: string): { ask: boolean; allow: boolean } {
+  let ask = false;
+  let allow = false;
+  for (const r of rules) {
+    if (!ruleMatchesHaystack(r.when || "", haystack)) continue;
+    if (r.action === "ask_first") ask = true;
+    if (r.action === "auto_allow") allow = true;
+  }
+  return { ask, allow };
+}
+
+/** Apply per-user Auto-review prefs on top of built-in tiers. Hard deny always wins. */
+export function applyUserAutoReview(
+  base: HostExecReview,
+  settings: UserSettings,
+  op: string,
+  path = "",
+  dest = "",
+): HostExecReview {
+  if (base.tier === "deny") return base;
+  if (!settings.auto_review_enabled) {
+    if (base.tier === "auto") {
+      return { tier: "confirm", reason: "自动审核已关闭，需你确认", code: "auto_review_off" };
+    }
+    return base;
+  }
+  const haystack = buildAutoReviewHaystack(op, path, dest, base.reason);
+  const { ask, allow } = matchUserRules(settings.auto_review_rules || [], haystack);
+  if (ask) {
+    if (base.tier === "auto") {
+      return { tier: "confirm", reason: "用户规则：先询问", code: "user_rule_ask_first" };
+    }
+    return base;
+  }
+  if (allow && base.tier === "confirm") {
+    return { tier: "auto", reason: "用户规则：自动允许", code: "user_rule_auto_allow" };
+  }
+  return base;
+}
+
+export function classifyHostExecReviewForUser(
+  op: string,
+  path = "",
+  dest = "",
+  settings: UserSettings = cachedUserSettings,
+): HostExecReview {
+  return applyUserAutoReview(classifyHostExecReview(op, path, dest), settings, op, path, dest);
+}
+
 /** Mirror of API classifyHostExecReview — keep in sync with readonly_shell.go. */
 export function classifyHostExecReview(op: string, path = "", dest = ""): HostExecReview {
   const o = op.trim();
@@ -398,24 +513,25 @@ async function probeSsh(req: HostExecRequest): Promise<Record<string, unknown>> 
   }
 }
 
-/** Client Auto-review gate. Kill switch forces readonly shell auto → confirm. */
+/** Client Auto-review gate: machine exec_policy + user settings + built-in tiers. */
 function reviewForRequest(req: HostExecRequest): HostExecReview {
-  const rev = classifyHostExecReview(req.op, req.path || "", req.dest || "");
-  if (
-    rev.tier === "auto" &&
-    rev.code === "readonly_shell" &&
-    !hostShellReadonlyAutoEnabled()
-  ) {
+  const policy = cachedExecPolicy;
+  if (policy === "deny") {
     return {
-      tier: "confirm",
-      reason: "只读免确认已关闭，本机命令需你确认",
-      code: "readonly_shell_kill_switch",
+      tier: "deny",
+      reason: "这台电脑已设置为不允许执行",
+      code: "exec_policy_deny",
     };
   }
-  // write: keep prior home/overwrite heuristic (confirm overwrite or outside home).
-  if (rev.code === "write") {
-    return rev; // async refinement happens in needsConfirm
+  let settings = cachedUserSettings;
+  if (policy === "ask") {
+    settings = { ...settings, auto_review_enabled: false };
   }
+  // Legacy kill-switch: if localStorage readonly auto is off, treat as auto_review off for shell.
+  if (!hostShellReadonlyAutoEnabled()) {
+    settings = { ...settings, auto_review_enabled: false };
+  }
+  const rev = classifyHostExecReviewForUser(req.op, req.path || "", req.dest || "", settings);
   return rev;
 }
 
@@ -482,7 +598,8 @@ export function startHostExecSession(opts: {
             result = {
               ok: false,
               denied: true,
-              auto_review: "deny",
+              auto_review: hard.code === "exec_policy_deny" ? undefined : "deny",
+              exec_policy: hard.code === "exec_policy_deny" ? "deny" : undefined,
               review_code: hard.code,
               error: hard.reason,
             };

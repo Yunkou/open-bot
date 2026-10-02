@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/tangxin/open-bot/services/api/internal/db"
 )
 
 // Host-exec Auto-review (Grok Bot–aligned): deterministic tiers, no LLM judgment.
@@ -409,4 +411,144 @@ func takeToken(s string) (tok, rest string) {
 		end++
 	}
 	return s[:end], s[end:]
+}
+
+
+// applyUserAutoReview layers per-user prefs on top of built-in Auto-review tiers.
+//
+// Order (Grok-aligned):
+//  1. hard deny stays deny (built-in, always-on; user rules cannot override)
+//  2. if auto_review_enabled is false → everything that was auto becomes confirm
+//  3. user NL rules: ask_first wins over auto_allow on conflict
+//     - ask_first upgrades auto → confirm
+//     - auto_allow may downgrade confirm → auto (never deny)
+//
+// Matching is simple keyword/intent against op + path + dest + reason — not the chat LLM.
+func applyUserAutoReview(base hostExecReview, settings db.UserSettings, op, path, dest string) hostExecReview {
+	if base.Tier == hostExecReviewDeny {
+		return base
+	}
+	if !settings.AutoReviewEnabled {
+		if base.Tier == hostExecReviewAuto {
+			return hostExecReview{
+				Tier:   hostExecReviewConfirm,
+				Reason: "自动审核已关闭，需你确认",
+				Code:   "auto_review_off",
+			}
+		}
+		return base
+	}
+	haystack := buildAutoReviewHaystack(op, path, dest, base.Reason)
+	ask, allow := matchUserAutoReviewRules(settings.AutoReviewRules, haystack)
+	if ask {
+		if base.Tier == hostExecReviewAuto {
+			return hostExecReview{
+				Tier:   hostExecReviewConfirm,
+				Reason: "用户规则：先询问",
+				Code:   "user_rule_ask_first",
+			}
+		}
+		return base
+	}
+	if allow && base.Tier == hostExecReviewConfirm {
+		return hostExecReview{
+			Tier:   hostExecReviewAuto,
+			Reason: "用户规则：自动允许",
+			Code:   "user_rule_auto_allow",
+		}
+	}
+	return base
+}
+
+func buildAutoReviewHaystack(op, path, dest, reason string) string {
+	parts := []string{
+		op, path, dest, reason,
+		hostOpChineseLabel(op),
+	}
+	if dest == "terminal" {
+		parts = append(parts, "终端", "terminal")
+	}
+	return strings.ToLower(strings.Join(parts, " "))
+}
+
+func hostOpChineseLabel(op string) string {
+	switch strings.TrimSpace(op) {
+	case "ls", "read", "open":
+		return "本机只读 打开文件 列表"
+	case "write":
+		return "写入本机文件"
+	case "delete":
+		return "删除本机文件"
+	case "move":
+		return "移动重命名"
+	case "shell":
+		return "本机命令 shell 运行命令"
+	case "ssh_ls", "ssh_read":
+		return "远程只读"
+	case "ssh_write", "ssh_delete", "ssh_exec":
+		return "远程写入 远程删除 远程命令"
+	default:
+		return op
+	}
+}
+
+func matchUserAutoReviewRules(rules []db.AutoReviewRule, haystack string) (askFirst, autoAllow bool) {
+	for _, r := range rules {
+		when := strings.TrimSpace(r.When)
+		if when == "" {
+			continue
+		}
+		if !ruleMatchesHaystack(when, haystack) {
+			continue
+		}
+		switch r.Action {
+		case db.AutoReviewAskFirst:
+			askFirst = true
+		case db.AutoReviewAutoAllow:
+			autoAllow = true
+		}
+	}
+	return askFirst, autoAllow
+}
+
+func ruleMatchesHaystack(when, haystack string) bool {
+	w := strings.ToLower(strings.TrimSpace(when))
+	if w == "" {
+		return false
+	}
+	// Whole-phrase match first.
+	if strings.Contains(haystack, w) {
+		return true
+	}
+	// Tokenize on whitespace / common CJK punctuation; require any token ≥2 runes.
+	for _, sep := range []string{" ", "\t", "，", ",", "、", "/", "|", "；", ";", "：", ":", "。"} {
+		w = strings.ReplaceAll(w, sep, " ")
+	}
+	for _, tok := range strings.Fields(w) {
+		tok = strings.TrimSpace(tok)
+		if len([]rune(tok)) < 2 {
+			continue
+		}
+		if strings.Contains(haystack, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyHostExecReviewForUser applies built-in tiers then user Auto-review prefs.
+func classifyHostExecReviewForUser(op, path, dest string, settings db.UserSettings) hostExecReview {
+	return applyUserAutoReview(classifyHostExecReview(op, path, dest), settings, op, path, dest)
+}
+
+func hostExecNeedsChatConfirmForUser(op, path, dest string, settings db.UserSettings) bool {
+	return classifyHostExecReviewForUser(op, path, dest, settings).Tier == hostExecReviewConfirm
+}
+
+func hostExecHardDeniedForUser(op, path, dest string, settings db.UserSettings) (bool, hostExecReview) {
+	rev := classifyHostExecReviewForUser(op, path, dest, settings)
+	if rev.Tier == hostExecReviewDeny {
+		return true, rev
+	}
+	return false, rev
 }

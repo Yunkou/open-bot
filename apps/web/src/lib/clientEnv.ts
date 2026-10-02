@@ -18,6 +18,8 @@ export type ClientContext = {
   arch: string;
   app_version: string;
   locale: string;
+  /** IANA timezone from user settings (optional). */
+  timezone?: string;
   machine_id?: string;
   /** Display name of the current device (OS name or user rename). */
   machine_label?: string;

@@ -270,6 +270,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		payloadMap["llm"] = llmPayload
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(task.UserID))
+	attachUserTimezone(payloadMap, s.userSettingsOrDefault(task.UserID))
 
 	emit := func(event string, data any) {
 		if event != "status" {

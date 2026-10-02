@@ -120,6 +120,9 @@ WHERE agent_id IN (SELECT id FROM agents WHERE user_id = $1)
 	if err := execCount("mcp_servers", `DELETE FROM mcp_servers WHERE user_id = $1`, userID); err != nil {
 		return nil, err
 	}
+	if err := execCount("user_settings", `DELETE FROM user_settings WHERE user_id = $1`, userID); err != nil {
+		return nil, err
+	}
 	if err := execCount("user_machines", `DELETE FROM user_machines WHERE user_id = $1`, userID); err != nil {
 		return nil, err
 	}

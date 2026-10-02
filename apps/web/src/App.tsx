@@ -93,7 +93,8 @@ import {
   listMachines,
   registerMachine,
   heartbeatMachine,
-  updateMachineLabel,
+  updateMachine,
+  fetchUserSettings,
   deleteMachine,
   type Machine,
   type BotSecretMeta,
@@ -109,7 +110,14 @@ import {
   defaultMachineLabel,
   resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
-import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, hostShellReadonlyAutoEnabled, setHostShellReadonlyAutoEnabled, classifyHostExecReview, type HostExecRequest } from "./lib/hostExec";
+import {
+  effectiveTimezone,
+  normalizeMachineExecPolicy,
+  MACHINE_EXEC_POLICY_OPTIONS,
+  readCachedUserSettings,
+  type MachineExecPolicy,
+} from "./lib/userSettings";
+import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, classifyHostExecReview, setHostExecUserSettings, setHostExecMachinePolicy, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
 import { AccountMenu } from "./components/AccountMenu";
 import {
@@ -124,6 +132,7 @@ import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover
 import { avatarColor } from "./components/avatarColor";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
+import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
@@ -478,9 +487,10 @@ export default function App() {
   const [deviceDisplayName, setDeviceDisplayName] = useState("");
   const [renamingMachineId, setRenamingMachineId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [currentMachineDraft, setCurrentMachineDraft] = useState("");
   const [hostMachineId, setHostMachineId] = useState<string | null>(() => getStoredMachineId());
   const [hostWritesOn, setHostWritesOn] = useState(() => hostWritesEnabled());
-  const [hostShellReadonlyAuto, setHostShellReadonlyAuto] = useState(() => hostShellReadonlyAutoEnabled());
+  const [hostExecPolicy, setHostExecPolicy] = useState<MachineExecPolicy>("allow");
   const [hostActivity, setHostActivity] = useState("");
   const hostConfirmResolvers = useRef(new Map<string, (ok: boolean) => void>());
   const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
@@ -519,6 +529,31 @@ export default function App() {
   const [runBusyTick, setRunBusyTick] = useState(0);
 
   const authed = Boolean(token && user);
+
+  // Load per-user Bot settings (timezone / Auto-review) into the host-exec gate.
+  useEffect(() => {
+    if (!authed) return;
+    const cached = readCachedUserSettings();
+    setHostExecUserSettings(cached);
+    void fetchUserSettings()
+      .then((s) => setHostExecUserSettings(s))
+      .catch(() => {});
+  }, [authed]);
+
+  // Keep machine exec_policy in sync for the local host-exec WebSocket gate.
+  useEffect(() => {
+    const mid = hostMachineId;
+    if (!mid) {
+      setHostExecMachinePolicy("allow");
+      setHostExecPolicy("allow");
+      return;
+    }
+    const m = machines.find((x) => x.id === mid);
+    const policy = normalizeMachineExecPolicy(m?.exec_policy);
+    setHostExecPolicy(policy);
+    setHostExecMachinePolicy(policy);
+    if (m?.label) setCurrentMachineDraft(m.label);
+  }, [hostMachineId, machines]);
 
   const refreshMachines = useCallback(async () => {
     const list = await listMachines();
@@ -1826,15 +1861,16 @@ export default function App() {
         (() => {
           // Browser must not send a stale desktop machine_id from localStorage —
           // that makes the model think the user is on that Mac and invent Downloads contents.
+          const tz = effectiveTimezone(readCachedUserSettings());
           if (!shouldRegisterAsHost(clientEnv)) {
-            return { ...clientEnv, machine_id: undefined, machine_label: undefined };
+            return { ...clientEnv, machine_id: undefined, machine_label: undefined, timezone: tz };
           }
           const mid = getStoredMachineId() || undefined;
           const fromList = mid ? machines.find((x) => x.id === mid)?.label : undefined;
           const machine_label =
             (fromList || deviceDisplayName || defaultMachineLabel(clientEnv) || "").trim() ||
             undefined;
-          return { ...clientEnv, machine_id: mid, machine_label };
+          return { ...clientEnv, machine_id: mid, machine_label, timezone: tz };
         })(),
         handoffContext,
       );
@@ -3209,6 +3245,11 @@ export default function App() {
                     </div>
                   </SettingsCard>
                 </SettingsSection>
+                <GeneralBotSettings
+                  onSettingsChange={(s) => {
+                    setHostExecUserSettings(s);
+                  }}
+                />
               </SettingsPage>
             )}
 
@@ -4148,36 +4189,137 @@ export default function App() {
             {settingsTab === "machines" && (
               <SettingsPage>
                 <SettingsHint>
-                  已注册的电脑（默认用系统设备名，可在此重命名）。桌面端登录后会连上本机文件通道，只有这时才显示为可操作。网页不会登记为电脑。可读写本机文件（含主目录以外的路径）。确认策略对齐 Grok Bot Auto-review（确定性规则，不用对话模型自行批准）：只读免确认；危险模式硬拒绝；其余需你点确认卡。当前客户端：{clientEnv.platform} / {clientEnv.app}
-                  {deviceDisplayName ? ` · 本机名称「${deviceDisplayName}」` : ""}
+                  桌面端登录后会连上本机文件通道；网页不会登记为电脑。操作仍经「通用 → Bot → 自动审核」检查（硬拒绝始终有效）。当前客户端：{clientEnv.platform} / {clientEnv.app}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
                 </SettingsHint>
-                {clientEnv.app === "tauri" ? (
-                  <>
-                    <label className="settings-inline-check">
-                      <input
-                        type="checkbox"
-                        checked={hostWritesOn}
-                        onChange={(e) => {
-                          setHostWritesEnabled(e.target.checked);
-                          setHostWritesOn(e.target.checked);
-                        }}
-                      />
-                      允许写入这台电脑
-                    </label>
-                    <label className="settings-inline-check">
-                      <input
-                        type="checkbox"
-                        checked={hostShellReadonlyAuto}
-                        onChange={(e) => {
-                          setHostShellReadonlyAutoEnabled(e.target.checked);
-                          setHostShellReadonlyAuto(e.target.checked);
-                        }}
-                      />
-                      只读免确认 / 风险自动审（ls/find/du 等 allowlist 自动放行；关则每条 shell 都确认。硬危险仍直接拒绝）
-                    </label>
-                  </>
-                ) : null}
+
+                {(() => {
+                  const current = hostMachineId
+                    ? machines.find((x) => x.id === hostMachineId)
+                    : null;
+                  if (!shouldRegisterAsHost(clientEnv)) {
+                    return (
+                      <SettingsSection title="当前电脑">
+                        <SettingsCard padded>
+                          <div className="bot-settings-desc">
+                            浏览器不能作为本机执行通道。请用桌面应用打开并保持在线。
+                          </div>
+                        </SettingsCard>
+                      </SettingsSection>
+                    );
+                  }
+                  return (
+                    <SettingsSection title="当前电脑">
+                      <SettingsCard padded>
+                        <div className="bot-general-settings">
+                          <div className="settings-row bot-settings-row">
+                            <div className="bot-settings-copy">
+                              <div className="bot-settings-title">名称</div>
+                              <div className="bot-settings-desc">
+                                显示给 Bot 的设备名（如系统主机名）。保存后同步到已注册列表。
+                              </div>
+                            </div>
+                            <div className="bot-machine-name-edit">
+                              <input
+                                value={currentMachineDraft}
+                                onChange={(e) => setCurrentMachineDraft(e.target.value)}
+                                maxLength={64}
+                                placeholder={deviceDisplayName || "设备名称"}
+                                disabled={machinesBusy || !current}
+                              />
+                              <button
+                                type="button"
+                                className="primary"
+                                disabled={
+                                  machinesBusy ||
+                                  !current ||
+                                  !currentMachineDraft.trim() ||
+                                  currentMachineDraft.trim() === current.label
+                                }
+                                onClick={() => {
+                                  if (!current) return;
+                                  const name = currentMachineDraft.trim();
+                                  if (!name) return;
+                                  setMachinesBusy(true);
+                                  void updateMachine(current.id, { label: name })
+                                    .then((updated) => {
+                                      setMachinesMsg(`已保存为 ${updated.label}`);
+                                      setDeviceDisplayName(updated.label);
+                                      setCurrentMachineDraft(updated.label);
+                                      return refreshMachines();
+                                    })
+                                    .catch((err) =>
+                                      setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                                    )
+                                    .finally(() => setMachinesBusy(false));
+                                }}
+                              >
+                                保存
+                              </button>
+                            </div>
+                          </div>
+                          <div className="settings-row bot-settings-row">
+                            <div className="bot-settings-copy">
+                              <div className="bot-settings-title">在这台电脑上执行</div>
+                              <div className="bot-settings-desc">
+                                允许 Bot 打开文件、运行本机任务。自动审核仍会先检查；硬危险仍直接拒绝。
+                              </div>
+                            </div>
+                            <select
+                              className="bot-settings-select"
+                              value={hostExecPolicy}
+                              disabled={machinesBusy || !current}
+                              onChange={(e) => {
+                                if (!current) return;
+                                const policy = normalizeMachineExecPolicy(e.target.value);
+                                setHostExecPolicy(policy);
+                                setHostExecMachinePolicy(policy);
+                                // Mirror write kill-switch: deny → no writes; allow/ask → writes on.
+                                setHostWritesEnabled(policy !== "deny");
+                                setHostWritesOn(policy !== "deny");
+                                setMachinesBusy(true);
+                                void updateMachine(current.id, { exec_policy: policy })
+                                  .then(() => {
+                                    setMachinesMsg(
+                                      policy === "allow"
+                                        ? "已设为始终允许（自动审核仍检查）"
+                                        : policy === "ask"
+                                          ? "已设为每次询问"
+                                          : "已设为不允许在这台电脑执行",
+                                    );
+                                    return refreshMachines();
+                                  })
+                                  .catch((err) =>
+                                    setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                                  )
+                                  .finally(() => setMachinesBusy(false));
+                              }}
+                              aria-label="在这台电脑上执行"
+                            >
+                              {MACHINE_EXEC_POLICY_OPTIONS.map((o) => (
+                                <option key={o.value} value={o.value}>
+                                  {o.label}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                          {!current ? (
+                            <div className="bot-settings-desc">
+                              尚未登记本机。点击下方「重新注册本机」以启用。
+                            </div>
+                          ) : (
+                            <div className="bot-settings-desc">
+                              状态：{current.connected ? "可操作" : "未连接"}
+                              {current.platform ? ` · ${current.platform}` : ""}
+                              {hostWritesOn ? "" : " · 本机写入已关"}
+                            </div>
+                          )}
+                        </div>
+                      </SettingsCard>
+                    </SettingsSection>
+                  );
+                })()}
+
                 <SettingsSection
                   title="已注册"
                   actions={
@@ -4204,6 +4346,7 @@ export default function App() {
                             setMachinesBusy(true);
                             void (async () => {
                               const label =
+                                currentMachineDraft.trim() ||
                                 deviceDisplayName.trim() ||
                                 (await resolveDefaultMachineLabel(clientEnv));
                               const m = await registerMachine({
@@ -4217,6 +4360,7 @@ export default function App() {
                               });
                               setStoredMachineId(m.id);
                               setHostMachineId(m.id);
+                              setCurrentMachineDraft(m.label);
                               setMachinesMsg(`已注册：${m.label}`);
                               await refreshMachines();
                             })()
@@ -4254,12 +4398,13 @@ export default function App() {
                                         const name = renameDraft.trim();
                                         if (!name) return;
                                         setMachinesBusy(true);
-                                        void updateMachineLabel(m.id, name)
+                                        void updateMachine(m.id, { label: name })
                                           .then((updated) => {
                                             setMachinesMsg(`已重命名为 ${updated.label}`);
                                             setRenamingMachineId(null);
                                             if (getStoredMachineId() === m.id) {
                                               setDeviceDisplayName(updated.label);
+                                              setCurrentMachineDraft(updated.label);
                                             }
                                             return refreshMachines();
                                           })
@@ -4279,6 +4424,7 @@ export default function App() {
                                 <div className="agent-name">
                                   {m.label}{" "}
                                   <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                                  {hostMachineId === m.id ? <span className="tag">当前</span> : null}
                                 </div>
                               )}
                               <div className="agent-desc">
@@ -4286,6 +4432,7 @@ export default function App() {
                                 {m.os ? ` · ${m.os}` : ""}
                                 {m.arch ? ` · ${m.arch}` : ""}
                                 {m.app ? ` · ${m.app}` : ""}
+                                {` · ${normalizeMachineExecPolicy(m.exec_policy) === "allow" ? "始终允许" : normalizeMachineExecPolicy(m.exec_policy) === "ask" ? "每次询问" : "不允许"}`}
                                 {m.last_seen ? ` · 最近 ${m.last_seen}` : ""}
                               </div>
                             </div>
@@ -4300,12 +4447,13 @@ export default function App() {
                                       const name = renameDraft.trim();
                                       if (!name) return;
                                       setMachinesBusy(true);
-                                      void updateMachineLabel(m.id, name)
+                                      void updateMachine(m.id, { label: name })
                                         .then((updated) => {
                                           setMachinesMsg(`已重命名为 ${updated.label}`);
                                           setRenamingMachineId(null);
                                           if (getStoredMachineId() === m.id) {
                                             setDeviceDisplayName(updated.label);
+                                            setCurrentMachineDraft(updated.label);
                                           }
                                           return refreshMachines();
                                         })

@@ -164,6 +164,41 @@ export async function fetchMe(): Promise<User> {
   return res.json();
 }
 
+export type AutoReviewRule = {
+  id: string;
+  when: string;
+  action: "ask_first" | "auto_allow";
+};
+
+export type UserSettings = {
+  user_id?: string;
+  timezone: string;
+  auto_review_enabled: boolean;
+  auto_review_rules: AutoReviewRule[];
+  updated_at?: string;
+};
+
+export async function fetchUserSettings(): Promise<UserSettings> {
+  const res = await fetch(`${API_BASE}/v1/me/settings`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function updateUserSettings(body: {
+  timezone?: string;
+  auto_review_enabled?: boolean;
+  auto_review_rules?: AutoReviewRule[];
+}): Promise<UserSettings> {
+  const res = await fetch(`${API_BASE}/v1/me/settings`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+
 export async function listAgents(): Promise<Agent[]> {
   const res = await fetch(`${API_BASE}/v1/agents`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));
@@ -1491,6 +1526,8 @@ export type Machine = {
   status: "online" | "offline" | string;
   last_seen: string;
   file_op_count?: number;
+  /** allow | ask | deny — bot may run host ops on this machine (Auto-review still applies). */
+  exec_policy?: "allow" | "ask" | "deny" | string;
   connected?: boolean;
   created_at: string;
   updated_at?: string;
@@ -1533,10 +1570,17 @@ export async function heartbeatMachine(id: string): Promise<Machine> {
 }
 
 export async function updateMachineLabel(id: string, label: string): Promise<Machine> {
+  return updateMachine(id, { label });
+}
+
+export async function updateMachine(
+  id: string,
+  body: { label?: string; exec_policy?: "allow" | "ask" | "deny" | string },
+): Promise<Machine> {
   const res = await fetch(`${API_BASE}/v1/machines/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ label }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await readError(res));
   const data = (await res.json()) as { machine: Machine };

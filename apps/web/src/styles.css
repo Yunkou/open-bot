@@ -2588,3 +2588,196 @@ button.ghost {
   align-items: center;
   gap: 8px;
 }
+
+/* ---- General → Bot / Computer settings (Grok-aligned) ---- */
+.bot-general-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.bot-settings-row {
+  align-items: flex-start;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.bot-settings-row:last-child {
+  border-bottom: none;
+}
+
+.bot-settings-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.bot-settings-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #9ca3af;
+}
+
+.bot-settings-select {
+  min-width: 160px;
+  max-width: 220px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.bot-settings-toggle-row {
+  align-items: center;
+}
+
+.bot-settings-switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.bot-settings-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.bot-settings-switch-ui {
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: #d1d5db;
+  transition: background 0.15s ease;
+  position: relative;
+}
+
+.bot-settings-switch-ui::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  transition: transform 0.15s ease;
+}
+
+.bot-settings-switch input:checked + .bot-settings-switch-ui {
+  background: var(--accent);
+}
+
+.bot-settings-switch input:checked + .bot-settings-switch-ui::after {
+  transform: translateX(18px);
+}
+
+.bot-settings-switch input:disabled + .bot-settings-switch-ui {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bot-review-rules {
+  padding: 12px 4px 4px;
+}
+
+.bot-rule-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.bot-rule-label {
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bot-rule-when {
+  flex: 1 1 160px;
+  min-width: 140px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.bot-rule-action {
+  min-width: 110px;
+}
+
+.bot-rule-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-rule-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+  font-size: 13px;
+}
+
+.bot-rule-item-when {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-rule-item-action {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.bot-machine-name-edit {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bot-machine-name-edit input {
+  min-width: 140px;
+  max-width: 200px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

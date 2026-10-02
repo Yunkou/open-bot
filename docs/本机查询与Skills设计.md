@@ -85,7 +85,14 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 
 实现：`classifyHostExecReview` — `services/api/.../readonly_shell.go` 与 `apps/web/src/lib/hostExec.ts` 镜像（deny → confirm 排除 → auto allowlist）。
 
-- **设置**：桌面「只读免确认 / 风险自动审」可关（localStorage）；关掉后客户端把只读 shell 从 auto 降为 confirm。硬 deny 不受此开关影响。API 对 allowlist 仍可能直接下发（`preconfirmed` 路径）；关开关主要作用在本机二次闸。
+- **设置（通用 → Bot）**：
+  - **时区**：可自动检测或选 IANA（如 Asia/Shanghai）；写入 `user_settings`，聊天 `client.timezone` / 环境块可见。
+  - **自动审核**（默认开）：关则除硬 deny 外一律 confirm。开则先走内置 deny/auto/confirm，再套用户 NL 规则（「先询问」优先于「自动允许」；**不能**覆盖硬 deny）。匹配为关键词/意图（op + 命令预览 + reason），**不是**对话 LLM 自行批准。
+  - **自动审核规则**：`当 bot 想要:` + `它应该: 自动允许|先询问`；仅对当前用户；文案提示内置安全检查始终有效。
+- **设置（电脑）**：
+  - **当前电脑**：可改名并保存（沿用 `PATCH /v1/machines/{id}` label）。
+  - **在这台电脑上执行**：`exec_policy` = `allow`（始终允许，自动审核仍检查）/ `ask`（每次询问）/ `deny`（不允许）。服务端与桌面 WS 闸都会执行。
+- 硬 deny 始终有效，不受自动审核开关 / 用户规则 / exec_policy=ask 影响；`exec_policy=deny` 在审核前直接拒绝。
 - Skill 脚本内容经 `load_skill` 可见，但仍走 **confirm**。
 - 继续截断 stdout（~4k）；`host_ls` 默认 50 + `truncated`/`total`。
 
@@ -98,6 +105,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 | **C 收窄 host_ls** | ✅ `limit`/`sort`/`glob`；默认 50；响应 `truncated`/`total` | 中（兼容） |
 | **D 只读 shell 放行** | ✅ allowlist + 测试；桌面设置项可关 | 中高（安全面） |
 | **D′ Auto-review 档位** | ✅ `auto`/`confirm`/`deny` + `reason` 确认卡；硬拒绝模式；文档 | 中（策略清晰化） |
+| **D″ 用户设置 + 电脑策略** | ✅ 通用→Bot 时区/自动审核/NL 规则；电脑→当前机改名 + exec_policy；API `GET/PUT /v1/me/settings` | 中 |
 
 不建议新增与 `host_shell` 重复的 `host_exec` 名称；对外统一 `host_shell`，对内已是 `op=shell`。
 

@@ -74,6 +74,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/auth/oidc/start", s.handleOIDCStart)
 	mux.HandleFunc("POST /v1/auth/oidc/exchange", s.handleOIDCExchange)
 	mux.HandleFunc("GET /v1/me", s.requireAuth(s.handleMe))
+	mux.HandleFunc("GET /v1/me/settings", s.requireAuth(s.handleGetUserSettings))
+	mux.HandleFunc("PUT /v1/me/settings", s.requireAuth(s.handlePutUserSettings))
 
 	// Admin auth (dedicated; members get 403 — chat users use /v1/auth/login)
 	mux.HandleFunc("POST /v1/admin/auth/login", s.handleAdminLogin)
@@ -1302,6 +1304,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if body.Client != nil {
 			payloadMap["client"] = body.Client
 		}
+		attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
 		recallCtx := &recallPersistContext{
 			UserID:         uid,
 			AgentID:        agentID,

@@ -19,6 +19,7 @@ class ClientContext(BaseModel):
     arch: str = Field(default="")
     app_version: str = Field(default="")
     locale: str = Field(default="")
+    timezone: str = Field(default="")  # IANA; from user settings
     machine_id: str = Field(default="")
     machine_label: str = Field(default="")  # display name of current device
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
@@ -46,6 +47,7 @@ class ClientContext(BaseModel):
                 arch=str(raw.get("arch") or "").strip(),
                 app_version=str(raw.get("app_version") or "").strip(),
                 locale=str(raw.get("locale") or "").strip(),
+                timezone=str(raw.get("timezone") or "").strip(),
                 machine_id=str(raw.get("machine_id") or "").strip(),
                 machine_label=str(
                     raw.get("machine_label") or raw.get("display_name") or ""
@@ -101,11 +103,15 @@ def format_environment_block(
             bits.append(f"version={client.app_version}")
         if client.locale:
             bits.append(f"locale={client.locale}")
+        if client.timezone:
+            bits.append(f"timezone={client.timezone}")
         if display:
             bits.append(f"device={display}")
         if client.machine_id and not is_browser:
             bits.append(f"machine_id={client.machine_id}")
         lines.append("，".join(bits) + "）。")
+        if client.timezone:
+            lines.append(f"用户偏好时区：{client.timezone}（报告时间请用此时区）。")
         lines.append(
             "本机文件只在已连接的电脑上读写；可用绝对路径或 ~/...。"
             "用户点名某台电脑时，用 list_machines 里对应且 connected 的 machine_id（以 label 识别）。"

@@ -104,17 +104,18 @@ func (s *Server) handlePatchMachine(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
 	var body struct {
-		Label *string `json:"label"`
+		Label      *string `json:"label"`
+		ExecPolicy *string `json:"exec_policy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	if body.Label == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label required"})
+	if body.Label == nil && body.ExecPolicy == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "label or exec_policy required"})
 		return
 	}
-	m, err := s.db.UpdateMachineLabel(uid, id, *body.Label)
+	m, err := s.db.UpdateMachine(uid, id, body.Label, body.ExecPolicy)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "machine not found"})
@@ -160,6 +161,7 @@ func (s *Server) handleInternalListMachines(w http.ResponseWriter, r *http.Reque
 			"online":        m.Connected,
 			"connected":     m.Connected,
 			"file_op_count": m.FileOpCount,
+			"exec_policy":   db.NormalizeMachineExecPolicy(m.ExecPolicy),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"machines": slim, "count": len(slim)})
@@ -329,7 +331,21 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	conversationID := strings.TrimSpace(body.ConversationID)
 	preconfirmed := false
 	confirmReqID := ""
-	if denied, rev := hostExecHardDenied(op, body.Path, body.Dest); denied {
+	policy := db.NormalizeMachineExecPolicy(m.ExecPolicy)
+	if policy == db.MachineExecDeny {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": false, "denied": true, "exec_policy": "deny",
+			"error": "「" + m.Label + "」已设置为不允许在这台电脑上执行",
+			"machine_id": mid, "label": m.Label,
+		})
+		return
+	}
+	settings := s.userSettingsOrDefault(uid)
+	if policy == db.MachineExecAsk {
+		// Force confirm for non-deny ops; built-in hard deny still wins below.
+		settings.AutoReviewEnabled = false
+	}
+	if denied, rev := hostExecHardDeniedForUser(op, body.Path, body.Dest, settings); denied {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": false, "denied": true, "auto_review": "deny",
 			"error": rev.Reason, "review_code": rev.Code,
@@ -337,7 +353,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	if hostExecNeedsChatConfirm(op, body.Path, body.Dest) && conversationID != "" {
+	if hostExecNeedsChatConfirmForUser(op, body.Path, body.Dest, settings) && conversationID != "" {
 		preview := ""
 		if op == "shell" || op == "ssh_exec" || op == "write" || op == "ssh_write" {
 			preview = body.Content
@@ -575,7 +591,8 @@ func (s *Server) requestChatHostConfirm(
 	}
 
 	reqID = uuid.NewString()
-	rev := classifyHostExecReview(op, path, dest)
+	settings := s.userSettingsOrDefault(userID)
+	rev := classifyHostExecReviewForUser(op, path, dest, settings)
 	payload := hostConfirmPayload{
 		ReqID:      reqID,
 		Op:         op,

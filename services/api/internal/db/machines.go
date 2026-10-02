@@ -27,6 +27,9 @@ type Machine struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	FileOpCount int64     `json:"file_op_count"`
+	// ExecPolicy: allow | ask | deny — whether the bot may run host ops on this machine.
+	// Auto-review still applies when allow/ask.
+	ExecPolicy string `json:"exec_policy"`
 	// Connected is set by the API from the live exec socket, not stored.
 	Connected bool `json:"connected"`
 }
@@ -52,15 +55,19 @@ func scanMachine(sc interface{ Scan(dest ...any) error }) (Machine, error) {
 	err := sc.Scan(
 		&m.ID, &m.UserID, &m.MachineKey, &m.Label, &m.Platform, &m.OS, &m.Arch,
 		&m.App, &m.AppVersion, &m.Status, &m.LastSeen, &m.CreatedAt, &m.UpdatedAt,
-		&m.FileOpCount,
+		&m.FileOpCount, &m.ExecPolicy,
 	)
+	if err == nil {
+		m.ExecPolicy = NormalizeMachineExecPolicy(m.ExecPolicy)
+	}
 	return m, err
 }
 
 func (d *DB) ListMachines(userID string) ([]Machine, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
-		        status, last_seen, created_at, updated_at, file_op_count
+		        status, last_seen, created_at, updated_at, file_op_count,
+		        COALESCE(exec_policy, 'allow')
 		 FROM user_machines WHERE user_id = $1 ORDER BY last_seen DESC`,
 		userID,
 	)
@@ -84,7 +91,8 @@ func (d *DB) ListMachines(userID string) ([]Machine, error) {
 func (d *DB) GetMachine(userID, id string) (*Machine, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
-		        status, last_seen, created_at, updated_at, file_op_count
+		        status, last_seen, created_at, updated_at, file_op_count,
+		        COALESCE(exec_policy, 'allow')
 		 FROM user_machines WHERE user_id = $1 AND id = $2`,
 		userID, id,
 	)
@@ -225,18 +233,38 @@ func (d *DB) UsualWorkMachine(userID string) (*Machine, error) {
 }
 
 func (d *DB) UpdateMachineLabel(userID, id, label string) (*Machine, error) {
-	name := strings.TrimSpace(label)
-	if name == "" {
-		return nil, errors.New("label required")
+	return d.UpdateMachine(userID, id, &label, nil)
+}
+
+// UpdateMachine patches label and/or exec_policy. At least one field required.
+func (d *DB) UpdateMachine(userID, id string, label, execPolicy *string) (*Machine, error) {
+	if label == nil && execPolicy == nil {
+		return nil, errors.New("label or exec_policy required")
 	}
-	if len([]rune(name)) > 64 {
-		return nil, errors.New("label too long")
+	var name *string
+	if label != nil {
+		n := strings.TrimSpace(*label)
+		if n == "" {
+			return nil, errors.New("label required")
+		}
+		if len([]rune(n)) > 64 {
+			return nil, errors.New("label too long")
+		}
+		name = &n
+	}
+	var policy *string
+	if execPolicy != nil {
+		p := NormalizeMachineExecPolicy(*execPolicy)
+		policy = &p
 	}
 	now := Now()
 	res, err := d.SQL.Exec(
-		`UPDATE user_machines SET label = $1, updated_at = $2
-		 WHERE id = $3 AND user_id = $4`,
-		name, now, id, userID,
+		`UPDATE user_machines SET
+		   label = COALESCE($1, label),
+		   exec_policy = COALESCE($2, exec_policy),
+		   updated_at = $3
+		 WHERE id = $4 AND user_id = $5`,
+		name, policy, now, id, userID,
 	)
 	if err != nil {
 		return nil, err
