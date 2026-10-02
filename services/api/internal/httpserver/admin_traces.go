@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -54,6 +56,12 @@ func loadLangfuseConfig() langfuseConfig {
 }
 
 func (s *Server) langfuseGET(path string, query url.Values) (int, []byte, error) {
+	return s.langfuseRequest(context.Background(), http.MethodGet, path, query, nil)
+}
+
+// langfuseRequest calls Langfuse public API with Basic auth (pk/sk).
+// body may be nil for GET/DELETE-without-body.
+func (s *Server) langfuseRequest(ctx context.Context, method, path string, query url.Values, body []byte) (int, []byte, error) {
 	cfg := loadLangfuseConfig()
 	if !cfg.Configured {
 		return 0, nil, fmt.Errorf("%s", cfg.Reason)
@@ -62,23 +70,143 @@ func (s *Server) langfuseGET(path string, query url.Values) (int, []byte, error)
 	if len(query) > 0 {
 		u = u + "?" + query.Encode()
 	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
 		return 0, nil, err
 	}
 	req.SetBasicAuth(cfg.PublicKey, cfg.SecretKey)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	client := &http.Client{Timeout: 20 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	respBody, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	if err != nil {
 		return res.StatusCode, nil, err
 	}
-	return res.StatusCode, body, nil
+	return res.StatusCode, respBody, nil
+}
+
+const (
+	langfusePurgePageLimit   = 100
+	langfusePurgeMaxPages    = 50
+	langfusePurgeDeleteBatch = 50
+)
+
+// purgeLangfuseUserTraces best-effort deletes Langfuse traces for userID.
+// v4 events_only: list via GET /api/public/v2/observations?userId=… (root),
+// then DELETE /api/public/traces {"traceIds":[…]}. Never fails the caller —
+// returns a status string for side_effects.langfuse (like mem0).
+func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "skipped: empty user"
+	}
+	cfg := loadLangfuseConfig()
+	if !cfg.Configured {
+		reason := cfg.Reason
+		if reason == "" {
+			reason = "not configured"
+		}
+		return "skipped: " + reason
+	}
+
+	now := time.Now().UTC()
+	from := now.Add(-10 * 365 * 24 * time.Hour) // ~10y window; purge should cover history
+	to := now.Add(time.Minute)
+	cursor := ""
+	deleted := 0
+	seen := map[string]struct{}{}
+
+	for page := 0; page < langfusePurgeMaxPages; page++ {
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(langfusePurgePageLimit))
+		q.Set("fields", "core,basic,trace_context")
+		q.Set("isRootObservation", "true")
+		q.Set("userId", userID)
+		q.Set("fromStartTime", from.Format(time.RFC3339))
+		q.Set("toStartTime", to.Format(time.RFC3339))
+		if cursor != "" {
+			q.Set("cursor", cursor)
+		}
+
+		code, body, err := s.langfuseRequest(ctx, http.MethodGet, "/api/public/v2/observations", q, nil)
+		if err != nil {
+			if deleted > 0 {
+				return fmt.Sprintf("partial: deleted=%d list_err=%s", deleted, err.Error())
+			}
+			return "unreachable: " + err.Error()
+		}
+		if code < 200 || code >= 300 {
+			msg := truncateStr(string(body), 200)
+			if deleted > 0 {
+				return fmt.Sprintf("partial: deleted=%d list_http=%d %s", deleted, code, msg)
+			}
+			return fmt.Sprintf("list HTTP %d: %s", code, msg)
+		}
+
+		var raw map[string]any
+		if err := json.Unmarshal(body, &raw); err != nil {
+			if deleted > 0 {
+				return fmt.Sprintf("partial: deleted=%d parse_err=%s", deleted, err.Error())
+			}
+			return "parse error: " + err.Error()
+		}
+		data, _ := raw["data"].([]any)
+		batchIDs := make([]string, 0, len(data))
+		for _, item := range data {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			traceID, _ := row["traceId"].(string)
+			traceID = strings.TrimSpace(traceID)
+			if traceID == "" {
+				continue
+			}
+			if _, ok := seen[traceID]; ok {
+				continue
+			}
+			seen[traceID] = struct{}{}
+			batchIDs = append(batchIDs, traceID)
+		}
+
+		for i := 0; i < len(batchIDs); i += langfusePurgeDeleteBatch {
+			end := i + langfusePurgeDeleteBatch
+			if end > len(batchIDs) {
+				end = len(batchIDs)
+			}
+			chunk := batchIDs[i:end]
+			payload, _ := json.Marshal(map[string]any{"traceIds": chunk})
+			dCode, dBody, dErr := s.langfuseRequest(ctx, http.MethodDelete, "/api/public/traces", nil, payload)
+			if dErr != nil {
+				return fmt.Sprintf("partial: deleted=%d delete_err=%s", deleted, dErr.Error())
+			}
+			if dCode < 200 || dCode >= 300 {
+				return fmt.Sprintf("partial: deleted=%d delete_http=%d %s", deleted, dCode, truncateStr(string(dBody), 200))
+			}
+			deleted += len(chunk)
+		}
+
+		meta, _ := raw["meta"].(map[string]any)
+		next, _ := meta["cursor"].(string)
+		next = strings.TrimSpace(next)
+		if next == "" || len(data) == 0 {
+			break
+		}
+		cursor = next
+	}
+
+	return fmt.Sprintf("purged:%d", deleted)
 }
 
 // buildLangfuseTraceURL returns the Langfuse v4 UI deep link for a trace.

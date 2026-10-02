@@ -138,7 +138,7 @@ export default function UsersPage() {
         <Popconfirm
           key="purge"
           title="删除该用户全部业务数据，保留账号"
-          description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量与运行环境文件等；密码/角色/组织保留。此操作不可恢复。"
+          description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量、运行环境文件与 Langfuse 调用追踪等；密码/角色/组织保留。此操作不可恢复。"
           okText="确认清空业务数据"
           okButtonProps={{ danger: true }}
           onConfirm={async () => {
@@ -213,7 +213,7 @@ export default function UsersPage() {
               <>
                 <Paragraph type="secondary">
                   创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。删除为软删除：用户及其 Bot
-                  会从列表消失，行仍留在数据库里。「清空业务数据」会硬删除该用户全部业务数据并保留账号（密码/角色/组织不变）。
+                  会从列表消失，行仍留在数据库里。「清空业务数据」会硬删除该用户全部业务数据（含 Langfuse 追踪，尽力）并保留账号（密码/角色/组织不变）。
                 </Paragraph>
                 <ProTable<AdminUser>
                   headerTitle="用户"
@@ -367,7 +367,7 @@ export default function UsersPage() {
                     <div style={{ marginTop: 16 }}>
                       <Popconfirm
                         title="删除该用户全部业务数据，保留账号"
-                        description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量与运行环境文件等；密码/角色/组织保留。此操作不可恢复。"
+                        description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量、运行环境文件与 Langfuse 调用追踪等；密码/角色/组织保留。此操作不可恢复。"
                         okText="确认清空业务数据"
                         okButtonProps={{ danger: true }}
                         onConfirm={async () => {

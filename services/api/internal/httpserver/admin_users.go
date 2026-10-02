@@ -482,12 +482,12 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 	side := s.purgeUserSideEffects(r, target.ID)
 
 	s.writeAudit(admin.OrgID, admin.ID, "user.purge_data", "user", target.ID, map[string]any{
-		"username":    target.Username,
-		"role":        target.Role,
-		"agent_ids":   result.AgentIDs,
-		"counts":      result.Counts,
+		"username":     target.Username,
+		"role":         target.Role,
+		"agent_ids":    result.AgentIDs,
+		"counts":       result.Counts,
 		"side_effects": side,
-		"kept":        []string{"users.row", "password_hash", "role", "org_id", "email", "casdoor_sub", "audit_logs"},
+		"kept":         []string{"users.row", "password_hash", "role", "org_id", "email", "casdoor_sub", "audit_logs"},
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -505,6 +505,7 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 			"inbound_hooks", "llm_connections", "user_skills", "user_skill_files",
 			"user_skill_package_files", "a2a_tasks", "a2a_push_configs", "org_invites(created)",
 			"attachments(uploads)", "运行环境(host data)", "mem0(best-effort)",
+			"langfuse traces(best-effort)",
 		},
 		"kept": []string{
 			"users 账号行", "password_hash", "role", "org_id", "email", "casdoor_sub", "created_at",
@@ -539,6 +540,7 @@ func (s *Server) purgeUserSideEffects(r *http.Request, userID string) map[string
 	}
 
 	out["mem0"] = s.purgeRuntimeMem0(r, userID)
+	out["langfuse"] = s.purgeLangfuseUserTraces(r.Context(), userID)
 	return out
 }
 
