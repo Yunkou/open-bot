@@ -167,3 +167,105 @@ func TestPurgeUserDataRejectsMissing(t *testing.T) {
 		t.Fatal("expected not found")
 	}
 }
+
+// TestPurgeThenSoftDeleteOrdering mirrors admin delete: wipe business data while
+// the account is live, then soft-delete. Reverse order is impossible because
+// PurgeUserData rejects deleted_at IS NOT NULL.
+func TestPurgeThenSoftDeleteOrdering(t *testing.T) {
+	d, err := Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	userID := uuid.NewString()
+	username := "delpurge-" + userID[:8]
+	if _, err := d.SQL.Exec(`
+INSERT INTO users (id, username, password_hash, org_id, role, email, created_at)
+VALUES ($1, $2, 'hash', $3, $4, $5, $6)
+`, userID, username, org.ID, RoleMember, username+"@example.com", Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id = $1`, userID)
+	})
+
+	agentID := uuid.NewString()
+	convID := uuid.NewString()
+	if _, err := d.SQL.Exec(`
+INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, created_at, updated_at)
+VALUES ($1,$2,'bot','','',FALSE,$3,$3)`, agentID, userID, Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SQL.Exec(`
+INSERT INTO conversations (id, user_id, agent_id, title) VALUES ($1,$2,$3,'t')`, convID, userID, agentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SQL.Exec(`
+INSERT INTO memories (id, user_id, tier, content) VALUES ($1,$2,'note','fact')`, uuid.NewString(), userID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Soft-delete first would block purge — prove ordering constraint.
+	softID := uuid.NewString()
+	if _, err := d.SQL.Exec(`
+INSERT INTO users (id, username, password_hash, org_id, role, deleted_at, created_at)
+VALUES ($1,$2,'x',$3,$4,$5,$5)`, softID, "soft-"+softID[:8], org.ID, RoleMember, Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.SQL.Exec(`DELETE FROM users WHERE id = $1`, softID) })
+	if _, err := d.PurgeUserData(softID); err == nil {
+		t.Fatal("expected purge to reject already soft-deleted user")
+	}
+
+	purge, err := d.PurgeUserData(userID)
+	if err != nil {
+		t.Fatalf("purge while live: %v", err)
+	}
+	if len(purge.AgentIDs) != 1 || purge.AgentIDs[0] != agentID {
+		t.Fatalf("unexpected agent ids: %#v", purge.AgentIDs)
+	}
+
+	var memCount, agentCount int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM memories WHERE user_id = $1`, userID).Scan(&memCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM agents WHERE user_id = $1`, userID).Scan(&agentCount); err != nil {
+		t.Fatal(err)
+	}
+	if memCount != 0 || agentCount != 0 {
+		t.Fatalf("business data remain after purge: memories=%d agents=%d", memCount, agentCount)
+	}
+
+	agentIDs, err := d.SoftDeleteUser(userID)
+	if err != nil {
+		t.Fatalf("soft-delete after purge: %v", err)
+	}
+	if len(agentIDs) != 0 {
+		t.Fatalf("expected no agents left to soft-delete, got %#v", agentIDs)
+	}
+
+	var deletedAt *time.Time
+	var hash, role string
+	if err := d.SQL.QueryRow(`
+SELECT deleted_at, password_hash, role FROM users WHERE id = $1`, userID).Scan(&deletedAt, &hash, &role); err != nil {
+		t.Fatal(err)
+	}
+	if deletedAt == nil {
+		t.Fatal("expected users.deleted_at set after soft-delete")
+	}
+	if hash != "hash" || role != RoleMember {
+		t.Fatalf("account fields should stay: hash=%q role=%q", hash, role)
+	}
+
+	// Cannot purge again after soft-delete.
+	if _, err := d.PurgeUserData(userID); err == nil {
+		t.Fatal("expected second purge to fail on soft-deleted user")
+	}
+}
+

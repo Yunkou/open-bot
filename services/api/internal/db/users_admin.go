@@ -54,6 +54,8 @@ WHERE id = $1 AND LOWER(username) <> LOWER($3) AND deleted_at IS NULL
 // SoftDeleteUser marks a user and all of its agents as deleted, and disables the
 // user's routines, in one transaction. Rows stay in the database for audit.
 // Returns the ids of the cascaded agents so the caller can record them.
+// Admin HTTP delete calls PurgeUserData first (while the account is live); after
+// a full purge this typically only sets users.deleted_at (agents already gone).
 // Caller must enforce safeguards (self, last platform_admin, __a2a__, same org).
 func (d *DB) SoftDeleteUser(userID string) ([]string, error) {
 	tx, err := d.SQL.Begin()

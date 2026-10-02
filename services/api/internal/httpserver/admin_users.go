@@ -240,7 +240,7 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	agentIDs, err := s.db.SoftDeleteUser(target.ID)
+	agentIDs, purge, side, err := s.purgeThenSoftDeleteUser(r, target.ID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "用户不存在"})
@@ -249,13 +249,20 @@ func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	s.abortUserTasks(target.ID)
-	s.writeAudit(admin.OrgID, admin.ID, "user.delete", "user", target.ID, map[string]any{
+	audit := map[string]any{
 		"username":  target.Username,
 		"role":      target.Role,
 		"agent_ids": agentIDs,
 		"soft":      true,
-	})
+		"purged":    true,
+	}
+	if purge != nil {
+		audit["counts"] = purge.Counts
+	}
+	if side != nil {
+		audit["side_effects"] = side
+	}
+	s.writeAudit(admin.OrgID, admin.ID, "user.delete", "user", target.ID, audit)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -351,7 +358,7 @@ func (s *Server) handleAdminBatchDeleteUsers(w http.ResponseWriter, r *http.Requ
 
 	deleted := make([]map[string]any, 0, len(eligible))
 	for _, target := range eligible {
-		agentIDs, err := s.db.SoftDeleteUser(target.ID)
+		agentIDs, purge, side, err := s.purgeThenSoftDeleteUser(r, target.ID)
 		if err != nil {
 			msg := err.Error()
 			if errors.Is(err, db.ErrNotFound) {
@@ -360,18 +367,26 @@ func (s *Server) handleAdminBatchDeleteUsers(w http.ResponseWriter, r *http.Requ
 			failed = append(failed, adminDeleteFailure{ID: target.ID, Error: msg})
 			continue
 		}
-		s.abortUserTasks(target.ID)
-		s.writeAudit(admin.OrgID, admin.ID, "user.delete", "user", target.ID, map[string]any{
+		audit := map[string]any{
 			"username":  target.Username,
 			"role":      target.Role,
 			"agent_ids": agentIDs,
 			"soft":      true,
+			"purged":    true,
 			"batch":     true,
-		})
+		}
+		if purge != nil {
+			audit["counts"] = purge.Counts
+		}
+		if side != nil {
+			audit["side_effects"] = side
+		}
+		s.writeAudit(admin.OrgID, admin.ID, "user.delete", "user", target.ID, audit)
 		deleted = append(deleted, map[string]any{
 			"id":        target.ID,
 			"username":  target.Username,
 			"agent_ids": agentIDs,
+			"purged":    true,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -431,6 +446,30 @@ func (s *Server) handleAdminDeleteUserMachine(w http.ResponseWriter, r *http.Req
 		"machine_id": machineID,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// purgeThenSoftDeleteUser clears business data the same way as purge-data while
+// the account is still live, then soft-deletes the users row (and any remaining
+// agents). Fail closed: if PurgeUserData fails, SoftDeleteUser is not called.
+// Side effects (runtime home, uploads, mem0, Langfuse) are best-effort and share
+// purgeUserSideEffects with the purge-data handler.
+func (s *Server) purgeThenSoftDeleteUser(r *http.Request, userID string) (agentIDs []string, purge *db.UserDataPurgeResult, side map[string]any, err error) {
+	s.abortUserTasks(userID)
+
+	purge, err = s.db.PurgeUserData(userID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	side = s.purgeUserSideEffects(r, userID)
+
+	_, err = s.db.SoftDeleteUser(userID)
+	if err != nil {
+		// Business data already wiped; surface soft-delete failure so caller can retry.
+		return purge.AgentIDs, purge, side, err
+	}
+	// SoftDeleteUser soft-deletes agents if any remain; after hard purge the list is empty.
+	return purge.AgentIDs, purge, side, nil
 }
 
 const purgeDataConfirmToken = "purge-data"

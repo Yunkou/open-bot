@@ -160,13 +160,14 @@ export default function UsersPage() {
         ) : (
           <Popconfirm
             key="del"
-            title="确认软删除该用户？其 Bot 也会一并软删除，数据仍保留在库中。"
-            okText="删除"
+            title="确认删除该用户？此操作不可恢复"
+            description="将清空该用户的会话、记忆、用量、机器、密钥、上传、运行环境、Mem0、Langfuse traces 等业务数据，然后软删除账号（users/agents 行保留 deleted_at 供审计）。删除后无法从管理端恢复。"
+            okText="确认删除（清空数据并软删账号）"
             okButtonProps={{ danger: true }}
             onConfirm={async () => {
               try {
                 await adminDeleteUser(row.id);
-                message.success("已软删除");
+                message.success("已删除（业务数据已清空）");
                 reload();
               } catch (err) {
                 message.error(err instanceof Error ? err.message : String(err));
@@ -212,8 +213,8 @@ export default function UsersPage() {
             children: (
               <>
                 <Paragraph type="secondary">
-                  创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。删除为软删除：用户及其 Bot
-                  会从列表消失，行仍留在数据库里。「清空业务数据」会硬删除该用户全部业务数据（含 Langfuse 追踪，尽力）并保留账号（密码/角色/组织不变）。
+                  创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。「删除」会先清空该用户全部业务数据（会话、记忆、用量、设备、密钥、上传、运行环境、Mem0、Langfuse
+                  traces 等，与「清空业务数据」相同），再软删除账号（users/agents 行保留 deleted_at 供审计）。「清空业务数据」只硬清业务数据并保留可登录账号（密码/角色/组织不变）。
                 </Paragraph>
                 <ProTable<AdminUser>
                   headerTitle="用户"
@@ -230,8 +231,9 @@ export default function UsersPage() {
                   toolBarRender={() => [
                     <Popconfirm
                       key="batch-delete"
-                      title={`确认软删除选中的 ${selectedKeys.length} 个用户？其 Bot 也会一并软删除。`}
-                      okText="删除"
+                      title={`确认删除选中的 ${selectedKeys.length} 个用户？此操作不可恢复`}
+                      description="将对每个用户先清空会话、记忆、用量、机器、密钥、上传、运行环境、Mem0、Langfuse traces 等业务数据，再软删除账号。部分失败时已清空并删除的不会回滚。"
+                      okText="确认批量删除（清空数据并软删账号）"
                       okButtonProps={{ danger: true }}
                       disabled={selectedKeys.length === 0}
                       onConfirm={async () => {
@@ -244,13 +246,13 @@ export default function UsersPage() {
                             const detail = [...new Set(failed.map((f) => f.error))].join("；");
                             if (deleted.length) {
                               message.warning(
-                                `已软删除 ${deleted.length} 个用户，${failed.length} 个未删除：${detail}`,
+                                `已删除 ${deleted.length} 个用户（含数据清空），${failed.length} 个未删除：${detail}`,
                               );
                             } else {
                               message.error(detail || "删除失败");
                             }
                           } else {
-                            message.success(`已软删除 ${deleted.length} 个用户`);
+                            message.success(`已删除 ${deleted.length} 个用户（业务数据已清空）`);
                           }
                           reload();
                         } catch (err) {
