@@ -4,6 +4,7 @@ import {
   Descriptions,
   Drawer,
   Input,
+  Modal,
   Segmented,
   Select,
   Space,
@@ -544,21 +545,30 @@ export default function MemoryPage() {
           },
         ]}
       />
-      <Drawer
+      {/* Content preview: Modal (not nested Drawer) so it stacks above recall Drawer / ProLayout */}
+      <Modal
         title={drawer?.title}
         open={!!drawer}
-        width={560}
-        onClose={() => setDrawer(null)}
+        width={640}
+        footer={null}
+        destroyOnClose
+        zIndex={1200}
+        getContainer={() => document.body}
+        onCancel={() => setDrawer(null)}
       >
-        <Paragraph style={{ whiteSpace: "pre-wrap" }}>{drawer?.body}</Paragraph>
-      </Drawer>
+        <Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>{drawer?.body}</Paragraph>
+      </Modal>
       <Drawer
         title="本轮召回详情"
         open={!!recallDetail || recallDetailLoading}
         width={720}
+        destroyOnClose
+        zIndex={1100}
+        getContainer={() => document.body}
         onClose={() => {
           setRecallDetail(null);
           setRecallDetailLoading(false);
+          setDrawer(null);
         }}
       >
         {recallDetailLoading && <Text type="secondary">加载中…</Text>}
