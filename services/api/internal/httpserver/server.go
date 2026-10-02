@@ -104,6 +104,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("PATCH /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminPatchUser))
 	mux.HandleFunc("DELETE /v1/admin/users/{id}", s.requireOrgAdmin(s.handleAdminDeleteUser))
 	mux.HandleFunc("POST /v1/admin/users/batch-delete", s.requireOrgAdmin(s.handleAdminBatchDeleteUsers))
+	mux.HandleFunc("POST /v1/admin/users/{id}/purge-data", s.requireOrgAdmin(s.handleAdminPurgeUserData))
 
 	mux.HandleFunc("GET /v1/admin/bots", s.requireOrgAdmin(s.handleAdminListBots))
 	mux.HandleFunc("POST /v1/admin/bots", s.requireOrgAdmin(s.handleAdminCreateBot))

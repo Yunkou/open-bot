@@ -471,6 +471,25 @@ export async function adminBatchDeleteUsers(ids: string[]): Promise<{
   return res.json();
 }
 
+export async function adminPurgeUserData(id: string): Promise<{
+  ok: boolean;
+  user_id: string;
+  username: string;
+  agent_ids: string[];
+  counts: Record<string, number>;
+  side_effects?: Record<string, string>;
+  purged?: string[];
+  kept?: string[];
+}> {
+  const res = await fetch(`${API_BASE}/v1/admin/users/${encodeURIComponent(id)}/purge-data`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ confirm: "purge-data" }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function adminListBots(): Promise<{ bots: AdminBot[] }> {
   const res = await fetch(`${API_BASE}/v1/admin/bots`, { headers: authHeaders() });
   if (!res.ok) throw new Error(await readError(res));

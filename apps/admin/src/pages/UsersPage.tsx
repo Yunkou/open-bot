@@ -15,6 +15,7 @@ import {
   adminCreateUser,
   adminDeleteUser,
   adminDeleteUserMachine,
+  adminPurgeUserData,
   adminInviteMember,
   adminListMembers,
   adminListUserMachines,
@@ -102,7 +103,7 @@ export default function UsersPage() {
     {
       title: "操作",
       valueType: "option",
-      width: 260,
+      width: 340,
       render: (_, row) => [
         <a
           key="machines"
@@ -134,6 +135,24 @@ export default function UsersPage() {
         >
           编辑
         </a>,
+        <Popconfirm
+          key="purge"
+          title="删除该用户全部业务数据，保留账号"
+          description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量与运行环境文件等；密码/角色/组织保留。此操作不可恢复。"
+          okText="确认清空业务数据"
+          okButtonProps={{ danger: true }}
+          onConfirm={async () => {
+            try {
+              await adminPurgeUserData(row.id);
+              message.success("已清空业务数据，账号已保留");
+              reload();
+            } catch (err) {
+              message.error(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        >
+          <a style={{ color: "#ff4d4f" }}>清空业务数据</a>
+        </Popconfirm>,
         row.id === user?.id ? (
           <span key="del" style={{ color: "#999" }}>
             删除
@@ -194,7 +213,7 @@ export default function UsersPage() {
               <>
                 <Paragraph type="secondary">
                   创建组织内用户、重置密码、调整角色。系统账号不可见/不可删。删除为软删除：用户及其 Bot
-                  会从列表消失，行仍留在数据库里。
+                  会从列表消失，行仍留在数据库里。「清空业务数据」会硬删除该用户全部业务数据并保留账号（密码/角色/组织不变）。
                 </Paragraph>
                 <ProTable<AdminUser>
                   headerTitle="用户"
@@ -344,6 +363,29 @@ export default function UsersPage() {
                     label="重置密码"
                     placeholder="留空则不修改"
                   />
+                  {editing ? (
+                    <div style={{ marginTop: 16 }}>
+                      <Popconfirm
+                        title="删除该用户全部业务数据，保留账号"
+                        description="将永久删除对话、Bot、记忆、定时任务、设备、密钥、MCP、用量与运行环境文件等；密码/角色/组织保留。此操作不可恢复。"
+                        okText="确认清空业务数据"
+                        okButtonProps={{ danger: true }}
+                        onConfirm={async () => {
+                          try {
+                            await adminPurgeUserData(editing.id);
+                            message.success("已清空业务数据，账号已保留");
+                            setEditOpen(false);
+                            setEditing(null);
+                            reload();
+                          } catch (err) {
+                            message.error(err instanceof Error ? err.message : String(err));
+                          }
+                        }}
+                      >
+                        <Button danger>清空业务数据（保留账号）</Button>
+                      </Popconfirm>
+                    </div>
+                  ) : null}
                 </ModalForm>
               </>
             ),

@@ -448,6 +448,25 @@ func (m *Manager) Stop(ctx context.Context, userID string) error {
 	return nil
 }
 
+// PurgeUserHome stops/removes the container and deletes the entire per-user host
+// data directory (shared/bots/private/checkpoints/workspace). Used by admin
+// user data purge — irreversible for that user's 运行环境 files.
+func (m *Manager) PurgeUserHome(ctx context.Context, userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return fmt.Errorf("user_id required")
+	}
+	_ = m.removeContainer(ctx, m.ContainerName(userID))
+	home := m.UserHomeHost(userID)
+	if home == "" || home == m.Cfg.DataRoot || home == "/" {
+		return fmt.Errorf("refusing to remove unsafe home path")
+	}
+	if err := os.RemoveAll(home); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Destroy stops and removes the container but keeps host data (and takes a checkpoint).
 func (m *Manager) Destroy(ctx context.Context, userID string) error {
 	_, _ = m.Checkpoint(ctx, userID)

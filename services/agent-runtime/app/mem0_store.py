@@ -451,6 +451,24 @@ def add_conversation_bg(
     t.start()
 
 
+
+def delete_all_for_user(user_id: str) -> dict[str, Any]:
+    """Delete all Mem0 memories for user_id. Best-effort; returns status dict."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return {"ok": False, "reason": "user_id required"}
+    m = get_mem0()
+    if m is None:
+        return {"ok": True, "skipped": True, "reason": "mem0 disabled"}
+    try:
+        m.delete_all(user_id=uid)
+        return {"ok": True, "purged": True}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Mem0 delete_all failed user_id=%s: %s", uid, e)
+        return {"ok": False, "reason": str(e)}
+
+
+
 def merge_snippets(
     legacy: list[str],
     mem0_texts: list[str],

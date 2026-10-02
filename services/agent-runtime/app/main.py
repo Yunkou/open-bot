@@ -386,6 +386,16 @@ async def create_memory(body: MemoryCreate) -> dict:
 
 
 
+class MemoryPurge(BaseModel):
+    user_id: str
+
+
+@app.post("/v1/memories/purge")
+async def purge_memories(body: MemoryPurge) -> dict:
+    """Admin/internal: wipe Mem0 auto-memories for a user (account row stays elsewhere)."""
+    return mem0_store.delete_all_for_user(body.user_id)
+
+
 @app.post("/v1/runs")
 async def runs(body: RunRequest, request: Request) -> StreamingResponse:
     return StreamingResponse(
