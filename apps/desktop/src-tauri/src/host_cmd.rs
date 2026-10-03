@@ -6,6 +6,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+/// Bounded host_shell limit. Not infinite: a stuck find -exec is killed with its
+/// process group. API hostExecTimeout (150s) and runtime HOST_EXEC_TIMEOUT_SEC (180s)
+/// must stay strictly above this so they do not cut the tool off first.
+const HOST_SHELL_TIMEOUT_SECS: u64 = 120;
+
 fn home_dir() -> Option<PathBuf> {
     for key in ["HOME", "USERPROFILE"] {
         if let Ok(v) = std::env::var(key) {
@@ -207,7 +212,7 @@ fn run_captured(command: &str) -> Result<Value, String> {
     thread::spawn(move || {
         let _ = tx.send(child.wait_with_output());
     });
-    let output = match rx.recv_timeout(Duration::from_secs(30)) {
+    let output = match rx.recv_timeout(Duration::from_secs(HOST_SHELL_TIMEOUT_SECS)) {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Err(e.to_string()),
         Err(_) => {
@@ -221,7 +226,7 @@ fn run_captured(command: &str) -> Result<Value, String> {
                     .args(["/F", "/T", "/PID", &pid.to_string()])
                     .status();
             }
-            return Err("命令超过 30 秒还没结束".into());
+            return Err(format!("命令超过 {HOST_SHELL_TIMEOUT_SECS} 秒还没结束"));
         }
     };
     let mut text = String::from_utf8_lossy(&output.stdout).to_string();
@@ -306,4 +311,14 @@ pub fn host_device_name() -> Result<String, String> {
         }
     }
     Err("无法读取设备名称".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HOST_SHELL_TIMEOUT_SECS;
+
+    #[test]
+    fn host_shell_timeout_is_120s_and_bounded() {
+        assert_eq!(HOST_SHELL_TIMEOUT_SECS, 120);
+    }
 }

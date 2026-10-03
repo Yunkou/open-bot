@@ -133,6 +133,11 @@ def select_machine(
     }
 
 
+# Desktop host_shell is 120s; API hostExecTimeout is 150s. This HTTP wait must
+# stay strictly above the API so urllib does not cut the tool off first.
+HOST_EXEC_TIMEOUT_SEC = 180.0
+
+
 def exec_host(
     user_id: str,
     machine_id: str,
@@ -148,7 +153,7 @@ def exec_host(
     limit: int | None = None,
     sort: str = "",
     glob: str = "",
-    timeout: float = 100.0,
+    timeout: float = HOST_EXEC_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     uid = (user_id or "").strip()
     mid = (machine_id or "").strip()

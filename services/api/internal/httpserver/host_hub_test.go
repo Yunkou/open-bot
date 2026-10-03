@@ -138,3 +138,13 @@ func TestHostCallDeliversResult(t *testing.T) {
 		t.Fatalf("result %+v", got)
 	}
 }
+
+func TestHostExecTimeoutExceedsDesktopShell(t *testing.T) {
+	const desktopShell = 120 * time.Second
+	if hostExecTimeout <= desktopShell {
+		t.Fatalf("hostExecTimeout=%s must exceed desktop host_shell %s", hostExecTimeout, desktopShell)
+	}
+	if hostConfirmTimeout != 90*time.Second {
+		t.Fatalf("confirm wait changed: %s", hostConfirmTimeout)
+	}
+}

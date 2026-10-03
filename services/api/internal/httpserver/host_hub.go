@@ -12,7 +12,14 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const hostExecTimeout = 90 * time.Second
+// Desktop host_shell kills the process group at 120s (HOST_SHELL_TIMEOUT_SECS).
+// This wait must stay strictly above that so the desktop can return its own
+// timeout error. Runtime HOST_EXEC_TIMEOUT_SEC (180s) must stay above this.
+// Confirm cards use hostConfirmTimeout and are not stretched with the shell.
+const hostExecTimeout = 150 * time.Second
+
+// A person clicking Allow should not inherit the long shell budget.
+const hostConfirmTimeout = 90 * time.Second
 
 var errHostNotConnected = errors.New("machine exec socket is not connected")
 

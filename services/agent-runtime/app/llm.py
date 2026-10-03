@@ -100,6 +100,73 @@ def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
     return "工具已经返回，但我没能整理成可见回复。需要的话我可以换个更窄的命令再试。"
 
 
+# Spoken to the model inside the tool result, not a second hardcoded shell.
+CHEAPER_HOST_RETRY = (
+    "不要重复同一条命令。只重试一次，换更便宜的做法："
+    "如果有 host-file-query skill，先 load_skill host-file-query；"
+    "否则用 find，不要对每个文件 -exec stat。"
+)
+
+_NO_RETRY_HINT = (
+    "没开着",
+    "没有已打开",
+    "有多台电脑",
+    "用户拒绝",
+    "不允许",
+    "写入已关闭",
+    "需要主机名",
+    "需要文件路径",
+    "端口无效",
+)
+
+
+def _timeoutish(err: str) -> bool:
+    folded = err.lower()
+    return (
+        "超时" in err
+        or "timed out" in folded
+        or "timeout" in folded
+        or ("超过" in err and "秒" in err)
+        or "没有在时限内" in err
+    )
+
+
+def guide_tool_result(name: str, result: str) -> str:
+    """On host_shell failure or a host timeout, tell the model to retry once cheaper.
+
+    The agent loop keeps going after this result. Do not start another shell here.
+    """
+    raw = result if isinstance(result, str) else str(result or "")
+    hostish = name == "host_shell" or name.startswith("host_")
+    if not hostish:
+        return raw
+    try:
+        obj = json.loads(raw) if raw.strip() else None
+    except json.JSONDecodeError:
+        obj = None
+    if isinstance(obj, dict):
+        if obj.get("ok") is True and not str(obj.get("error") or "").strip():
+            return raw
+        if obj.get("denied"):
+            return raw
+        err = str(obj.get("error") or "")
+        if any(mark in err for mark in _NO_RETRY_HINT):
+            return raw
+        if name != "host_shell" and not _timeoutish(err):
+            return raw
+        if CHEAPER_HOST_RETRY in err or obj.get("retry") == CHEAPER_HOST_RETRY:
+            return raw
+        out = dict(obj)
+        out["retry"] = CHEAPER_HOST_RETRY
+        out["error"] = f"{err}\n{CHEAPER_HOST_RETRY}" if err else CHEAPER_HOST_RETRY
+        return json.dumps(out, ensure_ascii=False)
+    if name != "host_shell" and not _timeoutish(raw):
+        return raw
+    if not raw.strip() or CHEAPER_HOST_RETRY in raw:
+        return raw
+    return raw.rstrip() + "\n" + CHEAPER_HOST_RETRY
+
+
 SYSTEM_PERSONA_BASE = (
     "你是 open-bot 助手，回答简洁、有帮助，默认使用中文。"
 )
@@ -1085,7 +1152,16 @@ async def run_tool_loop(
                         }
                     )
                 await _checkpoint()
-                result = await tool_handler(name, args)
+                try:
+                    result = await tool_handler(name, args)
+                except Exception as exc:  # noqa: BLE001
+                    # A tool failure must come back as a result so this loop can
+                    # take another tool round. CancelledError is a BaseException.
+                    result = json.dumps(
+                        {"ok": False, "error": str(exc)},
+                        ensure_ascii=False,
+                    )
+                result = guide_tool_result(name, result)
                 if on_status is not None:
                     await on_status(
                         {

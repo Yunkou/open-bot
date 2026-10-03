@@ -11,7 +11,7 @@
 | `list_machines` | 已登记电脑 + `connected` | 小 |
 | `host_ls` | 浅层列目录 | 默认 **50**（最大 200）；`sort`=`mtime|size|name`；可选 `glob`；响应含 `total`/`truncated` |
 | `host_read` | 读文本 | ≤200KB |
-| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；30s；无命令白名单，**看起来会改动或有风险才确认**，硬拒绝始终有效；`terminal=true` 确认；禁 ssh/scp/sftp |
+| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；120s；无命令白名单，**看起来会改动或有风险才确认**，硬拒绝始终有效；`terminal=true` 确认；禁 ssh/scp/sftp |
 | `host_ssh_*` | 远程（先 `load_skill host-ssh`） | 与上类似 |
 | `load_skill` | 加载 `SKILL.md` / `scripts/` **内容** | **不自动执行**脚本；模型再经 `host_shell` / `sandbox_*` 跑 |
 

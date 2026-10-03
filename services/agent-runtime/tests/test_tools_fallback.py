@@ -13,11 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.llm import (  # noqa: E402
+    CHEAPER_HOST_RETRY,
     AutoToolChoiceUnsupported,
     LLMOverride,
+    guide_tool_result,
     is_auto_tool_choice_unsupported,
     run_tool_loop,
 )
+from app.machines import HOST_EXEC_TIMEOUT_SEC  # noqa: E402
 
 
 def _ok(cond: bool, msg: str) -> None:
@@ -240,12 +243,157 @@ async def test_tool_timeout_reasoning_only_is_visible() -> None:
     _ok(calls["n"] == 2, f"no extra completion after think-only (got {calls['n']})")
 
 
+
+def test_host_waits_stay_above_desktop_shell() -> None:
+    """Runtime HTTP must outlast API hostExecTimeout (150s), which outlasts desktop 120s."""
+    _ok(HOST_EXEC_TIMEOUT_SEC > 150, f"runtime wait {HOST_EXEC_TIMEOUT_SEC} cuts before the API")
+
+
+def test_guide_on_timeout_and_shell_error() -> None:
+    timed = guide_tool_result("host_shell", '{"ok": false, "error": "命令超过 120 秒还没结束"}')
+    _ok("不要重复同一条命令" in timed, "timeout says do not repeat")
+    _ok("只重试一次" in timed, "timeout says retry once")
+    _ok("host-file-query" in timed, "timeout names the skill")
+    _ok("-exec stat" in timed, "timeout forbids per-file stat")
+    failed = guide_tool_result("host_shell", '{"ok": false, "error": "启动失败"}')
+    _ok(CHEAPER_HOST_RETRY in failed, "shell error gets the same guidance")
+    ok = guide_tool_result("host_shell", '{"ok": true, "output": "a"}')
+    _ok("不要重复" not in ok, "success is unchanged")
+    denied = guide_tool_result("host_shell", '{"ok": false, "denied": true, "error": "用户拒绝了这次操作"}')
+    _ok("host-file-query" not in denied, "a refusal is not a cheaper-find retry")
+    offline = guide_tool_result("host_shell", '{"ok": false, "error": "应用没开着"}')
+    _ok("host-file-query" not in offline, "offline machine is not a find retry")
+    ls = guide_tool_result("host_ls", '{"ok": false, "error": "没有在时限内完成或确认这次操作"}')
+    _ok("不要重复同一条命令" in ls, "host timeout other than shell still guides")
+    other = guide_tool_result("sandbox_shell", '{"ok": false, "error": "timeout"}')
+    _ok("host-file-query" not in other, "non-host tools are not given the file-query hint")
+
+
+def _shell_call(call_id: str, command: str) -> dict[str, Any]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "host_shell",
+                                "arguments": '{"command": ' + __import__('json').dumps(command) + '}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+
+async def test_timeout_allows_another_tool_round() -> None:
+    """A timed-out host_shell is a result, not the end of the turn."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    seen: list[str] = []
+    ran: list[str] = []
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        n = len(seen) + 1
+        seen.append("tools" if tools else "plain")
+        if n == 1:
+            return _shell_call("call_slow", "find ~/Downloads -exec stat {} \\;")
+        if n == 2:
+            tool_body = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
+            _ok("不要重复同一条命令" in tool_body, "model sees do-not-repeat")
+            _ok("host-file-query" in tool_body, "model sees the skill")
+            _ok("-exec stat" in tool_body, "model sees no per-file stat")
+            _ok(tools is not None, "follow-up round still has tools")
+            return _shell_call("call_cheap", "find ~/Downloads -type f -print")
+        return {"choices": [{"message": {"role": "assistant", "content": "最大的是 a.mp4"}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        ran.append(str(args.get("command") or ""))
+        if len(ran) == 1:
+            return '{"ok": false, "error": "命令超过 120 秒还没结束"}'
+        return '{"ok": true, "output": "a.mp4"}'
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看 Downloads 里最大的文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=4,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell", "host_shell"], f"second tool ran (got {used})")
+    _ok(ran[1] == "find ~/Downloads -type f -print", f"cheaper command (got {ran})")
+    _ok(final == "最大的是 a.mp4", f"turn finished after the retry (got {final!r})")
+    _ok(seen == ["tools", "tools", "tools"], f"did not drop tools after timeout (got {seen})")
+
+
+async def test_tool_exception_still_continues() -> None:
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    calls = {"n": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _shell_call("call_err", "find ~/Downloads -exec stat {} \\;")
+        tool_body = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
+        _ok("boom" in tool_body and "不要重复同一条命令" in tool_body, "exception is a guided result")
+        return {"choices": [{"message": {"role": "assistant", "content": "换个查法失败了，先停一下"}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        raise RuntimeError("boom")
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "查一下"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=4,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"used {used}")
+    _ok(final == "换个查法失败了，先停一下", f"loop survived the exception (got {final!r})")
+    _ok(calls["n"] == 2, f"second round happened (got {calls['n']})")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
     asyncio.run(test_run_tool_loop_fallback())
     asyncio.run(test_run_tool_loop_markup_after_fallback())
     asyncio.run(test_tool_timeout_reasoning_only_is_visible())
+    test_host_waits_stay_above_desktop_shell()
+    test_guide_on_timeout_and_shell_error()
+    asyncio.run(test_timeout_allows_another_tool_round())
+    asyncio.run(test_tool_exception_still_continues())
     print("all passed")
 
 

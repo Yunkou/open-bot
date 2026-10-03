@@ -536,7 +536,7 @@ func (s *Server) waitHostConfirm(
 	userID, conversationID, reqID string,
 	ch <-chan bool,
 ) (allowed bool, err error) {
-	timer := time.NewTimer(hostExecTimeout)
+	timer := time.NewTimer(hostConfirmTimeout)
 	defer timer.Stop()
 	select {
 	case allowed = <-ch:
