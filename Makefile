@@ -1,5 +1,5 @@
 # open-bot local dev helpers
-.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-runtime dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
+.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
 	build-web build-admin sync-mobile dev-mobile-ios open-mobile-android sandbox-image sandbox-image-desktop \
 	stop-api stop-runtime stop-web stop-worker stop-dev \
 	e2e-install e2e e2e-web e2e-admin backfill-embeddings dream-user
@@ -68,6 +68,21 @@ dev-runtime:
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  . .venv/bin/activate && \
 	  uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
+
+# API (go run, same as dev-api) + agent-runtime (uvicorn --reload) in one terminal.
+# Does not start web, admin, or the desktop app. Ctrl+C stops both.
+dev-backend:
+	@set -m; \
+	cleanup() { \
+	  trap - INT TERM EXIT; \
+	  kill -TERM -$$pid_api -$$pid_rt 2>/dev/null || true; \
+	  wait 2>/dev/null || true; \
+	}; \
+	trap cleanup INT TERM EXIT; \
+	$(MAKE) --no-print-directory dev-api & pid_api=$$!; \
+	$(MAKE) --no-print-directory dev-runtime & pid_rt=$$!; \
+	echo "dev-backend: API $(API_ADDR) + runtime :$(RUNTIME_PORT) (Ctrl+C stops both)"; \
+	wait
 
 dev-web:
 	pnpm --dir apps/web dev
