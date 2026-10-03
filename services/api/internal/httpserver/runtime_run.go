@@ -178,7 +178,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
 		_, _ = s.db.AddMessageAt(conv.ID, "summary", pendingSummary, sumAt)
 	}
-	reply := assistant.String()
+	reply := stripThinkTags(assistant.String())
 	if reply != "" {
 		_, _ = s.db.AddMessage(conv.ID, "assistant", reply)
 	}

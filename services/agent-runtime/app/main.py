@@ -24,9 +24,11 @@ from .llm import (
     chat_text,
     normalize_messages,
     openai_config,
+    REASONING_ONLY,
     run_tool_loop,
     sanitize_fake_tool_narration,
     stream_chat_tokens,
+    strip_think,
     tools_enabled,
 )
 from .tool_markup import strip_tool_markup
@@ -1180,7 +1182,10 @@ async def openai_path(
             if used_tools:
                 yield sse("meta", {"tools_used": used_tools})
             assistant_parts: list[str] = []
-            if not final:
+            if final == REASONING_ONLY:
+                # Reasoning tags only — do not start a second completion, do not emit them.
+                final = ""
+            elif not final:
                 # Streaming fallback: most OpenAI-compatible gateways omit usage
                 # on SSE chunks unless stream_options.include_usage is set; we
                 # leave usage_details as returned from the (empty) tool loop.
@@ -1191,7 +1196,7 @@ async def openai_path(
                         raise asyncio.CancelledError()
                     assistant_parts.append(text)
                 streamed = "".join(assistant_parts)
-                streamed = strip_tool_markup(streamed)
+                streamed = strip_think(strip_tool_markup(streamed))
                 if not tools_on:
                     streamed = sanitize_fake_tool_narration(streamed)
                 assistant_parts = [streamed] if streamed else []
@@ -1199,7 +1204,7 @@ async def openai_path(
                     yield sse("token", {"text": streamed[i : i + 24]})
                     await asyncio.sleep(0.002)
             else:
-                final = strip_tool_markup(final)
+                final = strip_think(strip_tool_markup(final))
                 if not tools_on:
                     final = sanitize_fake_tool_narration(final)
                 assistant_parts.append(final)

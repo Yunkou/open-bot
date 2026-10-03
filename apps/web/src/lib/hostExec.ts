@@ -689,6 +689,31 @@ export function classifyHostExecReviewForUser(
   return applyUserAutoReview(classifyHostExecReview(op, path, dest), settings, op, path, dest);
 }
 
+/**
+ * Machine exec_policy on top of user Auto-review.
+ * allow + Auto-review on: no confirm card (built-in confirm becomes auto).
+ * A matching 先询问 rule still confirms. Hard deny stays deny.
+ * ask forces confirm except hard deny. deny rejects up front.
+ */
+export function classifyHostExecReviewForMachine(
+  op: string,
+  path = "",
+  dest = "",
+  settings: UserSettings = cachedUserSettings,
+  policy: MachineExecPolicy = cachedExecPolicy,
+): HostExecReview {
+  if (policy === "deny") {
+    return { tier: "deny", reason: "这台电脑已设置为不允许执行", code: "exec_policy_deny" };
+  }
+  const effective = policy === "ask" ? { ...settings, auto_review_enabled: false } : settings;
+  const rev = classifyHostExecReviewForUser(op, path, dest, effective);
+  if (policy !== "allow" || !settings.auto_review_enabled || rev.tier !== "confirm") return rev;
+  const haystack = buildAutoReviewHaystack(op, path, dest, rev.reason);
+  const { ask } = matchUserRules(settings.auto_review_rules || [], haystack);
+  if (ask) return { tier: "confirm", reason: "用户规则：先询问", code: "user_rule_ask_first" };
+  return { tier: "auto", reason: "这台电脑设置为始终允许，自动执行", code: "exec_policy_allow" };
+}
+
 /** Mirror of API classifyHostExecReview — keep in sync with host_exec_review.go. */
 export function classifyHostExecReview(op: string, path = "", dest = ""): HostExecReview {
   const o = op.trim();
@@ -805,24 +830,18 @@ async function probeSsh(req: HostExecRequest): Promise<Record<string, unknown>> 
 
 /** Client Auto-review gate: machine exec_policy + user settings + built-in tiers. */
 function reviewForRequest(req: HostExecRequest): HostExecReview {
-  const policy = cachedExecPolicy;
-  if (policy === "deny") {
-    return {
-      tier: "deny",
-      reason: "这台电脑已设置为不允许执行",
-      code: "exec_policy_deny",
-    };
-  }
   let settings = cachedUserSettings;
-  if (policy === "ask") {
-    settings = { ...settings, auto_review_enabled: false };
-  }
-  // Legacy kill-switch: if localStorage readonly auto is off, treat as auto_review off for shell.
+  // Legacy kill-switch: off forces confirm (same as Auto-review off), even for 始终允许.
   if (!hostShellReadonlyAutoEnabled()) {
     settings = { ...settings, auto_review_enabled: false };
   }
-  const rev = classifyHostExecReviewForUser(req.op, req.path || "", req.dest || "", settings);
-  return rev;
+  return classifyHostExecReviewForMachine(
+    req.op,
+    req.path || "",
+    req.dest || "",
+    settings,
+    cachedExecPolicy,
+  );
 }
 
 async function refineWriteReview(req: HostExecRequest, base: HostExecReview): Promise<HostExecReview> {

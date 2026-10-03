@@ -46,8 +46,14 @@ class LLMOverride:
 
 
 def strip_think(text: str) -> str:
-    """Remove Qwen-style <think>...</think> blocks from model output."""
+    """Remove reasoning tags (<think>, <thinking>, <redacted_thinking>) from model output."""
     return strip_think_tags(text)
+
+
+# Truthy placeholder: the model replied with reasoning only. Callers must not
+# treat this as "no completion" and start another stream (which would leak tags
+# or double-call). Never persist this value.
+REASONING_ONLY = "\u2063"
 
 
 SYSTEM_PERSONA_BASE = (
@@ -458,10 +464,12 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "(find/du/stat/ls, or scripts from load_skill host-file-query). "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
                 "terminal=true only for a local interactive UI. "
-                "Auto-review (deterministic, no LLM self-approval): no command allowlist — "
-                "cd/ls/find/grep/git status and ordinary pipes auto-run when review is on; "
-                "curl|sh / wipe-root hard-deny; redirects, rm/mv/cp, chmod, sudo, git push, "
-                "package install, ssh, kill, and terminal=true still confirm in chat. "
+                "Auto-review (deterministic, no LLM self-approval): no command allowlist. "
+                "Hard deny (curl|sh, rm -rf /, mkfs, writing a block device) fails with no allow card. "
+                "When that computer is 始终允许 (exec_policy=allow) and Auto-review is on, other commands "
+                "including rm/mv/cp and installs run immediately — no confirm card — unless a user rule "
+                "explicitly says 先询问. exec_policy=ask or Auto-review off still confirms mutating commands. "
+                "Do not tell the user to click 允许 unless the tool result is actually waiting. "
                 "Stdout is truncated; keep commands that print short summaries."
             ),
             "parameters": {
@@ -716,7 +724,9 @@ def normalize_messages(
         for m in messages:
             role = str(m.get("role") or "").strip()
             text = str(m.get("content") or "")
-            if role in ("system", "user", "assistant", "summary") and text != "":
+            if role in ("assistant", "summary"):
+                text = strip_think(text)
+            if role in ("system", "user", "assistant", "summary") and text.strip() != "":
                 out.append({"role": role, "content": text})
     if not out and content.strip():
         out.append({"role": "user", "content": content.strip()})
@@ -930,6 +940,8 @@ async def run_tool_loop(
             # Never leak XML/Hermes tool markup when tools are off — strip only.
             final = postprocess_text(strip_think(strip_tool_markup(raw)), profile)
             final = sanitize_fake_tool_narration(final)
+            if raw.strip() and not (final or "").strip():
+                final = REASONING_ONLY
         return final, used, usage_acc
     tools = list(TOOL_DEFS)
     if extra_tools:
@@ -940,6 +952,7 @@ async def run_tool_loop(
     tools_via_markup = False
     markup_hint_added = False
     continued = False
+    reasoning_only = False
     for _ in range(max_rounds):
         await _checkpoint()
         try:
@@ -1049,7 +1062,9 @@ async def run_tool_loop(
         # run has not written or executed anything, the agent is not done.
         # Keep the same run going. Do not classify the sentence.
         final = postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
+        reasoning_only = bool(content_str.strip()) and not (final or "").strip()
         if not continued and turn_unfinished(used, msgs):
+            reasoning_only = False
             continued = True
             if on_status is not None:
                 await on_status(
@@ -1064,6 +1079,7 @@ async def run_tool_loop(
             continue
         host_nudge = host_followup_prompt(used, msgs) if not continued else None
         if host_nudge:
+            reasoning_only = False
             continued = True
             if on_status is not None:
                 await on_status(
@@ -1077,19 +1093,20 @@ async def run_tool_loop(
             final = ""
             continue
         break
-    if not final and msgs:
+    if not final and msgs and not reasoning_only:
         data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)
         _accumulate(data)
         choices = data.get("choices") or []
         if choices:
+            raw_final = str((choices[0].get("message") or {}).get("content") or "")
             final = postprocess_text(
-                strip_think(
-                    strip_tool_markup(
-                        str((choices[0].get("message") or {}).get("content") or "")
-                    )
-                ),
+                strip_think(strip_tool_markup(raw_final)),
                 profile,
             )
+            if raw_final.strip() and not (final or "").strip():
+                reasoning_only = True
+    if reasoning_only and not (final or "").strip():
+        final = REASONING_ONLY
     return final, used, usage_acc
 
 

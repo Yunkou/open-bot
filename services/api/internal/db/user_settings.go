@@ -177,7 +177,7 @@ func normalizeAutoReviewRules(in []AutoReviewRule) ([]AutoReviewRule, error) {
 
 // MachineExecPolicy values for per-machine host permission.
 const (
-	MachineExecAllow = "allow" // 始终允许（Auto-review 仍检查）
+	MachineExecAllow = "allow" // 始终允许：不弹确认卡；硬拒绝仍失败；先询问仍确认
 	MachineExecAsk   = "ask"   // 每次询问
 	MachineExecDeny  = "deny"  // 不允许
 )

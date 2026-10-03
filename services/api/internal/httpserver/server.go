@@ -916,10 +916,10 @@ func (s *Server) handleUploadSkill(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var body struct {
-			Name         string              `json:"name"`
-			Description  string              `json:"description"`
-			BodyMarkdown string              `json:"body_markdown"`
-			Body         string              `json:"body"`
+			Name         string               `json:"name"`
+			Description  string               `json:"description"`
+			BodyMarkdown string               `json:"body_markdown"`
+			Body         string               `json:"body"`
 			Files        []db.SkillFileRecord `json:"files"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, maxSkillUploadBytes)).Decode(&body); err != nil {
@@ -1478,7 +1478,7 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 	reader := bufio.NewReader(resp.Body)
 	for {
 		if err := ctx.Err(); err != nil {
-			return assistant.String(), pendingSummary, usage, err
+			return stripThinkTags(assistant.String()), pendingSummary, usage, err
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -1533,14 +1533,14 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 		if err != nil {
 			if err != io.EOF {
 				if ctx.Err() != nil {
-					return assistant.String(), pendingSummary, usage, ctx.Err()
+					return stripThinkTags(assistant.String()), pendingSummary, usage, ctx.Err()
 				}
-				return assistant.String(), pendingSummary, usage, err
+				return stripThinkTags(assistant.String()), pendingSummary, usage, err
 			}
 			break
 		}
 	}
-	return assistant.String(), pendingSummary, usage, nil
+	return stripThinkTags(assistant.String()), pendingSummary, usage, nil
 }
 
 func isCancelErr(err error) bool {
@@ -1570,7 +1570,14 @@ func historyForRuntime(msgs []db.Message) []runtimeMsg {
 	for _, m := range msgs[start:] {
 		switch m.Role {
 		case "user", "assistant", "summary", "system":
-			out = append(out, runtimeMsg{Role: m.Role, Content: m.Content})
+			content := m.Content
+			if m.Role == "assistant" || m.Role == "summary" {
+				content = stripThinkTags(content)
+				if strings.TrimSpace(content) == "" {
+					continue
+				}
+			}
+			out = append(out, runtimeMsg{Role: m.Role, Content: content})
 		case "host_confirm":
 			if note := hostConfirmRuntimeNote(m.Content); note != "" {
 				// Visible to the model so it does not invent allow/deny outcomes.

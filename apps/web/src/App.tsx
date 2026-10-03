@@ -4262,7 +4262,7 @@ export default function App() {
                             <div className="bot-settings-copy">
                               <div className="bot-settings-title">在这台电脑上执行</div>
                               <div className="bot-settings-desc">
-                                允许 Bot 打开文件、运行本机任务。自动审核仍会先检查；硬危险仍直接拒绝。
+                                始终允许：除硬拒绝（curl|sh、rm -rf /、mkfs）外直接执行，不弹确认卡。用户规则「先询问」命中时仍会确认。
                               </div>
                             </div>
                             <select
@@ -4282,7 +4282,7 @@ export default function App() {
                                   .then(() => {
                                     setMachinesMsg(
                                       policy === "allow"
-                                        ? "已设为始终允许（自动审核仍检查）"
+                                        ? "已设为始终允许（不弹确认卡；硬拒绝仍失败）"
                                         : policy === "ask"
                                           ? "已设为每次询问"
                                           : "已设为不允许在这台电脑执行",

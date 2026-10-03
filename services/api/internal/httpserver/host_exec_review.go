@@ -12,15 +12,17 @@ import (
 //
 //  1. hard deny — clearly dangerous patterns, rejected with no confirm card
 //  2. confirm  — the command line looks mutating or risky
-//  3. auto     — everything else, when Auto-review is on and exec_policy is allow
+//  3. auto     — everything else
 //
 // host_shell has no positive command allowlist. cd, pwd, find, ls, grep, git status,
 // interpreters, and pipes of ordinary tools auto-run unless a risky pattern hits.
 // find -exec/-execdir of a known read-only utility (du, stat, ls, file, md5,
 // shasum, wc, head, tail, cat, echo, or print-only awk) is auto. find -delete,
-// -ok/-okdir, and -exec of anything else stay confirm.
-// Callers force confirm when Auto-review is off or exec_policy is ask.
-// User NL rules (先询问 / 自动允许) are applied in applyUserAutoReview and never override deny.
+// -ok/-okdir, and -exec of anything else stay confirm at the built-in tier.
+// exec_policy=allow and Auto-review on downgrade built-in confirm to auto
+// (no chat card). Hard deny stays deny. A user rule that explicitly says 先询问
+// still confirms. exec_policy=ask or Auto-review off keeps confirm.
+// User NL rules never override deny.
 
 type hostExecReviewTier string
 
@@ -849,6 +851,44 @@ func ruleMatchesHaystack(when, haystack string) bool {
 // classifyHostExecReviewForUser applies built-in tiers then user Auto-review prefs.
 func classifyHostExecReviewForUser(op, path, dest string, settings db.UserSettings) hostExecReview {
 	return applyUserAutoReview(classifyHostExecReview(op, path, dest), settings, op, path, dest)
+}
+
+// classifyHostExecReviewForMachine applies per-machine exec_policy on top of user Auto-review.
+//
+// allow + Auto-review on: no confirm card. Built-in confirm becomes auto.
+// A matching 先询问 rule still confirms. Hard deny stays deny (no Allow card).
+// ask: force confirm (Auto-review off) except hard deny.
+// deny: reject before review.
+func classifyHostExecReviewForMachine(op, path, dest string, settings db.UserSettings, policy string) hostExecReview {
+	policy = db.NormalizeMachineExecPolicy(policy)
+	if policy == db.MachineExecDeny {
+		return hostExecReview{
+			Tier:   hostExecReviewDeny,
+			Reason: "这台电脑已设置为不允许执行",
+			Code:   "exec_policy_deny",
+		}
+	}
+	effective := settings
+	if policy == db.MachineExecAsk {
+		effective.AutoReviewEnabled = false
+	}
+	rev := classifyHostExecReviewForUser(op, path, dest, effective)
+	if policy != db.MachineExecAllow || !settings.AutoReviewEnabled || rev.Tier != hostExecReviewConfirm {
+		return rev
+	}
+	haystack := buildAutoReviewHaystack(op, path, dest, rev.Reason)
+	if ask, _ := matchUserAutoReviewRules(settings.AutoReviewRules, haystack); ask {
+		return hostExecReview{
+			Tier:   hostExecReviewConfirm,
+			Reason: "用户规则：先询问",
+			Code:   "user_rule_ask_first",
+		}
+	}
+	return hostExecReview{
+		Tier:   hostExecReviewAuto,
+		Reason: "这台电脑设置为始终允许，自动执行",
+		Code:   "exec_policy_allow",
+	}
 }
 
 func hostExecNeedsChatConfirmForUser(op, path, dest string, settings db.UserSettings) bool {

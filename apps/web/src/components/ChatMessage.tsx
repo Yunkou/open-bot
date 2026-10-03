@@ -1,4 +1,5 @@
 import type { AttachmentMeta } from "../api";
+import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
 import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
 
@@ -47,7 +48,12 @@ export function ChatMessage({ message, agentId, onHostDecide }: Props) {
   ) : null;
   const speakerId = message.agent_id || agentId;
 
-  if (message.streaming && !message.content && !isUser) {
+  const visible =
+    isUser || message.role === "host_confirm" ? message.content : stripThinkTags(message.content);
+  if (message.streaming && !visible && !isUser) {
+    return null;
+  }
+  if (!isUser && message.role !== "host_confirm" && !message.streaming && !visible.trim()) {
     return null;
   }
 
@@ -76,7 +82,7 @@ export function ChatMessage({ message, agentId, onHostDecide }: Props) {
               ))}
             </div>
           ) : null}
-          {message.content ? <div className="bubble-text">{message.content}</div> : null}
+          {visible ? <div className="bubble-text">{visible}</div> : null}
         </div>
         {timeEl}
       </div>
@@ -88,7 +94,7 @@ export function ChatMessage({ message, agentId, onHostDecide }: Props) {
       <div className="bubble bubble-assistant">
         {isSummary ? <div className="msg-role">摘要</div> : null}
         <ResultOrientedMessage
-          content={message.content}
+          content={visible}
           streaming={message.streaming}
           agentId={speakerId}
         />

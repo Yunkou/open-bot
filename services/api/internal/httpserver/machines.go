@@ -241,8 +241,12 @@ func hostActivityLabel(label, op, path, dest string) string {
 	case "ssh_exec":
 		action = "在远程主机上运行命令"
 	}
-	msg := "正在" + label + "上" + action
-	if hostExecNeedsChatConfirm(op, path, dest) {
+	return "正在" + label + "上" + action
+}
+
+func hostActivityText(label, op, path, dest string, needsConfirm bool) string {
+	msg := hostActivityLabel(label, op, path, dest)
+	if needsConfirm {
 		msg += "。若需要确认，在对话里点允许或拒绝"
 	}
 	return msg
@@ -340,11 +344,9 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	settings := s.userSettingsOrDefault(uid)
-	if policy == db.MachineExecAsk {
-		// exec_policy ask forces confirm. Hard deny still wins.
-		settings.AutoReviewEnabled = false
-	}
-	rev := classifyHostExecReviewForUser(op, body.Path, body.Dest, settings)
+	// allow + Auto-review on: no confirm card (hard deny still deny; 先询问 still confirms).
+	// ask forces confirm. deny already returned above.
+	rev := classifyHostExecReviewForMachine(op, body.Path, body.Dest, settings, policy)
 	if rev.Tier == hostExecReviewDeny {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": false, "denied": true, "auto_review": "deny",
@@ -387,7 +389,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 			"type":       "host_activity",
 			"active":     true,
 			"machine_id": mid,
-			"label":      hostActivityLabel(m.Label, op, body.Path, body.Dest),
+			"label":      hostActivityText(m.Label, op, body.Path, body.Dest, rev.Tier == hostExecReviewConfirm),
 		})
 	}
 	result, err := s.hosts.Call(r.Context(), uid, mid, hostExecRequest{

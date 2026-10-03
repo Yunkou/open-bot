@@ -128,6 +128,12 @@ def test_profiles_and_adapt() -> None:
     cleaned = postprocess_text(text, pq)
     _ok("<think>" not in cleaned and "hello" in cleaned and "world" in cleaned, "strip think")
     _ok(postprocess_text(text, p4) == text, "gpt-4o does not strip think")
+    from app.model_compat import strip_think_tags
+    only = "<think>\nonly reasoning\n</think>"
+    _ok(strip_think_tags(only) == "", "reasoning-only must be empty, not the original tags")
+    _ok(strip_think_tags("a <thinking>b</thinking> c") == "a  c", "thinking tags")
+    _ok(strip_think_tags("<redacted_thinking>hid</redacted_thinking>ok") == "ok", "redacted_thinking")
+    _ok(strip_think_tags("hi <think>no close") == "hi", "unclosed think drops the rest")
 
 
 def test_env_overrides() -> None:
