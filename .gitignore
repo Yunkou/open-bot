@@ -6,6 +6,7 @@
 *.pyc
 *.pyo
 services/api/api
+services/api/tmp/
 *.exe
 .env
 .env.local

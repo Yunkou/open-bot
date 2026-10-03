@@ -1,5 +1,5 @@
 # open-bot local dev helpers
-.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
+.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
 	build-web build-admin sync-mobile dev-mobile-ios open-mobile-android sandbox-image sandbox-image-desktop \
 	stop-api stop-runtime stop-web stop-worker stop-dev \
 	e2e-install e2e e2e-web e2e-admin backfill-embeddings dream-user
@@ -57,6 +57,15 @@ dev-api:
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) go run ./cmd/api
 
+# Live-reload API (no global air install). Config: services/api/.air.toml.
+AIR_VERSION ?= v1.67.4
+
+dev-api-air:
+	cd services/api && \
+	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
+	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) \
+	  go run github.com/air-verse/air@$(AIR_VERSION) -c .air.toml
+
 # Routines worker (optional). Set ROUTINES_INPROCESS=0 on API to avoid double-fire.
 dev-worker:
 	cd services/api && \
@@ -69,7 +78,7 @@ dev-runtime:
 	  . .venv/bin/activate && \
 	  uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 
-# API (go run, same as dev-api) + agent-runtime (uvicorn --reload) in one terminal.
+# API (air hot reload, dev-api-air) + agent-runtime (uvicorn --reload) in one terminal.
 # Does not start web, admin, or the desktop app. Ctrl+C stops both.
 dev-backend:
 	@set -m; \
@@ -79,7 +88,7 @@ dev-backend:
 	  wait 2>/dev/null || true; \
 	}; \
 	trap cleanup INT TERM EXIT; \
-	$(MAKE) --no-print-directory dev-api & pid_api=$$!; \
+	$(MAKE) --no-print-directory dev-api-air & pid_api=$$!; \
 	$(MAKE) --no-print-directory dev-runtime & pid_rt=$$!; \
 	echo "dev-backend: API $(API_ADDR) + runtime :$(RUNTIME_PORT) (Ctrl+C stops both)"; \
 	wait
