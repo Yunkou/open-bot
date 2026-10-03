@@ -169,11 +169,83 @@ async def test_run_tool_loop_markup_after_fallback() -> None:
     _ok(calls[0]["tools"] is not None and calls[1]["tools"] is None, "fallback then markup")
 
 
+async def test_tool_timeout_reasoning_only_is_visible() -> None:
+    """A timed-out tool plus a think-only follow-up must not end the turn blank."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    calls = {"n": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "host_shell",
+                                        "arguments": '{"command":"find ~/Downloads -exec stat {} \\;"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>命令超时了，换更快的 find</think>",
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32},
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        _ok(name == "host_shell", f"tool name {name}")
+        return '{"ok": false, "error": "命令超过 30 秒还没结束"}'
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看最不常用的大文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=4,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"used {used}")
+    _ok(final and "<think>" not in final, f"visible fallback (got {final!r})")
+    _ok("超过时限" in final, f"timeout strategy text (got {final!r})")
+    _ok(calls["n"] == 2, f"no extra completion after think-only (got {calls['n']})")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
     asyncio.run(test_run_tool_loop_fallback())
     asyncio.run(test_run_tool_loop_markup_after_fallback())
+    asyncio.run(test_tool_timeout_reasoning_only_is_visible())
     print("all passed")
 
 

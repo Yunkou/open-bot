@@ -56,6 +56,50 @@ def strip_think(text: str) -> str:
 REASONING_ONLY = "\u2063"
 
 
+def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
+    """Visible reply when tools already ran but the model left no user-facing text.
+
+    A timed-out or failed tool result is already in the thread. Dropping a
+    reasoning-only follow-up used to end the turn with an empty assistant
+    message. Say what happened instead of staying silent.
+    """
+    err = ""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        raw = str(message.get("content") or "")
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict):
+            err = str(obj.get("error") or "").strip()
+            if not err and obj.get("ok") is False:
+                err = "工具失败"
+        elif raw.strip():
+            err = raw.strip()
+        break
+    folded = err.lower()
+    timed_out = (
+        "超时" in err
+        or "timed out" in folded
+        or "timeout" in folded
+        or ("超过" in err and "秒" in err)
+        or "没有在时限内" in err
+    )
+    if timed_out:
+        return (
+            "刚才的命令超过时限被停掉了，所以这次没有查完。"
+            "我可以改成更快的查法再试，比如只看目录顶层，或用 du 取最大的几条摘要。"
+        )
+    if err:
+        short = " ".join(err.split())
+        if len(short) > 180:
+            short = short[:180] + "…"
+        return f"工具没有成功：{short}。需要的话我可以换个更窄的命令再试。"
+    return "工具已经返回，但我没能整理成可见回复。需要的话我可以换个更窄的命令再试。"
+
+
 SYSTEM_PERSONA_BASE = (
     "你是 open-bot 助手，回答简洁、有帮助，默认使用中文。"
 )
@@ -1106,7 +1150,11 @@ async def run_tool_loop(
             if raw_final.strip() and not (final or "").strip():
                 reasoning_only = True
     if reasoning_only and not (final or "").strip():
-        final = REASONING_ONLY
+        # Tools already returned (including a timeout). Do not hide that behind
+        # an empty turn just because the follow-up was reasoning tags only.
+        final = tool_result_fallback(msgs) if used else REASONING_ONLY
+    elif used and not (final or "").strip():
+        final = tool_result_fallback(msgs)
     return final, used, usage_acc
 
 
