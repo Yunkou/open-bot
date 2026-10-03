@@ -80,7 +80,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 | 档位 `review_tier` | 含义 | 典型例子 |
 |--------------------|------|----------|
 | **auto** | 自动放行，不弹确认卡 | `host_ls` / `host_read` / `host_ssh_ls|read` / `host_open`；`host_shell` 未命中风险模式（含 `cd`/`pwd`/`ls`/`find`/`grep`、`git status`、普通管道）。需 Auto-review 开且该机 `exec_policy=allow` |
-| **confirm** | 对话确认卡（任意已登录端可点「允许/拒绝」）；卡上展示 `reason` | 写/删/移、`terminal=true`、全部 `host_ssh_write|delete|exec`；shell 看起来会改动或有风险：重定向到文件（`/dev/null` 除外）、`rm`/`mv`/`cp`、`chmod`/`chown`、`sudo`、`git push`、`curl`/`wget`、`ssh`、`kill`、装包、命令替换、`find -delete`/`-exec`、`tee` 写文件。Auto-review 关或 `exec_policy=ask` 时，本可 auto 的也改为 confirm |
+| **confirm** | 对话确认卡（任意已登录端可点「允许/拒绝」）；卡上展示 `reason` | 写/删/移、`terminal=true`、全部 `host_ssh_write|delete|exec`；shell 看起来会改动或有风险：重定向到文件（`/dev/null` 除外）、`rm`/`mv`/`cp`、`chmod`/`chown`、`sudo`、`git push`、`curl`/`wget`、`ssh`、`kill`、装包、命令替换、`find -delete`、`find -exec`/`-execdir` 非只读命令（只读 `du`/`stat`/`ls`/`file`/`md5`/`shasum`/`wc`/`head`/`tail`/`cat`/`echo` 与只打印的 `awk` 仍 auto）、`tee` 写文件。Auto-review 关或 `exec_policy=ask` 时，本可 auto 的也改为 confirm |
 | **deny** | Auto-review **硬拒绝**（不弹允许卡、不执行） | `curl\|sh` / 管道进 shell、`rm -rf /`、fork bomb、`mkfs`、写块设备、`dd if=` |
 
 实现：`classifyHostExecReview` — `services/api/.../host_exec_review.go` 与 `apps/web/src/lib/hostExec.ts` 镜像（硬拒绝 → 风险确认 → 其余 auto）。没有正向命令白名单。

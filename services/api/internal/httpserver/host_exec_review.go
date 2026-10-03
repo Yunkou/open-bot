@@ -16,6 +16,9 @@ import (
 //
 // host_shell has no positive command allowlist. cd, pwd, find, ls, grep, git status,
 // interpreters, and pipes of ordinary tools auto-run unless a risky pattern hits.
+// find -exec/-execdir of a known read-only utility (du, stat, ls, file, md5,
+// shasum, wc, head, tail, cat, echo, or print-only awk) is auto. find -delete,
+// -ok/-okdir, and -exec of anything else stay confirm.
 // Callers force confirm when Auto-review is off or exec_policy is ask.
 // User NL rules (先询问 / 自动允许) are applied in applyUserAutoReview and never override deny.
 
@@ -41,7 +44,7 @@ var shellConfirmSubstrings = []string{
 	"$(", "\x60",
 	"$((",
 	"<<",
-	" -exec", "-exec ", "-ok ", " -ok", "-delete",
+	"-delete",
 	"sudo", "doas", " pkexec",
 	"|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
 	"|fish", "| fish",
@@ -237,11 +240,168 @@ func hostOpNeedsConfirm(op string) bool {
 	}
 }
 
+// find -exec/-execdir utilities that only read. Anything else confirms.
+var findExecReadonlyBins = map[string]struct{}{
+	"du": {}, "stat": {}, "ls": {}, "file": {},
+	"md5": {}, "shasum": {},
+	"wc": {}, "head": {}, "tail": {}, "cat": {}, "echo": {},
+}
+
+// findExecBlocksAuto is true when a find -exec/-execdir/-ok cannot be proven
+// read-only. Unterminated or unknown utilities confirm. -delete is separate.
+func findExecBlocksAuto(command string) bool {
+	words := scanShellWords(command)
+	for i := 0; i < len(words); i++ {
+		switch strings.ToLower(words[i]) {
+		case "-ok", "-okdir":
+			return true
+		case "-exec", "-execdir":
+			if !readonlyFindExec(words, i) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readonlyFindExec(words []string, i int) bool {
+	if i+1 >= len(words) {
+		return false
+	}
+	util := strings.ToLower(filepath.Base(words[i+1]))
+	for j := i + 2; j < len(words); j++ {
+		if words[j] != "{}" {
+			continue
+		}
+		if j+1 >= len(words) {
+			return false
+		}
+		term := words[j+1]
+		if term != "+" && term != ";" {
+			return false
+		}
+		args := words[i+2 : j]
+		if util == "awk" {
+			return awkExecPrintOnly(args)
+		}
+		_, ok := findExecReadonlyBins[util]
+		return ok
+	}
+	return false
+}
+
+func awkExecPrintOnly(args []string) bool {
+	sawProgram := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			if i+1 >= len(args) {
+				return false
+			}
+			return awkProgramSafe(args[i+1])
+		}
+		if a == "-f" || strings.HasPrefix(a, "--file") {
+			return false
+		}
+		if a == "--source" {
+			if i+1 >= len(args) || !awkProgramSafe(args[i+1]) {
+				return false
+			}
+			sawProgram = true
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			if (a == "-v" || a == "-F" || a == "-E") && !strings.Contains(a, "=") {
+				i++
+			}
+			continue
+		}
+		if !sawProgram {
+			if !awkProgramSafe(a) {
+				return false
+			}
+			sawProgram = true
+		}
+	}
+	return sawProgram
+}
+
+func awkProgramSafe(prog string) bool {
+	lower := strings.ToLower(prog)
+	if !strings.Contains(lower, "print") {
+		return false
+	}
+	for _, bad := range []string{"system", "getline", "delete", "|", ">", "<", "close"} {
+		if strings.Contains(lower, bad) {
+			return false
+		}
+	}
+	return true
+}
+
+func scanShellWords(command string) []string {
+	var words []string
+	var b strings.Builder
+	inSingle, inDouble := false, false
+	flush := func() {
+		if b.Len() == 0 {
+			return
+		}
+		words = append(words, b.String())
+		b.Reset()
+	}
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if inSingle {
+			if c == '\'' {
+				inSingle = false
+			} else {
+				b.WriteByte(c)
+			}
+			continue
+		}
+		if inDouble {
+			if c == '"' {
+				inDouble = false
+			} else if c == '\\' && i+1 < len(command) {
+				i++
+				b.WriteByte(command[i])
+			} else {
+				b.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '\\':
+			if i+1 < len(command) {
+				i++
+				b.WriteByte(command[i])
+			}
+		default:
+			if unicode.IsSpace(rune(c)) {
+				flush()
+			} else {
+				b.WriteByte(c)
+			}
+		}
+	}
+	flush()
+	return words
+}
+
 // hostShellAutoEligible is true when a host_shell command can auto-run:
 // not empty, not huge, and no mutating/risky pattern. Not an allowlist.
 func hostShellAutoEligible(command string) bool {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" || len(cmd) > 2000 {
+		return false
+	}
+	if findExecBlocksAuto(cmd) {
 		return false
 	}
 	lower := strings.ToLower(cmd)

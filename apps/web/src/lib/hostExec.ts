@@ -180,7 +180,7 @@ function hasNonNullWriteRedirect(cmd: string): boolean {
 
 const SHELL_CONFIRM_SUBSTR = [
   "$(", "`", "$((", "<<",
-  " -exec", "-exec ", "-ok ", " -ok", "-delete",
+  "-delete",
   "sudo", "doas", " pkexec",
   "|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
   "|fish", "| fish",
@@ -394,9 +394,119 @@ function shellSegmentAutoOK(seg: string): boolean {
 }
 
 /** Mirror of API hostShellAutoEligible — no command allowlist; risky patterns confirm. */
+const FIND_EXEC_READONLY = new Set([
+  "du", "stat", "ls", "file",
+  "md5", "shasum",
+  "wc", "head", "tail", "cat", "echo",
+]);
+
+/** Quote-aware words. Backslash escapes one byte (so find \\; becomes ";"). */
+function scanShellWords(command: string): string[] {
+  const words: string[] = [];
+  let cur = "";
+  let inSingle = false;
+  let inDouble = false;
+  const flush = () => {
+    if (cur) {
+      words.push(cur);
+      cur = "";
+    }
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (inSingle) {
+      if (c === "'") inSingle = false;
+      else cur += c;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"') inDouble = false;
+      else if (c === "\\" && i + 1 < command.length) cur += command[++i];
+      else cur += c;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (c === "\\" && i + 1 < command.length) {
+      cur += command[++i];
+      continue;
+    }
+    if (/\s/.test(c)) flush();
+    else cur += c;
+  }
+  flush();
+  return words;
+}
+
+function awkProgramSafe(prog: string): boolean {
+  const lower = prog.toLowerCase();
+  if (!lower.includes("print")) return false;
+  for (const bad of ["system", "getline", "delete", "|", ">", "<", "close"]) {
+    if (lower.includes(bad)) return false;
+  }
+  return true;
+}
+
+function awkExecPrintOnly(args: string[]): boolean {
+  let sawProgram = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") return i + 1 < args.length && awkProgramSafe(args[i + 1]!);
+    if (a === "-f" || a.startsWith("--file")) return false;
+    if (a === "--source") {
+      if (i + 1 >= args.length || !awkProgramSafe(args[i + 1]!)) return false;
+      sawProgram = true;
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) {
+      if ((a === "-v" || a === "-F" || a === "-E") && !a.includes("=")) i++;
+      continue;
+    }
+    if (!sawProgram) {
+      if (!awkProgramSafe(a)) return false;
+      sawProgram = true;
+    }
+  }
+  return sawProgram;
+}
+
+function readonlyFindExec(words: string[], i: number): boolean {
+  if (i + 1 >= words.length) return false;
+  const util = baseName(words[i + 1]!).toLowerCase();
+  for (let j = i + 2; j < words.length; j++) {
+    if (words[j] !== "{}") continue;
+    if (j + 1 >= words.length) return false;
+    const term = words[j + 1];
+    if (term !== "+" && term !== ";") return false;
+    const args = words.slice(i + 2, j);
+    if (util === "awk") return awkExecPrintOnly(args);
+    return FIND_EXEC_READONLY.has(util);
+  }
+  return false;
+}
+
+/** True when find -exec/-execdir/-ok is not a proven read-only utility. */
+function findExecBlocksAuto(command: string): boolean {
+  const words = scanShellWords(command);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!.toLowerCase();
+    if (w === "-ok" || w === "-okdir") return true;
+    if ((w === "-exec" || w === "-execdir") && !readonlyFindExec(words, i)) return true;
+  }
+  return false;
+}
+
 export function hostShellAutoEligible(command: string): boolean {
   const cmd = command.trim();
   if (!cmd || cmd.length > 2000) return false;
+  if (findExecBlocksAuto(cmd)) return false;
   const lower = cmd.toLowerCase();
   for (const bad of SHELL_CONFIRM_SUBSTR) {
     if (lower.includes(bad.toLowerCase())) return false;
