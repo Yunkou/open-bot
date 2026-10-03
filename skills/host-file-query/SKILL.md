@@ -7,7 +7,7 @@ description: Query files on a connected computer with compact summaries (largest
 
 在**已连接的电脑**上做聚合/筛选，只回少量摘要行。不要为了「最大 / 哪些 mp4」整目录 `host_ls`。
 
-`load_skill` **不会**自动执行 `scripts/`；取到脚本正文后，用 **`host_shell`** 在目标机跑（仍走对话确认）。
+`load_skill` **不会**自动执行 `scripts/`；取到脚本正文后，用 **`host_shell`** 在目标机跑（是否确认由 Auto-review 看命令行，不看脚本正文）。
 
 ## 何时 load
 
@@ -57,4 +57,4 @@ SCRIPT
 
 ## 安全
 
-脚本视为推荐命令，**不**绕过 `host_shell` 确认卡；内容经 `load_skill` 可见，便于审计。
+脚本不绕过 Auto-review：硬拒绝始终有效；命令行含重定向、`rm`、装包等仍确认。内容经 `load_skill` 可见，便于审计。

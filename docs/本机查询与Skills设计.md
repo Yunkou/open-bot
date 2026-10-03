@@ -1,6 +1,6 @@
 # 本机查询：host_ls vs host_shell vs Skill 脚本（设计草案）
 
-> 状态：**A+B+C+D + Auto-review 档位已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`、只读 allowlist + 硬拒绝/确认档位，对齐 Grok）。
+> 状态：**A+B+C+D + Auto-review 档位已落地**（提示词路由、`skills/host-file-query`、收窄 `host_ls`、默认自动放行（无命令白名单）+ 风险确认 + 硬拒绝，对齐 Grok）。
 > 对齐 Cursor Grok Bot（`ListMachines` + 本机 Shell/Read；Skills 可带 `scripts/`）。
 > 相关实现：`apps/desktop/.../host_fs.rs`、`host_cmd.rs`；runtime `llm.py` / `client_env.py` / `deferral.py`；`skills/host-file-query/`。
 
@@ -11,7 +11,7 @@
 | `list_machines` | 已登记电脑 + `connected` | 小 |
 | `host_ls` | 浅层列目录 | 默认 **50**（最大 200）；`sort`=`mtime|size|name`；可选 `glob`；响应含 `total`/`truncated` |
 | `host_read` | 读文本 | ≤200KB |
-| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；30s；只读 allowlist **免确认**，其余/terminal **对话确认**；禁 ssh/scp/sftp |
+| `host_shell` | 本机命令（`sh -c`） | 输出 **≤4000 字**；30s；无命令白名单，**看起来会改动或有风险才确认**，硬拒绝始终有效；`terminal=true` 确认；禁 ssh/scp/sftp |
 | `host_ssh_*` | 远程（先 `load_skill host-ssh`） | 与上类似 |
 | `load_skill` | 加载 `SKILL.md` / `scripts/` **内容** | **不自动执行**脚本；模型再经 `host_shell` / `sandbox_*` 跑 |
 
@@ -70,7 +70,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
    - 聚合查询 → `host_shell` 或相关 skill 脚本，**只汇报摘要行**；
    - `host_ls` → 浅层列举、已知小目录、需要条目元数据且预期条目不多时。
 2. `host_ls` description：写明「非排序/筛选/递归汇总工具；大目录请用 host_shell」。
-3. `host_shell` description：点名适合 `find`/`du`/`stat` 等只读汇总（只读 allowlist 免确认，见下）。
+3. `host_shell` description：点名适合 `find`/`du`/`stat` 等只读汇总（无白名单：未命中风险模式则免确认，见下）。
 4. Skills 目录加一条 `host-file-query`（或并入现有 host 相关 skill）。
 
 ## 安全 / 确认策略（Grok Bot 对齐 · Auto-review）
@@ -79,11 +79,11 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 
 | 档位 `review_tier` | 含义 | 典型例子 |
 |--------------------|------|----------|
-| **auto** | 自动放行，不弹确认卡 | `host_ls` / `host_read` / `host_ssh_ls|read` / `host_open`；只读 allowlist `host_shell`（`ls`/`find`/`du`/`stat`/`grep`… 管道组合） |
-| **confirm** | 对话确认卡（任意已登录端可点「允许/拒绝」）；卡上展示 `reason` | 写/删/移、非 allowlist shell、`terminal=true`、全部 `host_ssh_write|delete|exec`、Skill 脚本 `bash/sh script.sh` |
+| **auto** | 自动放行，不弹确认卡 | `host_ls` / `host_read` / `host_ssh_ls|read` / `host_open`；`host_shell` 未命中风险模式（含 `cd`/`pwd`/`ls`/`find`/`grep`、`git status`、普通管道）。需 Auto-review 开且该机 `exec_policy=allow` |
+| **confirm** | 对话确认卡（任意已登录端可点「允许/拒绝」）；卡上展示 `reason` | 写/删/移、`terminal=true`、全部 `host_ssh_write|delete|exec`；shell 看起来会改动或有风险：重定向到文件（`/dev/null` 除外）、`rm`/`mv`/`cp`、`chmod`/`chown`、`sudo`、`git push`、`curl`/`wget`、`ssh`、`kill`、装包、命令替换、`find -delete`/`-exec`、`tee` 写文件。Auto-review 关或 `exec_policy=ask` 时，本可 auto 的也改为 confirm |
 | **deny** | Auto-review **硬拒绝**（不弹允许卡、不执行） | `curl\|sh` / 管道进 shell、`rm -rf /`、fork bomb、`mkfs`、写块设备、`dd if=` |
 
-实现：`classifyHostExecReview` — `services/api/.../readonly_shell.go` 与 `apps/web/src/lib/hostExec.ts` 镜像（deny → confirm 排除 → auto allowlist）。
+实现：`classifyHostExecReview` — `services/api/.../host_exec_review.go` 与 `apps/web/src/lib/hostExec.ts` 镜像（硬拒绝 → 风险确认 → 其余 auto）。没有正向命令白名单。
 
 - **设置（通用 → Bot）**：
   - **时区**：可自动检测或选 IANA（如 Asia/Shanghai）；写入 `user_settings`，聊天 `client.timezone` / 环境块可见。
@@ -93,7 +93,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
   - **当前电脑**：可改名并保存（沿用 `PATCH /v1/machines/{id}` label）。
   - **在这台电脑上执行**：`exec_policy` = `allow`（始终允许，自动审核仍检查）/ `ask`（每次询问）/ `deny`（不允许）。服务端与桌面 WS 闸都会执行。
 - 硬 deny 始终有效，不受自动审核开关 / 用户规则 / exec_policy=ask 影响；`exec_policy=deny` 在审核前直接拒绝。
-- Skill 脚本内容经 `load_skill` 可见，但仍走 **confirm**。
+- Skill 脚本内容经 `load_skill` 可见。`host_shell` 只看命令行：heredoc/重定向仍确认；命令行本身无风险模式则 auto（不扫描脚本正文）。
 - 继续截断 stdout（~4k）；`host_ls` 默认 50 + `truncated`/`total`。
 
 ## 实现阶段
@@ -103,7 +103,7 @@ find "$DIR" -type f -iname "*.${EXT}" -print0 2>/dev/null \
 | **A 文档+提示词** | ✅ 改 `client_env` / tool description / deferral；本设计文档 | 低 |
 | **B Skill 脚本** | ✅ `host-file-query` + `largest-by-size` / `largest-by-ext` / `list-by-ext` | 低 |
 | **C 收窄 host_ls** | ✅ `limit`/`sort`/`glob`；默认 50；响应 `truncated`/`total` | 中（兼容） |
-| **D 只读 shell 放行** | ✅ allowlist + 测试；桌面设置项可关 | 中高（安全面） |
+| **D 只读 shell 放行** | ✅ 改为无白名单 auto（风险模式才 confirm）+ 测试；桌面设置项可关 | 中高（安全面） |
 | **D′ Auto-review 档位** | ✅ `auto`/`confirm`/`deny` + `reason` 确认卡；硬拒绝模式；文档 | 中（策略清晰化） |
 | **D″ 用户设置 + 电脑策略** | ✅ 通用→Bot 时区/自动审核/NL 规则；电脑→当前机改名 + exec_policy；API `GET/PUT /v1/me/settings` | 中 |
 

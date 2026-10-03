@@ -57,7 +57,7 @@ export function setHostWritesEnabled(on: boolean): void {
 
 export const HOST_SHELL_READONLY_AUTO_KEY = "openbot_host_shell_readonly_auto";
 
-/** Default on: allowlisted read-only host_shell commands skip the chat confirm card. */
+/** Legacy kill-switch. Off forces host exec to confirm (same as Auto-review off). */
 export function hostShellReadonlyAutoEnabled(): boolean {
   try {
     return localStorage.getItem(HOST_SHELL_READONLY_AUTO_KEY) !== "0";
@@ -73,37 +73,6 @@ export function setHostShellReadonlyAutoEnabled(on: boolean): void {
     /* ignore */
   }
 }
-
-const READONLY_SHELL_ALLOW = new Set([
-  "ls", "find", "du", "stat",
-  "md5", "md5sum", "shasum", "sha1sum", "sha256sum",
-  "wc", "cat", "head", "tail", "file",
-  "pwd", "which", "type", "dirname", "basename",
-  "realpath", "readlink", "uname", "date", "whoami",
-  "id", "df", "hostname", "echo", "printf",
-  "true", "false", "test", "[",
-  "grep", "egrep", "fgrep",
-  "sort", "uniq", "cut", "tr", "awk",
-  "tree", "arch", "sw_vers", "printenv", "locale",
-]);
-
-const READONLY_SHELL_DENY_SUBSTR = [
-  "$(", "`", "$((", "<<",
-  " -exec", "-exec ", "-ok ", " -ok", "-delete",
-  "sudo", "doas", " pkexec",
-  "|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
-  "|fish", "| fish",
-  "curl ", "wget ", " nc ", "ncat ", "netcat ",
-  "ssh ", "scp ", "sftp ",
-  "rm ", "rm\t", "mv ", "mv\t", "cp ", "cp\t",
-  "chmod ", "chown ", "chgrp ", "unlink ",
-  "mkdir ", "rmdir ", "touch ", "ln ", "dd ",
-  "tee ", "truncate ", "shred ",
-  "kill ", "pkill ", "killall ",
-  "reboot", "shutdown", "halt ",
-  "eval ", "source ", " exec ",
-  "sed -i", "perl -i", "ruby -i",
-];
 
 function baseName(tok: string): string {
   const norm = tok.replace(/\\/g, "/");
@@ -208,27 +177,238 @@ function hasNonNullWriteRedirect(cmd: string): boolean {
   return false;
 }
 
-/** Mirror of API isReadonlyShellCommand — keep deny-by-default in sync with readonly_shell.go. */
-export function isReadonlyShellCommand(command: string): boolean {
+
+const SHELL_CONFIRM_SUBSTR = [
+  "$(", "`", "$((", "<<",
+  " -exec", "-exec ", "-ok ", " -ok", "-delete",
+  "sudo", "doas", " pkexec",
+  "|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
+  "|fish", "| fish",
+  "curl ", "wget ", " nc ", "ncat ", "netcat ",
+  "ssh ", "scp ", "sftp ",
+  "rm ", "rm\t", "mv ", "mv\t", "cp ", "cp\t",
+  "chmod ", "chown ", "chgrp ", "unlink ",
+  "mkdir ", "rmdir ", "touch ", "ln ", "dd ",
+  "tee ", "truncate ", "shred ",
+  "kill ", "pkill ", "killall ",
+  "reboot", "shutdown", "halt ",
+  "eval ", "source ", " exec ",
+  "sed -i", "perl -i", "ruby -i",
+  "git push",
+  "npm install", "npm ci", "pnpm install", "pnpm add",
+  "yarn add", "yarn install",
+  "pip install", "pip3 install", "pipx install",
+  "brew install", "brew uninstall",
+  "apt install", "apt-get install", "apt remove", "apt-get remove",
+  "yum install", "dnf install",
+  "cargo install", "go install", "gem install",
+  "snap install", "flatpak install",
+  "choco install", "winget install", "conda install",
+  "bun install", "bun add",
+];
+
+const SHELL_RISKY_BINS = new Set([
+  "rm", "mv", "cp",
+  "chmod", "chown", "chgrp", "unlink",
+  "mkdir", "rmdir", "touch", "ln", "dd",
+  "tee", "truncate", "shred",
+  "sudo", "doas", "pkexec",
+  "ssh", "scp", "sftp",
+  "curl", "wget",
+  "kill", "pkill", "killall",
+  "nc", "ncat", "netcat",
+  "reboot", "shutdown", "halt",
+  "eval", "source", "exec",
+]);
+
+function flagTakesValue(flag: string): boolean {
+  switch (flag) {
+    case "-C":
+    case "-c":
+    case "--cwd":
+    case "--prefix":
+    case "--directory":
+    case "-t":
+    case "--target":
+    case "--git-dir":
+    case "--work-tree":
+    case "--namespace":
+    case "--config":
+    case "--registry":
+    case "--cache":
+    case "--file":
+    case "-f":
+    case "--requirement":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function shellArgs(seg: string): string[] {
+  const args: string[] = [];
+  let rest = seg.trim();
+  for (;;) {
+    const [tok, next] = takeToken(rest);
+    if (!tok) break;
+    rest = next;
+    if (args.length === 0 && tok.includes("=") && !tok.startsWith("-") && !tok.includes("/")) continue;
+    args.push(tok);
+  }
+  return args;
+}
+
+function positionals(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--") {
+      out.push(...args.slice(i + 1));
+      break;
+    }
+    if (flagTakesValue(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    out.push(a);
+  }
+  return out;
+}
+
+function segmentGitPush(args: string[]): boolean {
+  if (!args.length || baseName(args[0]!).toLowerCase() !== "git") return false;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i]!;
+    if (flagTakesValue(a)) {
+      i++;
+      continue;
+    }
+    if (a.startsWith("-")) continue;
+    return a.toLowerCase() === "push";
+  }
+  return false;
+}
+
+function firstPositionalIn(args: string[], verbs: string[]): boolean {
+  const pos = positionals(args);
+  if (!pos.length) return false;
+  const head = pos[0]!.toLowerCase();
+  return verbs.some((v) => v === head);
+}
+
+function npmStyleInstall(args: string[]): boolean {
+  const pos = positionals(args);
+  if (!pos.length) return false;
+  switch (pos[0]!.toLowerCase()) {
+    case "install":
+    case "i":
+    case "add":
+    case "ci":
+    case "uninstall":
+    case "un":
+    case "remove":
+    case "rm":
+    case "update":
+    case "upgrade":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function pacmanMutating(args: string[]): boolean {
+  for (const a of args) {
+    switch (a.toLowerCase()) {
+      case "-s":
+      case "-sy":
+      case "-syu":
+      case "-syy":
+      case "-syyu":
+      case "-su":
+      case "-u":
+      case "-r":
+      case "-rn":
+      case "-rns":
+      case "-runs":
+      case "--sync":
+      case "--remove":
+      case "--upgrade":
+        return true;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
+function segmentPackageInstall(args: string[]): boolean {
+  if (!args.length) return false;
+  const base = baseName(args[0]!).toLowerCase();
+  const rest = args.slice(1);
+  switch (base) {
+    case "go":
+      return firstPositionalIn(rest, ["install"]);
+    case "npm":
+    case "pnpm":
+    case "bun":
+      return npmStyleInstall(rest);
+    case "yarn":
+      if (positionals(rest).length === 0) return true;
+      return npmStyleInstall(rest);
+    case "pip":
+    case "pip3":
+    case "pipx":
+    case "brew":
+    case "cargo":
+    case "gem":
+    case "conda":
+    case "choco":
+    case "winget":
+    case "snap":
+    case "flatpak":
+    case "composer":
+      return firstPositionalIn(rest, ["install", "uninstall", "remove", "upgrade", "add", "require"]);
+    case "apt":
+    case "apt-get":
+    case "yum":
+    case "dnf":
+    case "zypper":
+      return firstPositionalIn(rest, ["install", "remove", "purge", "autoremove", "upgrade", "dist-upgrade"]);
+    case "pacman":
+      return pacmanMutating(rest);
+    default:
+      return false;
+  }
+}
+
+function shellSegmentAutoOK(seg: string): boolean {
+  const s = seg.trim();
+  if (!s || s.endsWith("&")) return false;
+  const args = shellArgs(s);
+  if (!args.length) return false;
+  const base = baseName(args[0]!).toLowerCase();
+  if (SHELL_RISKY_BINS.has(base)) return false;
+  if (segmentGitPush(args) || segmentPackageInstall(args)) return false;
+  return true;
+}
+
+/** Mirror of API hostShellAutoEligible — no command allowlist; risky patterns confirm. */
+export function hostShellAutoEligible(command: string): boolean {
   const cmd = command.trim();
   if (!cmd || cmd.length > 2000) return false;
   const lower = cmd.toLowerCase();
-  for (const bad of READONLY_SHELL_DENY_SUBSTR) {
-    if (lower.includes(bad)) return false;
+  for (const bad of SHELL_CONFIRM_SUBSTR) {
+    if (lower.includes(bad.toLowerCase())) return false;
   }
   if (hasNonNullWriteRedirect(cmd)) return false;
   const segments = splitShellSegments(cmd);
   if (segments.length === 0) return false;
   for (const seg of segments) {
-    const s = seg.trim();
-    if (!s || s.endsWith("&")) return false;
-    const tok = firstShellToken(s);
-    if (!tok) return false;
-    if (!READONLY_SHELL_ALLOW.has(baseName(tok).toLowerCase())) return false;
+    if (!shellSegmentAutoOK(seg)) return false;
   }
   return true;
 }
-
 
 /** Grok-aligned Auto-review tiers: deterministic, no LLM judgment. */
 export type HostExecReviewTier = "auto" | "confirm" | "deny";
@@ -399,7 +579,7 @@ export function classifyHostExecReviewForUser(
   return applyUserAutoReview(classifyHostExecReview(op, path, dest), settings, op, path, dest);
 }
 
-/** Mirror of API classifyHostExecReview — keep in sync with readonly_shell.go. */
+/** Mirror of API classifyHostExecReview — keep in sync with host_exec_review.go. */
 export function classifyHostExecReview(op: string, path = "", dest = ""): HostExecReview {
   const o = op.trim();
   const p = path.trim();
@@ -431,10 +611,10 @@ export function classifyHostExecReview(op: string, path = "", dest = ""): HostEx
         const hard = matchHardDenyShell(p);
         if (hard) return hard;
       }
-      if (isReadonlyShellCommand(p)) {
-        return { tier: "auto", reason: "只读 allowlist 命令，Auto-review 自动放行", code: "readonly_shell" };
+      if (hostShellAutoEligible(p)) {
+        return { tier: "auto", reason: "未发现写入或危险模式，Auto-review 自动放行", code: "shell_auto" };
       }
-      return { tier: "confirm", reason: "非只读本机命令（不在 Auto-review allowlist），需你确认", code: "shell_confirm" };
+      return { tier: "confirm", reason: "命令看起来会改动系统或有风险，需你确认", code: "shell_confirm" };
     default:
       return { tier: "confirm", reason: "未知操作，需你确认", code: "unknown_op" };
   }

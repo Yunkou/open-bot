@@ -99,7 +99,6 @@ func (s *Server) handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-
 func (s *Server) handlePatchMachine(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
@@ -335,17 +334,18 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	if policy == db.MachineExecDeny {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": false, "denied": true, "exec_policy": "deny",
-			"error": "「" + m.Label + "」已设置为不允许在这台电脑上执行",
+			"error":      "「" + m.Label + "」已设置为不允许在这台电脑上执行",
 			"machine_id": mid, "label": m.Label,
 		})
 		return
 	}
 	settings := s.userSettingsOrDefault(uid)
 	if policy == db.MachineExecAsk {
-		// Force confirm for non-deny ops; built-in hard deny still wins below.
+		// exec_policy ask forces confirm. Hard deny still wins.
 		settings.AutoReviewEnabled = false
 	}
-	if denied, rev := hostExecHardDeniedForUser(op, body.Path, body.Dest, settings); denied {
+	rev := classifyHostExecReviewForUser(op, body.Path, body.Dest, settings)
+	if rev.Tier == hostExecReviewDeny {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": false, "denied": true, "auto_review": "deny",
 			"error": rev.Reason, "review_code": rev.Code,
@@ -353,7 +353,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		})
 		return
 	}
-	if hostExecNeedsChatConfirmForUser(op, body.Path, body.Dest, settings) && conversationID != "" {
+	if rev.Tier == hostExecReviewConfirm && conversationID != "" {
 		preview := ""
 		if op == "shell" || op == "ssh_exec" || op == "write" || op == "ssh_write" {
 			preview = body.Content
@@ -362,7 +362,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 		allowed, reqID, cerr := s.requestChatHostConfirm(
-			r.Context(), uid, conversationID, op, body.Path, body.Dest, preview,
+			r.Context(), uid, conversationID, op, body.Path, body.Dest, preview, rev,
 		)
 		confirmReqID = reqID
 		if cerr != nil {
@@ -553,6 +553,7 @@ func (s *Server) waitHostConfirm(
 func (s *Server) requestChatHostConfirm(
 	ctx context.Context,
 	userID, conversationID, op, path, dest, preview string,
+	rev hostExecReview,
 ) (allowed bool, reqID string, err error) {
 	coalesce := isDeleteConfirmOp(op)
 	if coalesce {
@@ -591,8 +592,6 @@ func (s *Server) requestChatHostConfirm(
 	}
 
 	reqID = uuid.NewString()
-	settings := s.userSettingsOrDefault(userID)
-	rev := classifyHostExecReviewForUser(op, path, dest, settings)
 	payload := hostConfirmPayload{
 		ReqID:      reqID,
 		Op:         op,

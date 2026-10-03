@@ -10,12 +10,14 @@ import (
 
 // Host-exec Auto-review (Grok Bot–aligned): deterministic tiers, no LLM judgment.
 //
-//  1. hard deny  — clearly dangerous patterns rejected without a confirm card
-//  2. auto       — read-only / reversible ops skip confirm (Phase D allowlist + ls/read)
-//  3. confirm    — everything else needs the user (chat card), with a structured reason
+//  1. hard deny — clearly dangerous patterns, rejected with no confirm card
+//  2. confirm  — the command line looks mutating or risky
+//  3. auto     — everything else, when Auto-review is on and exec_policy is allow
 //
-// Settings kill-switch on the desktop client can force shell auto → confirm locally;
-// the API always applies the same deny/auto/confirm table.
+// host_shell has no positive command allowlist. cd, pwd, find, ls, grep, git status,
+// interpreters, and pipes of ordinary tools auto-run unless a risky pattern hits.
+// Callers force confirm when Auto-review is off or exec_policy is ask.
+// User NL rules (先询问 / 自动允许) are applied in applyUserAutoReview and never override deny.
 
 type hostExecReviewTier string
 
@@ -31,35 +33,20 @@ type hostExecReview struct {
 	Code   string // stable machine code for tests / logs
 }
 
-// Read-only host_shell soft-allow (Phase D).
-// Deny-by-default: only simple pipelines of allowlisted commands skip chat confirm.
-// Skill scripts (bash/sh script.sh), terminal=true, ssh_exec, and anything with
-// redirects / substitutions / dangerous tokens still require confirmation (or hard deny).
-
-var readonlyShellAllow = map[string]struct{}{
-	"ls": {}, "find": {}, "du": {}, "stat": {},
-	"md5": {}, "md5sum": {}, "shasum": {}, "sha1sum": {}, "sha256sum": {},
-	"wc": {}, "cat": {}, "head": {}, "tail": {}, "file": {},
-	"pwd": {}, "which": {}, "type": {}, "dirname": {}, "basename": {},
-	"realpath": {}, "readlink": {}, "uname": {}, "date": {}, "whoami": {},
-	"id": {}, "df": {}, "hostname": {}, "echo": {}, "printf": {},
-	"true": {}, "false": {}, "test": {}, "[": {},
-	"grep": {}, "egrep": {}, "fgrep": {},
-	"sort": {}, "uniq": {}, "cut": {}, "tr": {}, "awk": {},
-	"tree": {}, "arch": {}, "sw_vers": {}, "printenv": {}, "locale": {},
-}
-
-// Substrings that exclude a command from the read-only allowlist (forces confirm
-// unless a harder deny rule matches first). Checked case-insensitively on the raw command.
-var readonlyShellDenySubstrings = []string{
-	"$(", "`", // command substitution
-	"$((",     // arithmetic (rarely needed; avoid cleverness)
-	"<<",      // heredoc
+// Substrings that force confirm (case-insensitive on the raw command).
+// Hard-deny rules are checked first and win over this list.
+// Command substitution is treated as a dangerous context: the inner command
+// is not statically proven safe.
+var shellConfirmSubstrings = []string{
+	"$(", "\x60",
+	"$((",
+	"<<",
 	" -exec", "-exec ", "-ok ", " -ok", "-delete",
 	"sudo", "doas", " pkexec",
 	"|sh", "| sh", "|bash", "| bash", "|zsh", "| zsh", "|dash", "| dash",
 	"|fish", "| fish",
-	"curl ", "wget ", " nc ", "ncat ", "netcat ",
+	"curl ", "wget ",
+	" nc ", "ncat ", "netcat ",
 	"ssh ", "scp ", "sftp ",
 	"rm ", "rm\t", "mv ", "mv\t", "cp ", "cp\t",
 	"chmod ", "chown ", "chgrp ", "unlink ",
@@ -69,6 +56,32 @@ var readonlyShellDenySubstrings = []string{
 	"reboot", "shutdown", "halt ",
 	"eval ", "source ", " exec ",
 	"sed -i", "perl -i", "ruby -i",
+	"git push",
+	"npm install", "npm ci", "pnpm install", "pnpm add",
+	"yarn add", "yarn install",
+	"pip install", "pip3 install", "pipx install",
+	"brew install", "brew uninstall",
+	"apt install", "apt-get install", "apt remove", "apt-get remove",
+	"yum install", "dnf install",
+	"cargo install", "go install", "gem install",
+	"snap install", "flatpak install",
+	"choco install", "winget install", "conda install",
+	"bun install", "bun add",
+}
+
+// First-token binaries that are mutating or risky even with no extra arguments.
+var shellRiskyBins = map[string]struct{}{
+	"rm": {}, "mv": {}, "cp": {},
+	"chmod": {}, "chown": {}, "chgrp": {}, "unlink": {},
+	"mkdir": {}, "rmdir": {}, "touch": {}, "ln": {}, "dd": {},
+	"tee": {}, "truncate": {}, "shred": {},
+	"sudo": {}, "doas": {}, "pkexec": {},
+	"ssh": {}, "scp": {}, "sftp": {},
+	"curl": {}, "wget": {},
+	"kill": {}, "pkill": {}, "killall": {},
+	"nc": {}, "ncat": {}, "netcat": {},
+	"reboot": {}, "shutdown": {}, "halt": {},
+	"eval": {}, "source": {}, "exec": {},
 }
 
 // Hard-deny patterns: never execute, no confirm card (Auto-review hard block).
@@ -129,10 +142,10 @@ func classifyHostExecReview(op, path, dest string) hostExecReview {
 		if hit, rule := matchHardDenyShell(path); hit {
 			return hostExecReview{Tier: hostExecReviewDeny, Reason: rule.reason, Code: rule.code}
 		}
-		if isReadonlyShellCommand(path) {
-			return hostExecReview{Tier: hostExecReviewAuto, Reason: "只读 allowlist 命令，Auto-review 自动放行", Code: "readonly_shell"}
+		if hostShellAutoEligible(path) {
+			return hostExecReview{Tier: hostExecReviewAuto, Reason: "未发现写入或危险模式，Auto-review 自动放行", Code: "shell_auto"}
 		}
-		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "非只读本机命令（不在 Auto-review allowlist），需你确认", Code: "shell_confirm"}
+		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "命令看起来会改动系统或有风险，需你确认", Code: "shell_confirm"}
 	default:
 		return hostExecReview{Tier: hostExecReviewConfirm, Reason: "未知操作，需你确认", Code: "unknown_op"}
 	}
@@ -224,18 +237,19 @@ func hostOpNeedsConfirm(op string) bool {
 	}
 }
 
-func isReadonlyShellCommand(command string) bool {
+// hostShellAutoEligible is true when a host_shell command can auto-run:
+// not empty, not huge, and no mutating/risky pattern. Not an allowlist.
+func hostShellAutoEligible(command string) bool {
 	cmd := strings.TrimSpace(command)
 	if cmd == "" || len(cmd) > 2000 {
 		return false
 	}
 	lower := strings.ToLower(cmd)
-	for _, bad := range readonlyShellDenySubstrings {
-		if strings.Contains(lower, bad) {
+	for _, bad := range shellConfirmSubstrings {
+		if strings.Contains(lower, strings.ToLower(bad)) {
 			return false
 		}
 	}
-	// Write redirects: allow only >/dev/null and 2>/dev/null style discards.
 	if hasNonNullWriteRedirect(cmd) {
 		return false
 	}
@@ -244,11 +258,169 @@ func isReadonlyShellCommand(command string) bool {
 		return false
 	}
 	for _, seg := range segments {
-		if !readonlyShellSegmentOK(seg) {
+		if !shellSegmentAutoOK(seg) {
 			return false
 		}
 	}
 	return true
+}
+
+func shellSegmentAutoOK(seg string) bool {
+	seg = strings.TrimSpace(seg)
+	if seg == "" || strings.HasSuffix(seg, "&") {
+		return false
+	}
+	args := shellArgs(seg)
+	if len(args) == 0 {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(args[0]))
+	if _, ok := shellRiskyBins[base]; ok {
+		return false
+	}
+	if segmentGitPush(args) || segmentPackageInstall(args) {
+		return false
+	}
+	return true
+}
+
+func shellArgs(seg string) []string {
+	s := strings.TrimSpace(seg)
+	var args []string
+	for {
+		tok, rest := takeToken(s)
+		if tok == "" {
+			break
+		}
+		s = rest
+		if len(args) == 0 && isEnvAssign(tok) {
+			continue
+		}
+		args = append(args, tok)
+	}
+	return args
+}
+
+func isEnvAssign(tok string) bool {
+	return strings.Contains(tok, "=") && !strings.HasPrefix(tok, "-") && !strings.Contains(tok, "/")
+}
+
+func segmentGitPush(args []string) bool {
+	if len(args) == 0 || strings.ToLower(filepath.Base(args[0])) != "git" {
+		return false
+	}
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		if flagTakesValue(a) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return strings.EqualFold(a, "push")
+	}
+	return false
+}
+
+func segmentPackageInstall(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	base := strings.ToLower(filepath.Base(args[0]))
+	rest := args[1:]
+	switch base {
+	case "go":
+		return firstPositionalIs(rest, "install")
+	case "npm", "pnpm", "bun":
+		return npmStyleInstall(rest)
+	case "yarn":
+		if len(positionals(rest)) == 0 {
+			return true // bare yarn installs dependencies
+		}
+		return npmStyleInstall(rest)
+	case "pip", "pip3", "pipx", "brew", "cargo", "gem", "conda", "choco", "winget", "snap", "flatpak", "composer":
+		return firstPositionalIn(rest, "install", "uninstall", "remove", "upgrade", "add", "require")
+	case "apt", "apt-get", "yum", "dnf", "zypper":
+		return firstPositionalIn(rest, "install", "remove", "purge", "autoremove", "upgrade", "dist-upgrade")
+	case "pacman":
+		return pacmanMutating(rest)
+	default:
+		return false
+	}
+}
+
+func flagTakesValue(flag string) bool {
+	switch flag {
+	case "-C", "-c", "--cwd", "--prefix", "--directory", "-t", "--target",
+		"--git-dir", "--work-tree", "--namespace", "--config", "--registry",
+		"--cache", "--file", "-f", "--requirement":
+		return true
+	default:
+		return false
+	}
+}
+
+func positionals(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			out = append(out, args[i+1:]...)
+			break
+		}
+		if flagTakesValue(a) {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func firstPositionalIs(args []string, verb string) bool {
+	pos := positionals(args)
+	return len(pos) > 0 && strings.EqualFold(pos[0], verb)
+}
+
+func firstPositionalIn(args []string, verbs ...string) bool {
+	pos := positionals(args)
+	if len(pos) == 0 {
+		return false
+	}
+	for _, v := range verbs {
+		if strings.EqualFold(pos[0], v) {
+			return true
+		}
+	}
+	return false
+}
+
+func npmStyleInstall(args []string) bool {
+	pos := positionals(args)
+	if len(pos) == 0 {
+		return false
+	}
+	switch strings.ToLower(pos[0]) {
+	case "install", "i", "add", "ci", "uninstall", "un", "remove", "rm", "update", "upgrade":
+		return true
+	default:
+		return false
+	}
+}
+
+func pacmanMutating(args []string) bool {
+	for _, a := range args {
+		switch strings.ToLower(a) {
+		case "-s", "-sy", "-syu", "-syy", "-syyu", "-su", "-u",
+			"-r", "-rn", "-rns", "-runs", "--sync", "--remove", "--upgrade":
+			return true
+		}
+	}
+	return false
 }
 
 func hasNonNullWriteRedirect(cmd string) bool {
@@ -349,27 +521,6 @@ func splitShellSegments(cmd string) []string {
 	return out
 }
 
-func readonlyShellSegmentOK(seg string) bool {
-	seg = strings.TrimSpace(seg)
-	if seg == "" {
-		return false
-	}
-	// Reject backgrounding and bare redirects as command.
-	if strings.HasSuffix(seg, "&") {
-		return false
-	}
-	tok := firstShellToken(seg)
-	if tok == "" {
-		return false
-	}
-	base := strings.ToLower(filepath.Base(tok))
-	// Windows-ish path base still works via filepath.Base.
-	if _, ok := readonlyShellAllow[base]; !ok {
-		return false
-	}
-	return true
-}
-
 func firstShellToken(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -412,7 +563,6 @@ func takeToken(s string) (tok, rest string) {
 	}
 	return s[:end], s[end:]
 }
-
 
 // applyUserAutoReview layers per-user prefs on top of built-in Auto-review tiers.
 //

