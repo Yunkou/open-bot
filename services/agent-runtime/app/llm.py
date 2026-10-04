@@ -155,8 +155,13 @@ CHEAPER_HOST_RETRY = (
     "查本机文件优先 load_skill host-file-query。"
 )
 
-# When the model answers with think-only after a failed tool, nudge it to
-# revise and call a tool again. Cap so the turn cannot spin forever.
+# When the model answers with no new tool call after a failed host tool,
+# nudge it to revise and call a tool again. Any reply counts, including a
+# short Chinese conclusion — not only think-only/empty. Cap so the turn
+# cannot spin. Providers that already accept tool_choice get
+# tool_choice=required on that revise round instead of this message;
+# providers that lack tool_choice get the message. Same cap either way.
+# Never re-run the shell from here.
 TOOL_FAIL_NUDGE_CAP = 2
 TOOL_FAIL_NUDGE = (
     "上一次工具调用失败或没有有用输出。请根据工具返回的错误修正命令后再次调用工具；"
@@ -331,6 +336,43 @@ def _timeoutish(err: str) -> bool:
 def _last_tool_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
     payloads = _tool_payloads(messages)
     return payloads[-1] if payloads else None
+
+
+def _is_host_tool(name: str) -> bool:
+    return name == "host_shell" or name.startswith("host_")
+
+
+def _last_executed_tool(messages: list[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    """Name and JSON payload of the most recent tool result."""
+    id_to_name: dict[str, str] = {}
+    name = ""
+    payload: dict[str, Any] | None = None
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        if role == "assistant":
+            for tc in message.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                id_to_name[str(tc.get("id") or "")] = str(fn.get("name") or "")
+        elif role == "tool":
+            name = id_to_name.get(str(message.get("tool_call_id") or ""), "")
+            raw = str(message.get("content") or "")
+            obj = None
+            if raw.strip():
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    obj = None
+            if isinstance(obj, dict):
+                payload = obj
+            elif raw.strip():
+                payload = {"output": raw.strip()}
+            else:
+                payload = None
+    return name, payload
 
 
 def guide_tool_result(name: str, result: str) -> str:
@@ -1273,20 +1315,35 @@ async def run_tool_loop(
     continued = False
     reasoning_only = False
     fail_nudges = 0
+    # One-shot tool_choice for the next revise round. Not a second budget:
+    # scheduling it still consumes TOOL_FAIL_NUDGE_CAP.
+    revise_required = False
     for _ in range(max_rounds):
         await _checkpoint()
+        round_choice = choice
+        sent_required = False
+        if revise_required and profile.tool_choice_auto and not tools_via_markup:
+            round_choice = "required"
+            sent_required = True
+        revise_required = False
         try:
             data = await chat_completion(
                 msgs,
                 api_key=api_key,
                 tools=None if tools_via_markup else tools,
-                tool_choice=None if tools_via_markup else choice,
+                tool_choice=None if tools_via_markup else round_choice,
                 override=override,
             )
         except AutoToolChoiceUnsupported:
             if tools_via_markup:
                 raise
             tools_via_markup = True
+            # required is not safe on this upstream. Same revise, text nudge.
+            if sent_required and not any(
+                m.get("role") == "user" and m.get("content") == TOOL_FAIL_NUDGE
+                for m in msgs
+            ):
+                msgs.append({"role": "user", "content": TOOL_FAIL_NUDGE})
             if on_status is not None:
                 await on_status(
                     {
@@ -1421,12 +1478,19 @@ async def run_tool_loop(
             msgs.append({"role": "user", "content": host_nudge})
             final = ""
             continue
-        # ReAct: failed/useless tool + think-only/empty → ask the model to
-        # revise and call again. Cap nudges; never re-run the same shell here.
+        # ReAct: failed/useless host tool + any no-tool reply (including a
+        # short Chinese conclusion) is unfinished. Ask the model to call a
+        # tool again. Same cap as think-only nudges — this does not add a
+        # second budget. Never re-run the shell here. Denied commands and
+        # _NO_RETRY_HINT observations are not failures, so they are not nudged.
         if used and fail_nudges < TOOL_FAIL_NUDGE_CAP:
-            last_obs = _last_tool_payload(msgs)
+            tool_name, last_obs = _last_executed_tool(msgs)
             if last_obs is not None and tool_observation_failed(last_obs):
-                if reasoning_only or not (final or "").strip():
+                hostish = _is_host_tool(tool_name)
+                # Host: any reply. Other tools: keep think-only/empty only,
+                # so a real answer can still finish the turn.
+                needs_revise = hostish or reasoning_only or not (final or "").strip()
+                if needs_revise:
                     fail_nudges += 1
                     reasoning_only = False
                     if on_status is not None:
@@ -1437,7 +1501,12 @@ async def run_tool_loop(
                             }
                         )
                     msgs.append({"role": "assistant", "content": final or ""})
-                    msgs.append({"role": "user", "content": TOOL_FAIL_NUDGE})
+                    # required only where this profile already sends tool_choice.
+                    # Qwen/compat/markup reject or ignore it; inject the nudge.
+                    if hostish and profile.tool_choice_auto and not tools_via_markup:
+                        revise_required = True
+                    else:
+                        msgs.append({"role": "user", "content": TOOL_FAIL_NUDGE})
                     final = ""
                     continue
         break

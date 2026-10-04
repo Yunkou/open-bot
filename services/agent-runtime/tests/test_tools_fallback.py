@@ -373,6 +373,7 @@ async def test_timeout_allows_another_tool_round() -> None:
 
 
 async def test_tool_exception_still_continues() -> None:
+    """A Chinese stop-line after a host failure is unfinished until the nudge cap."""
     os.environ["OPENAI_ENABLE_TOOLS"] = "1"
     calls = {"n": 0}
 
@@ -408,8 +409,11 @@ async def test_tool_exception_still_continues() -> None:
             )
 
     _ok(used == ["host_shell"], f"used {used}")
-    _ok(final == "换个查法失败了，先停一下", f"loop survived the exception (got {final!r})")
-    _ok(calls["n"] == 2, f"second round happened (got {calls['n']})")
+    _ok(final == "换个查法失败了，先停一下", f"conclusion kept after the cap (got {final!r})")
+    _ok(
+        calls["n"] == 1 + 1 + TOOL_FAIL_NUDGE_CAP,
+        f"tool round + conclusion + {TOOL_FAIL_NUDGE_CAP} nudges (got {calls['n']})",
+    )
 
 
 
@@ -746,6 +750,273 @@ async def test_success_after_retry_think_only_quotes_stdout() -> None:
     _ok("unknown primary" not in final, f"does not quote the failed obs (got {final!r})")
 
 
+async def test_chinese_conclusion_nudges_without_rerun() -> None:
+    """Stderr-only host failure + a short Chinese conclusion is not done.
+
+    Qwen omits tool_choice, so the revise is a TOOL_FAIL_NUDGE, still capped,
+    and the same shell is not executed again.
+    """
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+    calls = {"n": 0}
+    choices: list[Any] = []
+    nudges = {"n": 0}
+    ran: list[str] = []
+    conclusion = "查过了，没有匹配的视频。"
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        choices.append(tool_choice)
+        if calls["n"] == 1:
+            return _shell_call("call_bad", "find ~/Downloads -name $")
+        if any(m.get("content") == TOOL_FAIL_NUDGE for m in messages if m.get("role") == "user"):
+            nudges["n"] += 1
+            _ok(tool_choice != "required", "qwen revise is not tool_choice=required")
+        return {"choices": [{"message": {"role": "assistant", "content": conclusion}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        cmd = str(args.get("command") or "")
+        ran.append(cmd)
+        return json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": cmd,
+                "stdout": "",
+                "stderr": "find: $: unknown primary or operator\n",
+            },
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看视频文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=8,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"no auto rerun (got {used})")
+    _ok(ran == ["find ~/Downloads -name $"], f"shell ran once (got {ran})")
+    _ok(nudges["n"] == TOOL_FAIL_NUDGE_CAP, f"nudged {nudges['n']}")
+    _ok("required" not in choices, f"no required choice (got {choices})")
+    _ok(
+        calls["n"] == 1 + 1 + TOOL_FAIL_NUDGE_CAP,
+        f"capped extra rounds (got {calls['n']})",
+    )
+    _ok(final == conclusion, f"conclusion kept only after the cap (got {final!r})")
+
+
+async def test_required_revise_lets_model_pick_next_command() -> None:
+    """OpenAI-style profiles force tool_choice=required instead of a text nudge."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+    choices: list[Any] = []
+    ran: list[str] = []
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        choices.append(tool_choice)
+        _ok(
+            not any(m.get("content") == TOOL_FAIL_NUDGE for m in messages if m.get("role") == "user"),
+            "required path does not also inject the text nudge",
+        )
+        if tool_choice == "required":
+            _ok(tools is not None, "required round still has tools")
+            return _shell_call("call_fix", "find ~/Downloads -name '*.mp4' | head")
+        tool_count = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_count == 0:
+            return _shell_call("call_bad", "find ~/Downloads -name $")
+        return {"choices": [{"message": {"role": "assistant", "content": "有 a.mp4"}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        cmd = str(args.get("command") or "")
+        ran.append(cmd)
+        if "name $" in cmd:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "command": cmd,
+                    "output": "find: $: unknown primary or operator\n",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {"ok": True, "exit_code": 0, "command": cmd, "output": "a.mp4\n"},
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "gpt-4o"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看视频"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=6,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(choices[:3] == ["auto", "auto", "required"], f"required only on the revise (got {choices})")
+    _ok(used == ["host_shell", "host_shell"], f"model issued the second call (got {used})")
+    _ok(ran[0] != ran[1], f"commands differ (got {ran})")
+    _ok(final == "有 a.mp4", f"finished after the model retry (got {final!r})")
+
+
+async def test_required_revise_stops_at_cap() -> None:
+    """tool_choice=required does not remove TOOL_FAIL_NUDGE_CAP."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+    calls = {"n": 0}
+    required = {"n": 0}
+    ran: list[str] = []
+    conclusion = "没有视频。"
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if tool_choice == "required":
+            required["n"] += 1
+        if calls["n"] == 1:
+            return _shell_call("call_bad", "find ~/Downloads -name $")
+        return {"choices": [{"message": {"role": "assistant", "content": conclusion}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        ran.append(str(args.get("command") or ""))
+        return json.dumps(
+            {
+                "ok": False,
+                "command": args.get("command") or "",
+                "error": "find: $: unknown primary or operator",
+            },
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "gpt-4o"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看视频"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=8,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"did not auto-rerun (got {used})")
+    _ok(ran == ["find ~/Downloads -name $"], f"one shell (got {ran})")
+    _ok(required["n"] == TOOL_FAIL_NUDGE_CAP, f"required rounds {required['n']}")
+    _ok(calls["n"] == 1 + 1 + TOOL_FAIL_NUDGE_CAP, f"stopped at cap (got {calls['n']})")
+    _ok(final == conclusion, f"text accepted only after cap (got {final!r})")
+
+
+async def _finish_after(model: str, result: str, reply: str) -> tuple[str, list[str], list[Any], int]:
+    choices: list[Any] = []
+    ran: list[str] = []
+    calls = {"n": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        choices.append(tool_choice)
+        _ok(
+            not any(m.get("content") == TOOL_FAIL_NUDGE for m in messages if m.get("role") == "user"),
+            "denial/no-retry must not be nudged",
+        )
+        if calls["n"] == 1:
+            return _shell_call("call_no", "find ~/Downloads -name '*.mp4'")
+        return {"choices": [{"message": {"role": "assistant", "content": reply}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        ran.append(str(args.get("command") or ""))
+        return result
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", model),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看视频"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=6,
+                override=LLMOverride(enable_tools=True),
+            )
+    _ok(used == ["host_shell"], f"used {used}")
+    return final, ran, choices, calls["n"]
+
+
+async def test_denied_or_no_retry_is_not_nudged() -> None:
+    """User denial and _NO_RETRY_HINT end the turn even on gpt-4o."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+    denied = json.dumps(
+        {"ok": False, "denied": True, "error": "用户拒绝了这次操作"},
+        ensure_ascii=False,
+    )
+    final, ran, choices, n = await _finish_after("gpt-4o", denied, "好的，先不查了。")
+    _ok(final == "好的，先不查了。", f"denial reply kept (got {final!r})")
+    _ok(n == 2, f"no extra revise (got {n})")
+    _ok(ran == ["find ~/Downloads -name '*.mp4'"], f"not rerun (got {ran})")
+    _ok(choices == ["auto", "auto"], f"no required after denial (got {choices})")
+
+    offline = json.dumps({"ok": False, "error": "应用没开着"}, ensure_ascii=False)
+    final, ran, choices, n = await _finish_after("gpt-4o", offline, "桌面应用没开着。")
+    _ok(final == "桌面应用没开着。", f"offline reply kept (got {final!r})")
+    _ok(n == 2 and "required" not in choices, f"no nudge for no-retry hint (got {n} {choices})")
+    _ok(len(ran) == 1, f"not rerun (got {ran})")
+
+
+def test_host_file_query_skill_avoids_heredoc() -> None:
+    import re
+
+    skill = ROOT.parent.parent / "skills" / "host-file-query" / "SKILL.md"
+    text = skill.read_text()
+    blocks = re.findall(r"```(?:bash)?\n(.*?)```", text, re.S)
+    _ok(blocks, "skill has an invocation example")
+    _ok(all("<<" not in block for block in blocks), f"fenced examples are not heredoc (got {blocks!r})")
+    _ok(any("bash -c" in block for block in blocks), "points at bash -c")
+    _ok("<<" in text and "不要" in text, "prose still warns that << confirms")
+    _ok("bash -s" not in "\n".join(blocks), "recommended fence is not bash -s heredoc")
+
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
@@ -761,6 +1032,11 @@ def main() -> None:
     asyncio.run(test_useless_find_react_retry_succeeds())
     asyncio.run(test_useless_find_think_only_nudges_then_fails())
     asyncio.run(test_success_after_retry_think_only_quotes_stdout())
+    asyncio.run(test_chinese_conclusion_nudges_without_rerun())
+    asyncio.run(test_required_revise_lets_model_pick_next_command())
+    asyncio.run(test_required_revise_stops_at_cap())
+    asyncio.run(test_denied_or_no_retry_is_not_nudged())
+    test_host_file_query_skill_avoids_heredoc()
     print("all passed")
 
 
