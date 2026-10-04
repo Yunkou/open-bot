@@ -89,7 +89,7 @@ def format_environment_block(
                 "用户当前正在网页浏览器里聊天（不是桌面应用）。"
                 "浏览器进程本身不能直接读写本机文件；"
                 "但若 list_machines 显示另有已连接（connected）的电脑应用，"
-                "必须用 host_ls / host_shell 等通过那台电脑代操作 Downloads / 桌面（不要拒绝、不要改用 sandbox）。"
+                "必须通过那台电脑代操作 Downloads / 桌面（先 load_skill 对应技能；不要拒绝、不要改用 sandbox）。"
                 "没有任何已连接电脑时，才说明需要先打开桌面应用。"
             )
         elif display:
@@ -117,15 +117,10 @@ def format_environment_block(
             "用户点名某台电脑时，用 list_machines 里对应且 connected 的 machine_id（以 label 识别）。"
             "没点名时用最常用的工作设备；它没连接就说明要打开那台，不要改到当前手机。"
             "还没有常用设备时才用当前 machine_id；浏览器且只有一台已连接电脑时用那一台。"
-            "对不上或有多台都像时先问用户。打开软件用 host_open；本机命令用 host_shell（不要用它跑 ssh）。"
-            "远程 SSH / 远程文件：先 load_skill host-ssh，再按说明调用 host_ssh_*（桌面应用无界面拨号）。"
-            "覆盖、删除、移动、主目录外写入、看起来会改动或有风险的 host_shell（以及 terminal）、远程写入/删除/执行："
-            "必须立刻调用对应 host_* / host_ssh_* 工具；Auto-review 硬拒绝则工具直接失败且没有允许卡。"
-            "该电脑为「始终允许」且自动审核开着时，除硬拒绝和用户规则「先询问」外直接执行，不要说「请点允许」。"
-            "「每次询问」、自动审核关闭、或命中「先询问」时，对话里才会出现「允许/拒绝」卡片，"
-            "用户在网页或任意已登录端点按钮即可（不必去电脑本地另确认）。"
-            "禁止用纯文字让用户「去电脑上确认」或「回复好/是」代替该卡片；调用后等待工具返回。"
-            "操作仍在目标电脑执行。不要用内部运行环境冒充本机文件。"
+            "对不上或有多台都像时先问用户。"
+            "本机命令、文件查询、远程 SSH：先 load_skill（host-shell / host-file-query / host-ssh）再按说明执行。"
+            "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小。"
+            "不要用内部运行环境冒充本机文件。"
         )
         lines.extend(_usual_machine_lines(machines))
         if not connected_labels:
@@ -246,16 +241,12 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
     if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
             "主机：先 list_machines 看 connected；点名用对应 machine_id，没点名用最常用工作设备。"
-            "打开软件用 host_open。本机上的命令都用 host_shell，自己写，不限于查文件；输出保持短，失败就换一条，不要重复。"
-            "host_ls 只用于已知的小目录，不要拿它做汇总后再自己排序。"
-            "远程 SSH 先 load_skill host-ssh 再调 host_ssh_*。"
-            "命令由系统审核，你不能自己批准或拒绝。结果在等待才是还没执行；denied 就是用户拒绝了，停下来说明。"
-            "硬危险命令会直接失败，不会出现允许卡。不要告诉用户去点确认，除非结果明确在等待。"
-            "删除调用 host_delete，多个文件传 paths 一次完成。用户说再试一次且上一轮是删除时，再次调用 host_delete。"
-            "没有已连接电脑时先 list_machines，并说明要打开桌面应用。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
+            "本机命令、文件查询、远程 SSH 的用法不写在系统提示里——需要时 load_skill"
+            "（host-shell / host-file-query / host-ssh），读完再调用工具。"
+            "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
         )
     lines.append(
-        "Skills：需要做法时 load_skill，读完自己执行。远程用 host-ssh。本机上的事用 host_shell。host-file-query 只在查文件时提供写法，脚本要你再用 host_shell 跑，load_skill 不会自动执行。"
+        "Skills：需要做法时 load_skill，读完自己执行；load_skill 不会自动跑脚本。"
     )
     return "\n".join(lines)
 

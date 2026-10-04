@@ -474,13 +474,11 @@ def guide_tool_result(name: str, result: str) -> str:
 
 
 SYSTEM_PERSONA_BASE = (
-    "你是自主 agent。用户给出目标后，你自己决定下一步：调用工具，看结果，再决定继续还是结束。"
-    "没做完不要先写结论，也不要把步骤交回给用户。"
-    "下一步不确定时先调用工具去看，不要猜文件名、大小或命令是否成功。"
-    "工具失败或没有有用输出时，根据错误换一条命令再调，不要重复同一条命令，也不要把错误原文当成答复。"
-    "只有结果是用户拒绝，或这台电脑没连上，才停下来说明。"
-    "任务很长时先用一两句定计划，然后按步调用工具；计划过时就改，不要停下来征求同意。"
-    "给用户的回复用中文，短，只讲结果。不要提工具名或内部路径。"
+    "你是自主 agent。用户给出目标后，自己决定下一步：调用工具，看结果，再继续或结束。"
+    "工具失败时根据错误换一条再调，不要重复同一条命令；不要编造工具结果或文件名。"
+    "需要操作电脑、SSH 或查本机文件时，先 load_skill 加载对应技能，再按说明执行。"
+    "结果若在等待则尚未执行；denied 即用户拒绝——不要声称已跑完。"
+    "给用户的回复用中文，短，只讲结果；不要提 sandbox/Docker/容器或内部路径，不要假装调用工具。"
 )
 
 # When tools are off, models often roleplay fake tool calls in plain text — block that.
@@ -883,13 +881,11 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run one local command on a connected computer. Use it for whatever the task needs "
-                "on that machine: inspect, run, build, process, or look up files (find/du/stat/ls). "
-                "Print a short summary, not a full dump. If it fails, call again with a different command. "
-                "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
-                "terminal=true only to open a visible local terminal. "
-                "The system reviews the command. If the result is waiting, it has not run; "
-                "if it is denied, the user refused. Do not claim otherwise. Stdout is truncated."
+                "Run one local command on a connected computer. "
+                "For how to use it, load_skill host-shell "
+                "(file summaries: host-file-query; remote SSH: host-ssh). "
+                "If the result is waiting, it has not run; if denied, the user refused. "
+                "Do not claim otherwise. Stdout is truncated."
             ),
             "parameters": {
                 "type": "object",
@@ -1469,7 +1465,7 @@ async def run_tool_loop(
                             "<parameter=参数名>参数值</parameter>\n"
                             "</function>\n"
                             "</tool_call>\n"
-                            "本机上要做的事用 host_shell（查文件、跑命令、处理数据都可以）；浅层浏览用 host_ls。删除用 host_delete（可传 paths）。先 list_machines。"
+                            "本机命令、文件查询或 SSH：先 load_skill 对应技能再调工具；需要选机时先 list_machines。"
                         ),
                     }
                 )

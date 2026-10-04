@@ -76,12 +76,13 @@ def test_tool_defs_include_list_machines() -> None:
     _ok("host_ssh_exec" in names and "host_ssh_ls" in names and "host_ssh_read" in names, "ssh client tools present")
     shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
     desc = str((shell.get("function") or {}).get("description") or "")
-    _ok("host_ssh" in desc, "local shell points remote ssh at host_ssh tools")
+    _ok("host-ssh" in desc, "local shell points remote ssh at host-ssh skill")
     env = format_environment_block(
         ClientContext(platform="macos", app="tauri", os="darwin", arch="arm64")
     )
-    _ok("load_skill host-ssh" in env, "env points remote ssh at host-ssh skill")
+    _ok("load_skill" in env and "host-ssh" in env, "env points remote ssh at host-ssh skill via load_skill")
     _ok("fingerprint" not in env.lower() and "ssh-agent" not in env.lower(), "env omits long ssh tutorial")
+    _ok("Auto-review" not in env and "host_delete" not in env, "env omits auto-review / delete how-to")
     _ok(tool_display_label("sandbox_ls") == "列出目录", "sandbox_ls alias")
     _ok(tool_display_label("sandbox_write") == "写入文件", "sandbox_write alias")
 
@@ -103,8 +104,11 @@ def test_system_prompt_routing() -> None:
     _ok("沙箱电脑" not in prompt, "no 沙箱电脑 in prompt")
     _ok("完全透明" in prompt or "只谈结果" in prompt, "instructs outcome-only user speech")
     _ok("必须 host_ls" not in prompt, "no longer forces host_ls for largest/newest")
-    _ok("host-file-query" in prompt, "routing mentions host-file-query skill")
-    _ok("host_shell" in prompt, "routing uses host_shell for file lookup")
+    _ok("load_skill" in prompt, "always-on prompt points at load_skill")
+    _ok("host-file-query" in prompt or "host-shell" in prompt, "routing names host skills to load")
+    _ok("find/du" not in prompt.lower() and "host_ls 只用于" not in prompt, "no find/du or host_ls how-to recipe")
+    _ok("paths 一次" not in prompt and "硬危险命令" not in prompt, "no delete-paths / auto-review how-to")
+    _ok("load_skill 不会自动执行" not in prompt and "脚本要你再用" not in prompt, "no host-file-query script recipe in prompt")
 
 
 
@@ -136,7 +140,8 @@ def test_host_ls_tool_is_shallow_browse() -> None:
     _ok("limit" in props and "sort" in props and "glob" in props, "host_ls has limit/sort/glob params")
     shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
     sdesc = str((shell.get("function") or {}).get("description") or "")
-    _ok("find" in sdesc.lower() or "summar" in sdesc.lower(), "host_shell mentions summaries")
+    _ok("load_skill" in sdesc and "host-shell" in sdesc, "host_shell desc points at load_skill host-shell")
+    _ok("find/du" not in sdesc.lower(), "host_shell desc does not embed find/du how-to")
 
 
 if __name__ == "__main__":
