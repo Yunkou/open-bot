@@ -246,22 +246,16 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
     if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
             "主机：先 list_machines 看 connected；点名用对应 machine_id，没点名用最常用工作设备。"
-            "host_open / host_shell / host_ls… 操作本机；远程 SSH 先 load_skill host-ssh 再调 host_ssh_*。"
-            "本机确认对齐 Grok Auto-review（确定性规则，禁止用对话模型自行批准/拒绝）："
-            "host_ls/read 与未命中风险模式的 host_shell（含 cd/ls/find/grep）免确认；curl|sh / 清根目录 / mkfs 等硬危险直接拒绝、不弹允许卡；"
-            "电脑为「始终允许」且自动审核开着时，删除、移动、改动类 shell 与远程写/删/exec 也直接执行（用户规则「先询问」命中时仍确认）。"
-            "「每次询问」或自动审核关闭时，覆盖、主目录外写入、删除、移动、风险 shell（重定向、rm/mv/cp、chmod、sudo、git push、装包、ssh、kill、命令替换、terminal）与远程写/删/exec 才出确认卡。"
-            "没有已连接电脑时如实说明（请先打开桌面应用），禁止编造 Downloads 文件名/大小；勿用 sandbox 冒充本机。"
-            "删除等危险操作：必须先调用 host_delete 等工具；确认卡由系统弹出（网页可点），"
-            "禁止用文字假装「已发起删除 / 请在电脑上确认 / 已批准」；工具结果是 denied 就是用户拒绝了。"
-            "用户说「再试一次」且上下文是删除时，必须再次调用 host_delete，不要只 host_ls 后编造批准状态。"
-            "问文件、大小、扩展名、占空间：用 host_shell 写只读命令，输出保持短；不要先 dump host_ls 再在模型侧排序。"
-            "host_ls 只用于浅层浏览（预期条目不多的已知目录）。"
-            "禁止用摘要或记忆编造文件名和大小；没有已连接电脑时先 list_machines 并如实说明。"
-            "同时删除多个文件时，一次调用 host_delete 并传 paths 数组；不要每个文件单独调用（否则会出多张确认卡）。"
+            "打开软件用 host_open。查文件、筛选、统计用 host_shell，自己写命令，输出保持短；失败就换一条，不要重复。"
+            "host_ls 只用于已知的小目录，不要拿它做汇总后再自己排序。"
+            "远程 SSH 先 load_skill host-ssh 再调 host_ssh_*。"
+            "命令由系统审核，你不能自己批准或拒绝。结果在等待才是还没执行；denied 就是用户拒绝了，停下来说明。"
+            "硬危险命令会直接失败，不会出现允许卡。不要告诉用户去点确认，除非结果明确在等待。"
+            "删除调用 host_delete，多个文件传 paths 一次完成。用户说再试一次且上一轮是删除时，再次调用 host_delete。"
+            "没有已连接电脑时先 list_machines，并说明要打开桌面应用。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
         )
     lines.append(
-        "Skills：目录 + load_skill；远程 SSH 用 host-ssh；本机文件查询用 host_shell。host-file-query skill 的 scripts/ 需要时再 load_skill + host_shell（load_skill 不自动跑脚本）。"
+        "Skills：需要做法时 load_skill，读完自己执行。远程用 host-ssh。本机文件查询用 host_shell；host-file-query 只提供写法，脚本要你再用 host_shell 跑，load_skill 不会自动执行。"
     )
     return "\n".join(lines)
 

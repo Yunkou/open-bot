@@ -268,7 +268,7 @@ def test_host_waits_stay_above_desktop_shell() -> None:
 def test_guide_on_timeout_and_shell_error() -> None:
     timed = guide_tool_result("host_shell", '{"ok": false, "error": "命令超过 120 秒还没结束"}')
     _ok("不要重复同一条命令" in timed, "timeout says do not repeat")
-    _ok("换一条命令再调用工具" in timed, "timeout asks for a revised tool call")
+    _ok("换一条命令再调用 host_shell" in timed, "timeout asks for a revised tool call")
     _ok("host_shell" in timed, "timeout keeps file lookup on host_shell")
     _ok("-exec stat" in timed, "timeout forbids per-file stat")
     _ok("字面量 $" in timed, "timeout warns about literal $")

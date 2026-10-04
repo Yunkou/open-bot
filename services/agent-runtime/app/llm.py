@@ -150,9 +150,9 @@ def _quote_tool_outputs(payloads: list[dict[str, Any]]) -> str:
 # Spoken to the model inside the tool result (ReAct observation), not a
 # second hardcoded shell. The model must choose the next command.
 CHEAPER_HOST_RETRY = (
-    "命令失败或没有有用输出。请根据上面的错误修正后换一条命令再调用工具，"
-    "不要重复同一条命令；find 里不要写字面量 $，也不要对每个文件 -exec stat；"
-    "查文件继续用 host_shell，按错误改命令。"
+    "这一步没做成。根据上面的错误换一条命令再调用 host_shell，不要重复同一条命令。"
+    "find 里不要写字面量 $，也不要对每个文件 -exec stat。输出保持短。"
+    "这是给你的观察，不是给用户的答复。"
 )
 
 # When the model answers with no new tool call after a failed host tool,
@@ -164,8 +164,8 @@ CHEAPER_HOST_RETRY = (
 # Never re-run the shell from here.
 TOOL_FAIL_NUDGE_CAP = 2
 TOOL_FAIL_NUDGE = (
-    "上一次工具调用失败或没有有用输出。请根据工具返回的错误修正命令后再次调用工具；"
-    "不要重复同一条命令。"
+    "还没做完。根据工具返回的错误换一条命令，再次调用工具；不要重复同一条命令。"
+    "不要用一段结论结束这一轮。"
 )
 
 # Truncate oversized tool observations before they enter model context.
@@ -474,7 +474,13 @@ def guide_tool_result(name: str, result: str) -> str:
 
 
 SYSTEM_PERSONA_BASE = (
-    "你是 open-bot 助手，回答简洁、有帮助，默认使用中文。"
+    "你是自主 agent。用户给出目标后，你自己决定下一步：调用工具，看结果，再决定继续还是结束。"
+    "没做完不要先写结论，也不要把步骤交回给用户。"
+    "下一步不确定时先调用工具去看，不要猜文件名、大小或命令是否成功。"
+    "工具失败或没有有用输出时，根据错误换一条命令再调，不要重复同一条命令，也不要把错误原文当成答复。"
+    "只有结果是用户拒绝，或这台电脑没连上，才停下来说明。"
+    "任务很长时先用一两句定计划，然后按步调用工具；计划过时就改，不要停下来征求同意。"
+    "给用户的回复用中文，短，只讲结果。不要提工具名或内部路径。"
 )
 
 # When tools are off, models often roleplay fake tool calls in plain text — block that.
@@ -877,17 +883,13 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run a local command on a connected computer. This is the general tool for file lookups "
-                "and other local commands, including find/du/stat/ls and one-off filters. "
+                "Run one local command on a connected computer. This is the general tool: "
+                "file lookups, filters, and other local work, including find/du/stat/ls. "
+                "Print a short summary, not a full dump. If it fails, call again with a different command. "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
-                "terminal=true only for a local interactive UI. "
-                "Auto-review (deterministic, no LLM self-approval): no command allowlist. "
-                "Hard deny (curl|sh, rm -rf /, mkfs, writing a block device) fails with no allow card. "
-                "When that computer is 始终允许 (exec_policy=allow) and Auto-review is on, other commands "
-                "including rm/mv/cp and installs run immediately — no confirm card — unless a user rule "
-                "explicitly says 先询问. exec_policy=ask or Auto-review off still confirms mutating commands. "
-                "Do not tell the user to click 允许 unless the tool result is actually waiting. "
-                "Stdout is truncated; keep commands that print short summaries."
+                "terminal=true only to open a visible local terminal. "
+                "The system reviews the command. If the result is waiting, it has not run; "
+                "if it is denied, the user refused. Do not claim otherwise. Stdout is truncated."
             ),
             "parameters": {
                 "type": "object",
