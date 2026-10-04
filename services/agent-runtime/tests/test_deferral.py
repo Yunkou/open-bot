@@ -61,5 +61,4 @@ def test_host_list_intent_forces_ls():
     assert host_followup_prompt([], messages) == CONTINUE_HOST_LIST
     assert host_followup_prompt(["host_ls"], messages) is None
     assert host_followup_prompt(["host_shell"], messages) is None
-    assert host_followup_prompt(["host_file_query"], messages) is None
     assert host_followup_prompt(["load_skill"], messages) is None

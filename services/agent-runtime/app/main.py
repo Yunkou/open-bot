@@ -903,7 +903,6 @@ async def openai_path(
             "host_move",
             "host_open",
             "host_shell",
-            "host_file_query",
             "host_ssh_ls",
             "host_ssh_read",
             "host_ssh_write",
@@ -951,21 +950,7 @@ async def openai_path(
                 if ssh_port and ssh_port != 22:
                     dest = f"{dest}:{ssh_port}"
             else:
-                if name == "host_file_query":
-                    from .host_file_query import build_command
-
-                    try:
-                        path = build_command(
-                            query=str(args.get("query") or ""),
-                            path=str(args.get("path") or ""),
-                            ext=str(args.get("ext") or ""),
-                            limit=args.get("limit"),
-                        )
-                    except ValueError as e:
-                        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
-                    dest = ""
-                    op = "shell"
-                elif name == "host_delete":
+                if name == "host_delete":
                     path = _host_delete_paths(args)
                     dest = str(args.get("dest") or "")
                 else:

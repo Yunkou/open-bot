@@ -28,7 +28,6 @@ from app.llm import (  # noqa: E402
     tool_result_fallback,
     truncate_tool_result_for_context,
 )
-from app.host_file_query import build_command  # noqa: E402
 from app.main import clamp_tool_rounds  # noqa: E402
 from app.machines import HOST_EXEC_TIMEOUT_SEC  # noqa: E402
 
@@ -270,7 +269,7 @@ def test_guide_on_timeout_and_shell_error() -> None:
     timed = guide_tool_result("host_shell", '{"ok": false, "error": "命令超过 120 秒还没结束"}')
     _ok("不要重复同一条命令" in timed, "timeout says do not repeat")
     _ok("换一条命令再调用工具" in timed, "timeout asks for a revised tool call")
-    _ok("host_file_query" in timed, "timeout names host_file_query")
+    _ok("host_shell" in timed, "timeout keeps file lookup on host_shell")
     _ok("-exec stat" in timed, "timeout forbids per-file stat")
     _ok("字面量 $" in timed, "timeout warns about literal $")
     failed = guide_tool_result("host_shell", '{"ok": false, "error": "启动失败"}')
@@ -278,13 +277,10 @@ def test_guide_on_timeout_and_shell_error() -> None:
     ok = guide_tool_result("host_shell", '{"ok": true, "output": "a"}')
     _ok("不要重复" not in ok, "success is unchanged")
     denied = guide_tool_result("host_shell", '{"ok": false, "denied": true, "error": "用户拒绝了这次操作"}')
-    _ok("host_file_query" not in denied, "a refusal is not a cheaper-find retry")
     offline = guide_tool_result("host_shell", '{"ok": false, "error": "应用没开着"}')
-    _ok("host_file_query" not in offline, "offline machine is not a find retry")
     ls = guide_tool_result("host_ls", '{"ok": false, "error": "没有在时限内完成或确认这次操作"}')
     _ok("不要重复同一条命令" in ls, "host timeout other than shell still guides")
     other = guide_tool_result("sandbox_shell", '{"ok": false, "error": "timeout"}')
-    _ok("host_file_query" not in other, "non-host tools are not given the file-query hint")
     bad_find = guide_tool_result(
         "host_shell",
         json.dumps(
@@ -346,7 +342,7 @@ async def test_timeout_allows_another_tool_round() -> None:
         if n == 2:
             tool_body = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
             _ok("不要重复同一条命令" in tool_body, "model sees do-not-repeat")
-            _ok("host_file_query" in tool_body, "model sees host_file_query hint")
+            _ok("host_shell" in tool_body, "model sees host_shell file lookup hint")
             _ok("-exec stat" in tool_body, "model sees no per-file stat")
             _ok(tools is not None, "follow-up round still has tools")
             return _shell_call("call_cheap", "find ~/Downloads -type f -print")
@@ -567,7 +563,7 @@ async def test_useless_find_react_retry_succeeds() -> None:
             _ok("unknown primary" in tool_body, "model sees the find error")
             _ok("不要重复同一条命令" in tool_body, "model sees revise note")
             _ok("字面量 $" in tool_body, "model sees no literal $")
-            _ok("host_file_query" in tool_body, "model sees host_file_query hint")
+            _ok("host_shell" in tool_body, "model sees host_shell file lookup hint")
             _ok(tools is not None, "follow-up still has tools")
             return _shell_call(
                 "call_fix",
@@ -1008,7 +1004,7 @@ async def test_denied_or_no_retry_is_not_nudged() -> None:
     _ok(len(ran) == 1, f"not rerun (got {ran})")
 
 
-def test_host_file_query_skill_avoids_heredoc() -> None:
+def test_host_file_skill_avoids_heredoc() -> None:
     import re
 
     skill = ROOT.parent.parent / "skills" / "host-file-query" / "SKILL.md"
@@ -1017,6 +1013,7 @@ def test_host_file_query_skill_avoids_heredoc() -> None:
     _ok(blocks, "skill has an invocation example")
     _ok(all("<<" not in block for block in blocks), f"fenced examples are not heredoc (got {blocks!r})")
     _ok(any("bash -c" in block for block in blocks), "points at bash -c")
+    _ok("host_shell" in text, "skill routes queries through host_shell")
     _ok("<<" in text and "不要" in text, "prose still warns that << confirms")
     _ok("bash -s" not in "\n".join(blocks), "recommended fence is not bash -s heredoc")
 
@@ -1051,25 +1048,6 @@ def test_default_interactive_round_cap() -> None:
     _ok(clamp_tool_rounds(4) == 4, "explicit lower still allowed")
     _ok(clamp_tool_rounds(16) == 16, "background 16 kept")
     _ok(clamp_tool_rounds(100) == 24, "hard ceiling")
-
-
-def test_host_file_query_builds_readonly_shell() -> None:
-    cmd = build_command(query="largest", path="~/Downloads", limit=5)
-    _ok(cmd.startswith("bash -c "), f"bash -c (got {cmd[:40]!r})")
-    _ok("<<" not in cmd, "no heredoc")
-    _ok("find" in cmd and "sort" in cmd, "uses find/sort")
-    cmd2 = build_command(query="by_ext", ext="mp4", limit=3)
-    _ok("mp4" in cmd2, "ext in command")
-    try:
-        build_command(query="by_ext")
-        raise AssertionError("by_ext without ext should fail")
-    except ValueError:
-        _ok(True, "by_ext requires ext")
-    try:
-        build_command(query="rm")
-        raise AssertionError("unknown query should fail")
-    except ValueError:
-        _ok(True, "rejects unknown query")
 
 
 async def test_context_overflow_compacts_and_retries() -> None:
@@ -1225,11 +1203,10 @@ def main() -> None:
     asyncio.run(test_required_revise_lets_model_pick_next_command())
     asyncio.run(test_required_revise_stops_at_cap())
     asyncio.run(test_denied_or_no_retry_is_not_nudged())
-    test_host_file_query_skill_avoids_heredoc()
+    test_host_file_skill_avoids_heredoc()
     test_truncate_tool_result_keeps_head_and_tail()
     test_context_length_detector()
     test_default_interactive_round_cap()
-    test_host_file_query_builds_readonly_shell()
     asyncio.run(test_context_overflow_compacts_and_retries())
     asyncio.run(test_round_cap_allows_twelve_tool_rounds())
     print("all passed")

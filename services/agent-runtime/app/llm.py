@@ -13,7 +13,6 @@ import httpx
 
 from .builtin_tools import BUILTIN_TOOL_DEFS
 from .openbot_api import ROUTINE_TOOL_DEFS
-from .host_file_query import HOST_FILE_QUERY_TOOL
 from .deferral import CONTINUE_WORK, host_followup_prompt, last_real_user_text, turn_unfinished
 from .client_env import (
     ClientContext,
@@ -153,7 +152,7 @@ def _quote_tool_outputs(payloads: list[dict[str, Any]]) -> str:
 CHEAPER_HOST_RETRY = (
     "命令失败或没有有用输出。请根据上面的错误修正后换一条命令再调用工具，"
     "不要重复同一条命令；find 里不要写字面量 $，也不要对每个文件 -exec stat；"
-    "查文件继续用 host_shell，按错误改命令；三种固定查询也可以用 host_file_query。"
+    "查文件继续用 host_shell，按错误改命令。"
 )
 
 # When the model answers with no new tool call after a failed host tool,
@@ -735,7 +734,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "name": "host_ls",
             "description": (
                 "Shallow directory listing on a connected computer (browse a known small folder). "
-                "For a deep or filtered listing, use host_shell (or host_file_query for the three canned queries) "
+                "For a deep or filtered listing, use host_shell "
                 "and report compact lines. "
                 "Default limit is small; response may set truncated=true with total. "
                 "Optional limit (1–200), sort (mtime|size|name), glob (e.g. *.mp4, name only). "
@@ -766,7 +765,6 @@ TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
     },
-    HOST_FILE_QUERY_TOOL,
     {
         "type": "function",
         "function": {
@@ -881,7 +879,6 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "description": (
                 "Run a local command on a connected computer. This is the general tool for file lookups "
                 "and other local commands, including find/du/stat/ls and one-off filters. "
-                "host_file_query is only an optional shortcut for largest, by-extension, or newest. "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
                 "terminal=true only for a local interactive UI. "
                 "Auto-review (deterministic, no LLM self-approval): no command allowlist. "
@@ -1470,7 +1467,7 @@ async def run_tool_loop(
                             "<parameter=参数名>参数值</parameter>\n"
                             "</function>\n"
                             "</tool_call>\n"
-                            "查本机：先 list_machines；文件查询用 host_shell（最大/按扩展名/最新也可以用 host_file_query）；浅层浏览用 host_ls。删除用 host_delete（可传 paths）。"
+                            "查本机：先 list_machines；文件查询（包括最大/按扩展名/最新）用 host_shell；浅层浏览用 host_ls。删除用 host_delete（可传 paths）。"
                         ),
                     }
                 )
