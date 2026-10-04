@@ -39,7 +39,7 @@ CONTINUE_HOST_DELETE = (
 CONTINUE_HOST_LIST = (
     "用户在问本机目录/文件（如最大、最新、排行），但本轮还没有调用 "
     "list_machines / host_file_query / host_shell / load_skill（host-file-query）/ host_ls（或对应 host_ssh_ls）。"
-    "聚合查询优先 host_file_query 取摘要；"
+    "文件查询用 host_shell；最大/按扩展名/最新也可以 host_file_query；"
     "host_ls 仅浅层浏览。禁止根据摘要或记忆编造文件名和大小。"
 )
 

@@ -1,6 +1,6 @@
 ---
 name: host-file-query
-description: Query files on a connected computer with compact summaries (largest by size, by extension such as mp4, newest of a type). Prefer the host_file_query tool when available; otherwise use this skill with host_shell. Use when the user asks for biggest/largest files, which mp4s, Downloads disk use, or top-N by size/type. Prefer this over dumping host_ls.
+description: Query files on a connected computer with compact summaries (largest by size, by extension such as mp4, newest of a type). host_shell is the general tool. host_file_query is an optional shortcut for those three canned queries. Use when the user asks for biggest/largest files, which mp4s, Downloads disk use, or top-N by size/type. Prefer a short command over dumping host_ls.
 ---
 
 # 本机文件查询（摘要）
@@ -9,7 +9,7 @@ description: Query files on a connected computer with compact summaries (largest
 
 ## 默认路径（优先）
 
-直接调用工具 **`host_file_query`**（只读；经与 `host_shell` 相同的 Auto-review / 确认 / 拒绝路径，不绕过）：
+通用查法仍是 **`host_shell`**。下面三种固定查询也可以直接调 **`host_file_query`**（只读；经与 `host_shell` 相同的 Auto-review / 确认 / 拒绝路径，不绕过）：
 
 | query | 含义 | 参数 |
 |------|------|------|
@@ -33,7 +33,7 @@ description: Query files on a connected computer with compact summaries (largest
 bash -c 'SCRIPT_BODY' -- "$HOME/Downloads" mp4 10
 ```
 
-也可以不取脚本，直接 `host_shell` 跑等价的只读 `find` / `du` / `stat`（输出保持短，同样不要写 `<<`）。长尾查询才这样；常见「最大 / 按扩展名」用 `host_file_query`。
+也可以不取脚本，直接 `host_shell` 跑只读 `find` / `du` / `stat`（输出保持短，同样不要写 `<<`）。这是默认查法；三种固定查询用 `host_file_query` 只是少写一条命令。
 
 ## 脚本
 
