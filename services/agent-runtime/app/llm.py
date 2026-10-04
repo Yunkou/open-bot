@@ -883,8 +883,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run one local command on a connected computer. This is the general tool: "
-                "file lookups, filters, and other local work, including find/du/stat/ls. "
+                "Run one local command on a connected computer. Use it for whatever the task needs "
+                "on that machine: inspect, run, build, process, or look up files (find/du/stat/ls). "
                 "Print a short summary, not a full dump. If it fails, call again with a different command. "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
                 "terminal=true only to open a visible local terminal. "
@@ -1469,7 +1469,7 @@ async def run_tool_loop(
                             "<parameter=参数名>参数值</parameter>\n"
                             "</function>\n"
                             "</tool_call>\n"
-                            "查本机：先 list_machines；文件查询（包括最大/按扩展名/最新）用 host_shell；浅层浏览用 host_ls。删除用 host_delete（可传 paths）。"
+                            "本机上要做的事用 host_shell（查文件、跑命令、处理数据都可以）；浅层浏览用 host_ls。删除用 host_delete（可传 paths）。先 list_machines。"
                         ),
                     }
                 )

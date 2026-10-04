@@ -246,7 +246,7 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
     if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
             "主机：先 list_machines 看 connected；点名用对应 machine_id，没点名用最常用工作设备。"
-            "打开软件用 host_open。查文件、筛选、统计用 host_shell，自己写命令，输出保持短；失败就换一条，不要重复。"
+            "打开软件用 host_open。本机上的命令都用 host_shell，自己写，不限于查文件；输出保持短，失败就换一条，不要重复。"
             "host_ls 只用于已知的小目录，不要拿它做汇总后再自己排序。"
             "远程 SSH 先 load_skill host-ssh 再调 host_ssh_*。"
             "命令由系统审核，你不能自己批准或拒绝。结果在等待才是还没执行；denied 就是用户拒绝了，停下来说明。"
@@ -255,7 +255,7 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
             "没有已连接电脑时先 list_machines，并说明要打开桌面应用。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
         )
     lines.append(
-        "Skills：需要做法时 load_skill，读完自己执行。远程用 host-ssh。本机文件查询用 host_shell；host-file-query 只提供写法，脚本要你再用 host_shell 跑，load_skill 不会自动执行。"
+        "Skills：需要做法时 load_skill，读完自己执行。远程用 host-ssh。本机上的事用 host_shell。host-file-query 只在查文件时提供写法，脚本要你再用 host_shell 跑，load_skill 不会自动执行。"
     )
     return "\n".join(lines)
 
