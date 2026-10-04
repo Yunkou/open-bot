@@ -147,41 +147,20 @@ def _quote_tool_outputs(payloads: list[dict[str, Any]]) -> str:
     return "结果如下：\n\n" + body
 
 
-def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
-    """Visible reply when tools already ran but the model left no user-facing text.
-
-    A timed-out or failed tool still says so. A successful tool result is
-    quoted (truncated if huge) instead of an apology that offers a narrower
-    command — the data is already in the thread.
-    """
-    payloads = _tool_payloads(messages)
-    err = _payload_error(payloads[-1]) if payloads else ""
-    if _timeoutish(err):
-        return (
-            "刚才的命令超过时限被停掉了，所以这次没有查完。"
-            "我可以改成更快的查法再试，比如只看目录顶层，或用 du 取最大的几条摘要。"
-        )
-    if err:
-        short = " ".join(err.split())
-        if len(short) > 180:
-            short = short[:180] + "…"
-        quoted = _quote_tool_outputs(payloads)
-        head = f"工具没有成功：{short}。"
-        tail = "需要的话我可以换个更窄的命令再试。"
-        if quoted:
-            return f"{head}\n\n{quoted}\n\n{tail}"
-        return f"{head}{tail}"
-    quoted = _quote_tool_outputs(payloads)
-    if quoted:
-        return quoted
-    return "命令已经执行完，但没有可显示的输出。"
-
-
-# Spoken to the model inside the tool result, not a second hardcoded shell.
+# Spoken to the model inside the tool result (ReAct observation), not a
+# second hardcoded shell. The model must choose the next command.
 CHEAPER_HOST_RETRY = (
-    "不要重复同一条命令。只重试一次，换更便宜的做法："
-    "如果有 host-file-query skill，先 load_skill host-file-query；"
-    "否则用 find，不要对每个文件 -exec stat。"
+    "命令失败或没有有用输出。请根据上面的错误修正后换一条命令再调用工具，"
+    "不要重复同一条命令；find 里不要写字面量 $，也不要对每个文件 -exec stat；"
+    "查本机文件优先 load_skill host-file-query。"
+)
+
+# When the model answers with think-only after a failed tool, nudge it to
+# revise and call a tool again. Cap so the turn cannot spin forever.
+TOOL_FAIL_NUDGE_CAP = 2
+TOOL_FAIL_NUDGE = (
+    "上一次工具调用失败或没有有用输出。请根据工具返回的错误修正命令后再次调用工具；"
+    "不要重复同一条命令。"
 )
 
 _NO_RETRY_HINT = (
@@ -196,6 +175,147 @@ _NO_RETRY_HINT = (
     "端口无效",
 )
 
+_ERRORISH_OUTPUT = re.compile(
+    r"(?i)("
+    r"unknown primary or operator|"
+    r"command not found|"
+    r"syntax error|"
+    r"not a valid|"
+    r"illegal option|"
+    r"invalid option|"
+    r"No such file or directory|"
+    r"^find:\s|"
+    r"^usage:\s|"
+    r"找不到命令|"
+    r"没有那个文件|"
+    r"语法错误"
+    r")"
+)
+
+
+def _strip_retry_note(text: str) -> str:
+    raw = str(text or "")
+    if not raw:
+        return ""
+    if CHEAPER_HOST_RETRY in raw:
+        raw = raw.replace(CHEAPER_HOST_RETRY, "")
+    return raw.strip(" \n;")
+
+
+def _errorish_line(line: str) -> bool:
+    s = (line or "").strip()
+    if not s:
+        return False
+    return bool(_ERRORISH_OUTPUT.search(s))
+
+
+def _useful_shell_output(obj: dict[str, Any]) -> str:
+    """Real command output, excluding stderr-style error dumps merged into output."""
+    chunks: list[str] = []
+    for key in ("stdout", "output"):
+        val = obj.get(key)
+        if not isinstance(val, str):
+            continue
+        kept: list[str] = []
+        for line in val.splitlines():
+            if _errorish_line(line):
+                continue
+            if line.strip():
+                kept.append(line)
+        if kept:
+            chunks.append("\n".join(kept).strip())
+    for chunk in chunks:
+        if chunk:
+            return chunk
+    return ""
+
+
+def _observation_blob(obj: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("error", "stderr", "stdout", "output"):
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip() and val.strip() not in parts:
+            parts.append(val.strip())
+    return "\n".join(parts)
+
+
+def _error_summary(obj: dict[str, Any]) -> str:
+    err = _strip_retry_note(str(obj.get("error") or ""))
+    if err and err != CHEAPER_HOST_RETRY:
+        return err
+    for key in ("stderr", "output", "stdout"):
+        val = obj.get(key)
+        if not isinstance(val, str):
+            continue
+        lines = [ln.strip() for ln in val.splitlines() if _errorish_line(ln)]
+        if lines:
+            return "\n".join(lines)
+    return _observation_blob(obj).strip()
+
+
+def tool_observation_failed(obj: dict[str, Any] | None) -> bool:
+    """True when a tool observation is an error or useless (no real stdout).
+
+    Used for ReAct: feed the observation back so the *model* revises the
+    next command. Never auto-re-executes the same shell.
+    """
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("denied"):
+        return False
+    err = _strip_retry_note(str(obj.get("error") or ""))
+    if any(mark in err for mark in _NO_RETRY_HINT):
+        return False
+    if obj.get("ok") is False:
+        return True
+    code = obj.get("exit_code")
+    try:
+        if code is not None and int(code) != 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    blob = _observation_blob(obj)
+    if blob and _ERRORISH_OUTPUT.search(blob) and not _useful_shell_output(obj):
+        return True
+    return False
+
+
+def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
+    """Visible reply when tools already ran but the model left no user-facing text.
+
+    A timed-out tool keeps the strategy hint. Other failures show a short
+    Chinese failure (command + error) — not an apology and not a raw dump
+    treated as success. A successful result is quoted (truncated if huge).
+    """
+    payloads = _tool_payloads(messages)
+    last = payloads[-1] if payloads else None
+    err = _payload_error(last) if last else ""
+    err_clean = _strip_retry_note(err)
+    if _timeoutish(err) or _timeoutish(err_clean):
+        return (
+            "刚才的命令超过时限被停掉了，所以这次没有查完。"
+            "我可以改成更快的查法再试，比如只看目录顶层，或用 du 取最大的几条摘要。"
+        )
+    if last and tool_observation_failed(last):
+        detail = err_clean if err_clean and err_clean != "工具失败" else _error_summary(last)
+        detail = _strip_retry_note(detail) or "没有有用输出"
+        short = " ".join(detail.split())
+        if len(short) > 200:
+            short = short[:200] + "…"
+        cmd = " ".join(str(last.get("command") or "").split())
+        if len(cmd) > 120:
+            cmd = cmd[:120] + "…"
+        if cmd:
+            return f"命令执行失败：`{cmd}`\n{short}"
+        return f"命令执行失败：{short}"
+    # Quote useful successes only — do not mix earlier failed observations
+    # into the visible reply after a later retry worked.
+    good = [p for p in payloads if not tool_observation_failed(p)]
+    quoted = _quote_tool_outputs(good or payloads)
+    if quoted:
+        return quoted
+    return "命令已经执行完，但没有可显示的输出。"
+
 
 def _timeoutish(err: str) -> bool:
     folded = err.lower()
@@ -208,10 +328,16 @@ def _timeoutish(err: str) -> bool:
     )
 
 
-def guide_tool_result(name: str, result: str) -> str:
-    """On host_shell failure or a host timeout, tell the model to retry once cheaper.
+def _last_tool_payload(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    payloads = _tool_payloads(messages)
+    return payloads[-1] if payloads else None
 
-    The agent loop keeps going after this result. Do not start another shell here.
+
+def guide_tool_result(name: str, result: str) -> str:
+    """Annotate a failed/useless host tool observation for a ReAct revise.
+
+    Returns the observation (with a short revise note) to the model. Does not
+    re-execute any command — the model must decide the next tool call.
     """
     raw = result if isinstance(result, str) else str(result or "")
     hostish = name == "host_shell" or name.startswith("host_")
@@ -222,20 +348,25 @@ def guide_tool_result(name: str, result: str) -> str:
     except json.JSONDecodeError:
         obj = None
     if isinstance(obj, dict):
-        if obj.get("ok") is True and not str(obj.get("error") or "").strip():
-            return raw
         if obj.get("denied"):
             return raw
         err = str(obj.get("error") or "")
         if any(mark in err for mark in _NO_RETRY_HINT):
             return raw
-        if name != "host_shell" and not _timeoutish(err):
+        failed = tool_observation_failed(obj)
+        if not failed:
+            return raw
+        if name != "host_shell" and not _timeoutish(err) and not _timeoutish(
+            _observation_blob(obj)
+        ):
             return raw
         if CHEAPER_HOST_RETRY in err or obj.get("retry") == CHEAPER_HOST_RETRY:
             return raw
         out = dict(obj)
+        diag = _strip_retry_note(err) or _error_summary(obj)
+        out["ok"] = False
         out["retry"] = CHEAPER_HOST_RETRY
-        out["error"] = f"{err}\n{CHEAPER_HOST_RETRY}" if err else CHEAPER_HOST_RETRY
+        out["error"] = f"{diag}\n{CHEAPER_HOST_RETRY}" if diag else CHEAPER_HOST_RETRY
         return json.dumps(out, ensure_ascii=False)
     if name != "host_shell" and not _timeoutish(raw):
         return raw
@@ -1141,6 +1272,7 @@ async def run_tool_loop(
     markup_hint_added = False
     continued = False
     reasoning_only = False
+    fail_nudges = 0
     for _ in range(max_rounds):
         await _checkpoint()
         try:
@@ -1289,6 +1421,25 @@ async def run_tool_loop(
             msgs.append({"role": "user", "content": host_nudge})
             final = ""
             continue
+        # ReAct: failed/useless tool + think-only/empty → ask the model to
+        # revise and call again. Cap nudges; never re-run the same shell here.
+        if used and fail_nudges < TOOL_FAIL_NUDGE_CAP:
+            last_obs = _last_tool_payload(msgs)
+            if last_obs is not None and tool_observation_failed(last_obs):
+                if reasoning_only or not (final or "").strip():
+                    fail_nudges += 1
+                    reasoning_only = False
+                    if on_status is not None:
+                        await on_status(
+                            {
+                                "phase": "thinking",
+                                "label": "正在根据错误修正命令",
+                            }
+                        )
+                    msgs.append({"role": "assistant", "content": final or ""})
+                    msgs.append({"role": "user", "content": TOOL_FAIL_NUDGE})
+                    final = ""
+                    continue
         break
     if not final and msgs and not reasoning_only:
         data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)

@@ -15,11 +15,14 @@ sys.path.insert(0, str(ROOT))
 
 from app.llm import (  # noqa: E402
     CHEAPER_HOST_RETRY,
+    TOOL_FAIL_NUDGE,
+    TOOL_FAIL_NUDGE_CAP,
     AutoToolChoiceUnsupported,
     LLMOverride,
     guide_tool_result,
     is_auto_tool_choice_unsupported,
     run_tool_loop,
+    tool_observation_failed,
     tool_result_fallback,
 )
 from app.machines import HOST_EXEC_TIMEOUT_SEC  # noqa: E402
@@ -175,9 +178,10 @@ async def test_run_tool_loop_markup_after_fallback() -> None:
 
 
 async def test_tool_timeout_reasoning_only_is_visible() -> None:
-    """A timed-out tool plus a think-only follow-up must not end the turn blank."""
+    """A timed-out tool plus think-only follow-ups nudges, then shows a timeout reply."""
     os.environ["OPENAI_ENABLE_TOOLS"] = "1"
     calls = {"n": 0}
+    nudges = {"n": 0}
 
     async def fake_chat(
         messages: list[dict[str, Any]],
@@ -210,6 +214,8 @@ async def test_tool_timeout_reasoning_only_is_visible() -> None:
                 ],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18},
             }
+        if any(m.get("content") == TOOL_FAIL_NUDGE for m in messages if m.get("role") == "user"):
+            nudges["n"] += 1
         return {
             "choices": [
                 {
@@ -235,14 +241,18 @@ async def test_tool_timeout_reasoning_only_is_visible() -> None:
                 [{"role": "user", "content": "看看最不常用的大文件"}],
                 api_key="sk-test",
                 tool_handler=tool_handler,
-                max_rounds=4,
+                max_rounds=8,
                 override=LLMOverride(enable_tools=True),
             )
 
     _ok(used == ["host_shell"], f"used {used}")
     _ok(final and "<think>" not in final, f"visible fallback (got {final!r})")
     _ok("超过时限" in final, f"timeout strategy text (got {final!r})")
-    _ok(calls["n"] == 2, f"no extra completion after think-only (got {calls['n']})")
+    _ok(nudges["n"] == TOOL_FAIL_NUDGE_CAP, f"nudged {nudges['n']} times (cap {TOOL_FAIL_NUDGE_CAP})")
+    _ok(
+        calls["n"] == 1 + 1 + TOOL_FAIL_NUDGE_CAP,
+        f"tool round + think + {TOOL_FAIL_NUDGE_CAP} nudges (got {calls['n']})",
+    )
 
 
 
@@ -254,9 +264,10 @@ def test_host_waits_stay_above_desktop_shell() -> None:
 def test_guide_on_timeout_and_shell_error() -> None:
     timed = guide_tool_result("host_shell", '{"ok": false, "error": "命令超过 120 秒还没结束"}')
     _ok("不要重复同一条命令" in timed, "timeout says do not repeat")
-    _ok("只重试一次" in timed, "timeout says retry once")
+    _ok("换一条命令再调用工具" in timed, "timeout asks for a revised tool call")
     _ok("host-file-query" in timed, "timeout names the skill")
     _ok("-exec stat" in timed, "timeout forbids per-file stat")
+    _ok("字面量 $" in timed, "timeout warns about literal $")
     failed = guide_tool_result("host_shell", '{"ok": false, "error": "启动失败"}')
     _ok(CHEAPER_HOST_RETRY in failed, "shell error gets the same guidance")
     ok = guide_tool_result("host_shell", '{"ok": true, "output": "a"}')
@@ -269,6 +280,21 @@ def test_guide_on_timeout_and_shell_error() -> None:
     _ok("不要重复同一条命令" in ls, "host timeout other than shell still guides")
     other = guide_tool_result("sandbox_shell", '{"ok": false, "error": "timeout"}')
     _ok("host-file-query" not in other, "non-host tools are not given the file-query hint")
+    bad_find = guide_tool_result(
+        "host_shell",
+        json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": "find ~/Downloads -name $",
+                "output": "find: $: unknown primary or operator\n",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    _ok(CHEAPER_HOST_RETRY in bad_find, "useless find stdout is guided")
+    _ok('"ok": false' in bad_find.lower() or '"ok":false' in bad_find.replace(" ", "").lower(), "marks observation failed")
+    _ok("unknown primary" in bad_find, "keeps the find error in the observation")
 
 
 def _shell_call(call_id: str, command: str) -> dict[str, Any]:
@@ -448,33 +474,50 @@ async def test_success_stdout_think_only_is_quoted() -> None:
 
 
 def test_quote_success_failure_and_truncation() -> None:
-    success = tool_result_fallback(
+    useless = tool_result_fallback(
         [
             {
                 "role": "tool",
                 "content": json.dumps(
                     {
                         "ok": True,
+                        "exit_code": 0,
+                        "command": "find ~/Downloads -name $",
                         "output": "find: $: unknown primary or operator\n",
-                        "stderr": "find: $: unknown primary or operator",
                     },
                     ensure_ascii=False,
                 ),
             }
         ]
     )
-    _ok("unknown primary" in success, f"quotes stdout (got {success!r})")
-    _ok("更窄" not in success and "没能整理" not in success, f"success is not an apology (got {success!r})")
-    _ok(success.count("unknown primary") == 1, "stderr duplicate dropped")
+    _ok("命令执行失败" in useless, f"useless find is a failure (got {useless!r})")
+    _ok("unknown primary" in useless, f"shows the error (got {useless!r})")
+    _ok("find ~/Downloads" in useless, f"shows the command (got {useless!r})")
+    _ok("结果如下" not in useless and "更窄" not in useless and "没能整理" not in useless, f"not a dump/apology (got {useless!r})")
+    _ok(tool_observation_failed({"ok": True, "output": "find: $: unknown primary or operator"}), "detector marks find $")
 
     empty = tool_result_fallback([{"role": "tool", "content": '{"ok": true, "output": ""}'}])
     _ok("没有可显示的输出" in empty and "更窄" not in empty, f"empty success (got {empty!r})")
 
     failed = tool_result_fallback(
-        [{"role": "tool", "content": '{"ok": false, "error": "启动失败", "output": "partial"}'}]
+        [
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "ok": False,
+                        "error": "启动失败",
+                        "command": "find ~",
+                        "output": "partial",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
     )
-    _ok("工具没有成功" in failed and "更窄的命令" in failed, f"failure still offers a narrower retry (got {failed!r})")
-    _ok("partial" in failed, f"failure still shows output (got {failed!r})")
+    _ok("命令执行失败" in failed and "启动失败" in failed, f"short Chinese failure (got {failed!r})")
+    _ok("更窄的命令" not in failed and "没能整理" not in failed, f"no old apology (got {failed!r})")
+    _ok("`find ~`" in failed, f"includes command (got {failed!r})")
 
     timed = tool_result_fallback(
         [{"role": "tool", "content": '{"ok": false, "error": "命令超过 30 秒还没结束", "output": "half"}'}]
@@ -490,6 +533,219 @@ def test_quote_success_failure_and_truncation() -> None:
     _ok("更窄" not in quoted, "truncation is not a retry hint")
 
 
+
+async def test_useless_find_react_retry_succeeds() -> None:
+    """Failed/useless host_shell is fed back; the model revises; success is used."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    ran: list[str] = []
+    seen_bodies: list[str] = []
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        n = len(seen_bodies) + 1
+        if n == 1:
+            seen_bodies.append("first")
+            return _shell_call("call_bad", "find ~/Downloads -name $ | head")
+        if n == 2:
+            tool_body = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
+            seen_bodies.append(tool_body)
+            _ok("unknown primary" in tool_body, "model sees the find error")
+            _ok("不要重复同一条命令" in tool_body, "model sees revise note")
+            _ok("字面量 $" in tool_body, "model sees no literal $")
+            _ok("host-file-query" in tool_body, "model sees the skill")
+            _ok(tools is not None, "follow-up still has tools")
+            return _shell_call(
+                "call_fix",
+                "find ~/Downloads -type f -name '*.mp4' -o -name '*.ts' | head",
+            )
+        return {"choices": [{"message": {"role": "assistant", "content": "有 a.mp4 和 b.ts"}}]}
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        cmd = str(args.get("command") or "")
+        ran.append(cmd)
+        if "name $" in cmd:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "command": cmd,
+                    "output": "find: $: unknown primary or operator\n",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": cmd,
+                "output": "a.mp4\nb.ts\n",
+            },
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看我电脑上有哪些视频文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=6,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell", "host_shell"], f"model chose a second command (got {used})")
+    _ok(len(ran) == 2 and ran[0] != ran[1], f"commands differ (got {ran})")
+    _ok("$" not in ran[1] or "name $" not in ran[1], f"revised command (got {ran[1]!r})")
+    _ok(final == "有 a.mp4 和 b.ts", f"answer from successful retry (got {final!r})")
+
+
+async def test_useless_find_think_only_nudges_then_fails() -> None:
+    """Think-only after a useless find is nudged, then a short Chinese failure."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    calls = {"n": 0}
+    ran: list[str] = []
+    nudge_rounds = {"n": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _shell_call("call_bad", "find ~/Downloads -name $")
+        if any(m.get("content") == TOOL_FAIL_NUDGE for m in messages if m.get("role") == "user"):
+            nudge_rounds["n"] += 1
+            _ok(tools is not None, "nudge round still has tools")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>find 报错了，不知道怎么改</think>",
+                    }
+                }
+            ]
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        cmd = str(args.get("command") or "")
+        ran.append(cmd)
+        return json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": cmd,
+                "output": "find: $: unknown primary or operator\n",
+            },
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看视频文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=8,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"only model-issued shells (got {used})")
+    _ok(ran == ["find ~/Downloads -name $"], f"did not auto-rerun (got {ran})")
+    _ok(nudge_rounds["n"] == TOOL_FAIL_NUDGE_CAP, f"nudged {nudge_rounds['n']}")
+    _ok("命令执行失败" in final, f"short failure (got {final!r})")
+    _ok("unknown primary" in final, f"includes error (got {final!r})")
+    _ok("结果如下" not in final and "更窄" not in final, f"not dump/apology (got {final!r})")
+    _ok("<think>" not in final, f"think stripped (got {final!r})")
+
+
+async def test_success_after_retry_think_only_quotes_stdout() -> None:
+    """After a revised command succeeds, think-only quotes that stdout."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    ran: list[str] = []
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        tool_count = sum(1 for m in messages if m.get("role") == "tool")
+        if tool_count == 0:
+            return _shell_call("call_bad", "find ~/Downloads -name $")
+        if tool_count == 1:
+            return _shell_call("call_ok", "find ~/Downloads -name '*.mp4' | head")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>列表已经有了</think>",
+                    }
+                }
+            ]
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        cmd = str(args.get("command") or "")
+        ran.append(cmd)
+        if "name $" in cmd:
+            return json.dumps(
+                {
+                    "ok": True,
+                    "exit_code": 0,
+                    "command": cmd,
+                    "output": "find: $: unknown primary or operator\n",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": cmd,
+                "output": "movie.mp4\nclip.ts\n",
+            },
+            ensure_ascii=False,
+        )
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "视频呢"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=6,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell", "host_shell"], f"used {used}")
+    _ok("movie.mp4" in final and "clip.ts" in final, f"quotes success (got {final!r})")
+    _ok("命令执行失败" not in final, f"not a failure (got {final!r})")
+    _ok("unknown primary" not in final, f"does not quote the failed obs (got {final!r})")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
@@ -502,6 +758,9 @@ def main() -> None:
     test_guide_on_timeout_and_shell_error()
     asyncio.run(test_timeout_allows_another_tool_round())
     asyncio.run(test_tool_exception_still_continues())
+    asyncio.run(test_useless_find_react_retry_succeeds())
+    asyncio.run(test_useless_find_think_only_nudges_then_fails())
+    asyncio.run(test_success_after_retry_think_only_quotes_stdout())
     print("all passed")
 
 
