@@ -13,7 +13,8 @@ import httpx
 
 from .builtin_tools import BUILTIN_TOOL_DEFS
 from .openbot_api import ROUTINE_TOOL_DEFS
-from .deferral import CONTINUE_WORK, host_followup_prompt, turn_unfinished
+from .host_file_query import HOST_FILE_QUERY_TOOL
+from .deferral import CONTINUE_WORK, host_followup_prompt, last_real_user_text, turn_unfinished
 from .client_env import (
     ClientContext,
     format_environment_block,
@@ -152,7 +153,7 @@ def _quote_tool_outputs(payloads: list[dict[str, Any]]) -> str:
 CHEAPER_HOST_RETRY = (
     "命令失败或没有有用输出。请根据上面的错误修正后换一条命令再调用工具，"
     "不要重复同一条命令；find 里不要写字面量 $，也不要对每个文件 -exec stat；"
-    "查本机文件优先 load_skill host-file-query。"
+    "查本机最大/按扩展名优先 host_file_query（只读，走与 host_shell 相同审核）。"
 )
 
 # When the model answers with no new tool call after a failed host tool,
@@ -167,6 +168,62 @@ TOOL_FAIL_NUDGE = (
     "上一次工具调用失败或没有有用输出。请根据工具返回的错误修正命令后再次调用工具；"
     "不要重复同一条命令。"
 )
+
+# Truncate oversized tool observations before they enter model context.
+# Keep head + tail so errors at either end remain visible.
+_TOOL_CONTEXT_LIMIT = 12_000
+_TOOL_CONTEXT_HEAD = 7_000
+_TOOL_CONTEXT_TAIL = 3_500
+_CONTEXT_OVERFLOW_RETRIES = 2
+
+# Interactive turns need room for a real lookup (list_machines → query → follow-ups).
+# Background tasks may still request a higher clamped cap.
+DEFAULT_TOOL_ROUNDS = 12
+MAX_TOOL_ROUNDS = 24
+
+DEFER_ON_EXHAUST_REPLY = "还在做，做好会发在这里。"
+
+
+def truncate_tool_result_for_context(
+    text: str,
+    *,
+    limit: int = _TOOL_CONTEXT_LIMIT,
+    head: int = _TOOL_CONTEXT_HEAD,
+    tail: int = _TOOL_CONTEXT_TAIL,
+) -> str:
+    """Keep head and tail of a huge tool result; insert a short omission note."""
+    raw = str(text or "")
+    if len(raw) <= limit:
+        return raw
+    head_n = max(0, min(head, limit))
+    tail_n = max(0, min(tail, limit - head_n))
+    omitted = max(0, len(raw) - head_n - tail_n)
+    note = f"\n…[truncated {omitted} chars; kept head+tail]…\n"
+    if tail_n <= 0:
+        return raw[:head_n] + note.rstrip() + "\n"
+    return raw[:head_n] + note + raw[-tail_n:]
+
+
+def is_context_length_error(message: str) -> bool:
+    """Detect upstream failures caused by prompt / context window overflow."""
+    m = (message or "").lower()
+    needles = (
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "prompt is too long",
+        "prompt too long",
+        "too many tokens",
+        "token limit",
+        "context window",
+        "exceeds the model",
+        "exceeded model token",
+        "max context",
+        "string_above_max_length",
+        "tokens exceed",
+    )
+    return any(n in m for n in needles)
+
 
 _NO_RETRY_HINT = (
     "没开着",
@@ -678,8 +735,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "name": "host_ls",
             "description": (
                 "Shallow directory listing on a connected computer (browse a known small folder). "
-                "Not for largest/newest/filter-by-extension/recursive summaries — use load_skill "
-                "host-file-query then host_shell (or a short find/du/stat) and report compact lines. "
+                "Not for largest/newest/filter-by-extension/recursive summaries — use host_file_query "
+                "(or load_skill host-file-query) and report compact lines. "
                 "Default limit is small; response may set truncated=true with total. "
                 "Optional limit (1–200), sort (mtime|size|name), glob (e.g. *.mp4, name only). "
                 "Pass machine_id from list_machines; omit it to use the usual work computer. "
@@ -709,6 +766,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
     },
+    HOST_FILE_QUERY_TOOL,
     {
         "type": "function",
         "function": {
@@ -821,7 +879,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_shell",
             "description": (
-                "Run a local command on a connected computer. Good for compact read-only summaries "
+                "Run a local command on a connected computer. For largest/by-extension/newest file "
+                "lookups prefer host_file_query. Otherwise good for compact read-only summaries "
                 "(find/du/stat/ls, or scripts from load_skill host-file-query). "
                 "Not for ssh/scp/sftp (use host_ssh_* after load_skill host-ssh). "
                 "terminal=true only for a local interactive UI. "
@@ -1258,7 +1317,7 @@ async def run_tool_loop(
     *,
     api_key: str,
     tool_handler: ToolHandler,
-    max_rounds: int = 4,
+    max_rounds: int = DEFAULT_TOOL_ROUNDS,
     override: LLMOverride | None = None,
     extra_tools: list[dict[str, Any]] | None = None,
     on_status: StatusCallback | None = None,
@@ -1291,6 +1350,51 @@ async def run_tool_loop(
         # Let CancelledError surface between LLM/tool awaits.
         await asyncio.sleep(0)
 
+    async def _complete(
+        *,
+        tools_arg: list[dict[str, Any]] | None,
+        tool_choice_arg: str | dict | None,
+    ) -> dict[str, Any]:
+        """One chat completion; on context overflow compact msgs and retry (no tool round)."""
+        from . import compact as compact_mod
+
+        overflow_tries = 0
+        while True:
+            try:
+                data = await chat_completion(
+                    msgs,
+                    api_key=api_key,
+                    tools=tools_arg,
+                    tool_choice=tool_choice_arg,
+                    override=override,
+                )
+                _accumulate(data)
+                return data
+            except AutoToolChoiceUnsupported:
+                raise
+            except RuntimeError as exc:
+                err = str(exc)
+                if overflow_tries >= _CONTEXT_OVERFLOW_RETRIES or not is_context_length_error(
+                    err
+                ):
+                    raise
+                overflow_tries += 1
+                if on_status is not None:
+                    await on_status(
+                        {
+                            "phase": "thinking",
+                            "label": "上下文过长，正在压缩后重试",
+                        }
+                    )
+                compacted, meta = await compact_mod.compact_messages(
+                    msgs,
+                    api_key=api_key,
+                    model=model,
+                )
+                if not meta.get("compacted") and len(compacted) >= len(msgs):
+                    raise
+                msgs[:] = list(compacted)
+
     if not tools_enabled(override):
         await _checkpoint()
         data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)
@@ -1318,6 +1422,7 @@ async def run_tool_loop(
     # One-shot tool_choice for the next revise round. Not a second budget:
     # scheduling it still consumes TOOL_FAIL_NUDGE_CAP.
     revise_required = False
+    finished_cleanly = False
     for _ in range(max_rounds):
         await _checkpoint()
         round_choice = choice
@@ -1327,12 +1432,9 @@ async def run_tool_loop(
             sent_required = True
         revise_required = False
         try:
-            data = await chat_completion(
-                msgs,
-                api_key=api_key,
-                tools=None if tools_via_markup else tools,
-                tool_choice=None if tools_via_markup else round_choice,
-                override=override,
+            data = await _complete(
+                tools_arg=None if tools_via_markup else tools,
+                tool_choice_arg=None if tools_via_markup else round_choice,
             )
         except AutoToolChoiceUnsupported:
             if tools_via_markup:
@@ -1368,12 +1470,11 @@ async def run_tool_loop(
                             "<parameter=参数名>参数值</parameter>\n"
                             "</function>\n"
                             "</tool_call>\n"
-                            "查本机：先 list_machines；聚合/最大/按扩展名用 load_skill host-file-query + host_shell；浅层浏览才 host_ls。删除用 host_delete（可传 paths）。"
+                            "查本机：先 list_machines；聚合/最大/按扩展名用 host_file_query；浅层浏览才 host_ls。删除用 host_delete（可传 paths）。"
                         ),
                     }
                 )
             continue
-        _accumulate(data)
         choices = data.get("choices") or []
         if not choices:
             break
@@ -1428,6 +1529,7 @@ async def run_tool_loop(
                         ensure_ascii=False,
                     )
                 result = guide_tool_result(name, result)
+                result = truncate_tool_result_for_context(result)
                 if on_status is not None:
                     await on_status(
                         {
@@ -1509,10 +1611,52 @@ async def run_tool_loop(
                         msgs.append({"role": "user", "content": TOOL_FAIL_NUDGE})
                     final = ""
                     continue
+        finished_cleanly = True
         break
+
+    async def _defer_if_unfinished() -> str | None:
+        """Hand long unfinished work to the existing defer_work queue."""
+        if finished_cleanly or not used or "defer_work" in used:
+            return None
+        # Exhausted interactive rounds (or left mid-work without a clean stop).
+        if not turn_unfinished(used, msgs) and not any(
+            n.startswith("host_") or n.startswith("sandbox_") or n == "load_skill"
+            for n in used
+        ):
+            # Short chat / non-delivery tools already answered — do not enqueue.
+            if (final or "").strip() and not reasoning_only:
+                return None
+        goal = last_real_user_text(msgs) or last_real_user_text(messages)
+        goal = (goal or "").strip()
+        if not goal:
+            return None
+        if on_status is not None:
+            await on_status(
+                {
+                    "phase": "thinking",
+                    "label": "回合用尽，转到后台继续",
+                }
+            )
+        try:
+            raw = await tool_handler("defer_work", {"goal": goal})
+        except Exception:  # noqa: BLE001
+            return None
+        # Prefer a short confirm; fall back if enqueue failed.
+        try:
+            obj = json.loads(raw) if isinstance(raw, str) else None
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and obj.get("error"):
+            return None
+        used.append("defer_work")
+        return DEFER_ON_EXHAUST_REPLY
+
+    deferred_reply = await _defer_if_unfinished()
+    if deferred_reply:
+        return deferred_reply, used, usage_acc
+
     if not final and msgs and not reasoning_only:
-        data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)
-        _accumulate(data)
+        data = await _complete(tools_arg=None, tool_choice_arg=None)
         choices = data.get("choices") or []
         if choices:
             raw_final = str((choices[0].get("message") or {}).get("content") or "")

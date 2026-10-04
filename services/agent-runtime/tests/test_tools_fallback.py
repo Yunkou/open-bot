@@ -15,16 +15,21 @@ sys.path.insert(0, str(ROOT))
 
 from app.llm import (  # noqa: E402
     CHEAPER_HOST_RETRY,
+    DEFAULT_TOOL_ROUNDS,
     TOOL_FAIL_NUDGE,
     TOOL_FAIL_NUDGE_CAP,
     AutoToolChoiceUnsupported,
     LLMOverride,
     guide_tool_result,
     is_auto_tool_choice_unsupported,
+    is_context_length_error,
     run_tool_loop,
     tool_observation_failed,
     tool_result_fallback,
+    truncate_tool_result_for_context,
 )
+from app.host_file_query import build_command  # noqa: E402
+from app.main import clamp_tool_rounds  # noqa: E402
 from app.machines import HOST_EXEC_TIMEOUT_SEC  # noqa: E402
 
 
@@ -265,7 +270,7 @@ def test_guide_on_timeout_and_shell_error() -> None:
     timed = guide_tool_result("host_shell", '{"ok": false, "error": "命令超过 120 秒还没结束"}')
     _ok("不要重复同一条命令" in timed, "timeout says do not repeat")
     _ok("换一条命令再调用工具" in timed, "timeout asks for a revised tool call")
-    _ok("host-file-query" in timed, "timeout names the skill")
+    _ok("host_file_query" in timed, "timeout names host_file_query")
     _ok("-exec stat" in timed, "timeout forbids per-file stat")
     _ok("字面量 $" in timed, "timeout warns about literal $")
     failed = guide_tool_result("host_shell", '{"ok": false, "error": "启动失败"}')
@@ -273,13 +278,13 @@ def test_guide_on_timeout_and_shell_error() -> None:
     ok = guide_tool_result("host_shell", '{"ok": true, "output": "a"}')
     _ok("不要重复" not in ok, "success is unchanged")
     denied = guide_tool_result("host_shell", '{"ok": false, "denied": true, "error": "用户拒绝了这次操作"}')
-    _ok("host-file-query" not in denied, "a refusal is not a cheaper-find retry")
+    _ok("host_file_query" not in denied, "a refusal is not a cheaper-find retry")
     offline = guide_tool_result("host_shell", '{"ok": false, "error": "应用没开着"}')
-    _ok("host-file-query" not in offline, "offline machine is not a find retry")
+    _ok("host_file_query" not in offline, "offline machine is not a find retry")
     ls = guide_tool_result("host_ls", '{"ok": false, "error": "没有在时限内完成或确认这次操作"}')
     _ok("不要重复同一条命令" in ls, "host timeout other than shell still guides")
     other = guide_tool_result("sandbox_shell", '{"ok": false, "error": "timeout"}')
-    _ok("host-file-query" not in other, "non-host tools are not given the file-query hint")
+    _ok("host_file_query" not in other, "non-host tools are not given the file-query hint")
     bad_find = guide_tool_result(
         "host_shell",
         json.dumps(
@@ -341,7 +346,7 @@ async def test_timeout_allows_another_tool_round() -> None:
         if n == 2:
             tool_body = next(m["content"] for m in reversed(messages) if m.get("role") == "tool")
             _ok("不要重复同一条命令" in tool_body, "model sees do-not-repeat")
-            _ok("host-file-query" in tool_body, "model sees the skill")
+            _ok("host_file_query" in tool_body, "model sees host_file_query hint")
             _ok("-exec stat" in tool_body, "model sees no per-file stat")
             _ok(tools is not None, "follow-up round still has tools")
             return _shell_call("call_cheap", "find ~/Downloads -type f -print")
@@ -562,7 +567,7 @@ async def test_useless_find_react_retry_succeeds() -> None:
             _ok("unknown primary" in tool_body, "model sees the find error")
             _ok("不要重复同一条命令" in tool_body, "model sees revise note")
             _ok("字面量 $" in tool_body, "model sees no literal $")
-            _ok("host-file-query" in tool_body, "model sees the skill")
+            _ok("host_file_query" in tool_body, "model sees host_file_query hint")
             _ok(tools is not None, "follow-up still has tools")
             return _shell_call(
                 "call_fix",
@@ -1017,6 +1022,190 @@ def test_host_file_query_skill_avoids_heredoc() -> None:
 
 
 
+def test_truncate_tool_result_keeps_head_and_tail() -> None:
+    small = "ok" * 10
+    _ok(truncate_tool_result_for_context(small) == small, "short result unchanged")
+    head = "H" * 100
+    mid = "M" * 5000
+    tail = "T" * 100
+    huge = head + mid + tail
+    out = truncate_tool_result_for_context(huge, limit=400, head=100, tail=100)
+    _ok(out.startswith(head), "keeps head")
+    _ok(out.endswith(tail), "keeps tail")
+    _ok("truncated" in out and "chars" in out, f"notes omission (got {out[90:140]!r})")
+    _ok("M" * 50 not in out or out.count("M") < 5000, "middle omitted")
+    _ok(len(out) < len(huge), "shorter than original")
+
+
+def test_context_length_detector() -> None:
+    _ok(is_context_length_error("context_length_exceeded"), "openai code")
+    _ok(is_context_length_error("Maximum context length exceeded"), "phrase")
+    _ok(is_context_length_error("prompt is too long"), "prompt too long")
+    _ok(not is_context_length_error("model not found"), "unrelated")
+    _ok(not is_context_length_error(""), "empty")
+
+
+def test_default_interactive_round_cap() -> None:
+    _ok(DEFAULT_TOOL_ROUNDS == 12, f"interactive default is 12 (got {DEFAULT_TOOL_ROUNDS})")
+    _ok(clamp_tool_rounds(None) == 12, "clamp None -> 12")
+    _ok(clamp_tool_rounds(4) == 4, "explicit lower still allowed")
+    _ok(clamp_tool_rounds(16) == 16, "background 16 kept")
+    _ok(clamp_tool_rounds(100) == 24, "hard ceiling")
+
+
+def test_host_file_query_builds_readonly_shell() -> None:
+    cmd = build_command(query="largest", path="~/Downloads", limit=5)
+    _ok(cmd.startswith("bash -c "), f"bash -c (got {cmd[:40]!r})")
+    _ok("<<" not in cmd, "no heredoc")
+    _ok("find" in cmd and "sort" in cmd, "uses find/sort")
+    cmd2 = build_command(query="by_ext", ext="mp4", limit=3)
+    _ok("mp4" in cmd2, "ext in command")
+    try:
+        build_command(query="by_ext")
+        raise AssertionError("by_ext without ext should fail")
+    except ValueError:
+        _ok(True, "by_ext requires ext")
+    try:
+        build_command(query="rm")
+        raise AssertionError("unknown query should fail")
+    except ValueError:
+        _ok(True, "rejects unknown query")
+
+
+async def test_context_overflow_compacts_and_retries() -> None:
+    """Context-length failure compacts in-loop messages and retries once; no extra tool round."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+
+    calls = {"n": 0}
+    tool_runs: list[str] = []
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(
+                "upstream HTTP 400: context_length_exceeded: prompt is too long"
+            )
+        # After compact+retry: finish without tools.
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": "已根据压缩后的上下文作答。"}}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        tool_runs.append(name)
+        raise AssertionError("no tool should run for this overflow test")
+
+    async def fake_compact(messages, **kwargs):
+        # Shrink by dropping an early bulky tool observation.
+        slim = [m for m in messages if not (m.get("role") == "tool" and len(str(m.get("content") or "")) > 100)]
+        if len(slim) >= len(messages):
+            slim = messages[:1] + [{"role": "system", "content": "摘要：先前工具输出已压缩"}] + messages[-2:]
+        return slim, {"compacted": True, "compact_reason": "overflow_retry"}
+
+    bulky = [{"role": "user", "content": "hi"}] + [
+        {"role": "tool", "tool_call_id": "1", "content": "X" * 500}
+    ]
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://example/v1", "gpt-4o"),
+        ):
+            with patch("app.compact.compact_messages", new=AsyncMock(side_effect=fake_compact)):
+                final, used, _usage = await run_tool_loop(
+                    bulky,
+                    api_key="sk-test",
+                    tool_handler=tool_handler,
+                    max_rounds=4,
+                    override=LLMOverride(enable_tools=True),
+                )
+    _ok(final == "已根据压缩后的上下文作答。", f"final after retry (got {final!r})")
+    _ok(calls["n"] == 2, f"one overflow + one retry (got {calls['n']})")
+    _ok(tool_runs == [], f"did not re-run tools (got {tool_runs})")
+    _ok(used == [], f"no tools used (got {used})")
+
+
+async def test_round_cap_allows_twelve_tool_rounds() -> None:
+    """Default interactive budget is high enough for a real lookup chain."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    os.environ.pop("OPENAI_TOOL_CHOICE_AUTO", None)
+
+    calls = {"n": 0}
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        # Keep requesting a tool until the loop stops asking.
+        if tools is not None:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": f"c{calls['n']}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "calculator",
+                                        "arguments": '{"expression":"1+1"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        return json.dumps({"ok": True, "output": "2"})
+
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://example/v1", "gpt-4o"),
+        ):
+            # Prevent auto-defer from enqueueing when calculator rounds exhaust.
+            async def no_defer(name: str, args: dict[str, Any]) -> str:
+                if name == "defer_work":
+                    return json.dumps({"ok": True, "id": "t1"})
+                return await tool_handler(name, args)
+
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "算一下"}],
+                api_key="sk-test",
+                tool_handler=no_defer,
+                max_rounds=DEFAULT_TOOL_ROUNDS,
+                override=LLMOverride(enable_tools=True),
+            )
+    _ok(
+        used.count("calculator") == DEFAULT_TOOL_ROUNDS,
+        f"calculator ran for the full cap (got {used.count('calculator')})",
+    )
+    # Exhausted → defer_work handoff instead of a raw dump / apology.
+    _ok(used[-1] == "defer_work", f"last tool is defer_work (got {used})")
+    _ok("还在做" in (final or ""), f"confirms background handoff (final={final!r})")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
@@ -1037,6 +1226,12 @@ def main() -> None:
     asyncio.run(test_required_revise_stops_at_cap())
     asyncio.run(test_denied_or_no_retry_is_not_nudged())
     test_host_file_query_skill_avoids_heredoc()
+    test_truncate_tool_result_keeps_head_and_tail()
+    test_context_length_detector()
+    test_default_interactive_round_cap()
+    test_host_file_query_builds_readonly_shell()
+    asyncio.run(test_context_overflow_compacts_and_retries())
+    asyncio.run(test_round_cap_allows_twelve_tool_rounds())
     print("all passed")
 
 

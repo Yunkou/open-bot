@@ -137,13 +137,15 @@ class MCPCallToolRequest(BaseModel):
 
 
 def clamp_tool_rounds(n: int | None) -> int:
-    """Chat turns stay at 4. Background tasks may ask for up to 12."""
+    """Interactive default is DEFAULT_TOOL_ROUNDS; background may ask higher (bounded)."""
+    from .llm import DEFAULT_TOOL_ROUNDS, MAX_TOOL_ROUNDS
+
     if n is None:
-        return 4
+        return DEFAULT_TOOL_ROUNDS
     if n < 1:
         return 1
-    if n > 12:
-        return 12
+    if n > MAX_TOOL_ROUNDS:
+        return MAX_TOOL_ROUNDS
     return n
 
 
@@ -680,7 +682,7 @@ async def openai_path(
     mcp_extra_tools: list[dict[str, Any]] | None = None,
     root_obs: Any | None = None,
     request: Request | None = None,
-    max_tool_rounds: int = 4,
+    max_tool_rounds: int = 12,
     client: ClientContext | None = None,
     mem_store: MemoryStore | None = None,
 ) -> AsyncIterator[str]:
@@ -901,6 +903,7 @@ async def openai_path(
             "host_move",
             "host_open",
             "host_shell",
+            "host_file_query",
             "host_ssh_ls",
             "host_ssh_read",
             "host_ssh_write",
@@ -948,13 +951,28 @@ async def openai_path(
                 if ssh_port and ssh_port != 22:
                     dest = f"{dest}:{ssh_port}"
             else:
-                if name == "host_delete":
+                if name == "host_file_query":
+                    from .host_file_query import build_command
+
+                    try:
+                        path = build_command(
+                            query=str(args.get("query") or ""),
+                            path=str(args.get("path") or ""),
+                            ext=str(args.get("ext") or ""),
+                            limit=args.get("limit"),
+                        )
+                    except ValueError as e:
+                        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+                    dest = ""
+                    op = "shell"
+                elif name == "host_delete":
                     path = _host_delete_paths(args)
+                    dest = str(args.get("dest") or "")
                 else:
                     path = str(args.get("path") or args.get("name") or args.get("command") or "")
-                dest = str(args.get("dest") or "")
-                if name == "host_shell" and bool(args.get("terminal")):
-                    dest = "terminal"
+                    dest = str(args.get("dest") or "")
+                    if name == "host_shell" and bool(args.get("terminal")):
+                        dest = "terminal"
             if name in ("host_delete", "host_ssh_delete") and not path.strip():
                 return json.dumps({"ok": False, "error": "需要文件路径"}, ensure_ascii=False)
             ls_limit = None

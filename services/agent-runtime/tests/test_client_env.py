@@ -73,6 +73,7 @@ def test_tool_defs_include_list_machines() -> None:
     _ok("host_ls" in names and "host_read" in names and "host_write" in names, "host file tools present")
     _ok("host_delete" in names and "host_move" in names, "dangerous host tools present")
     _ok("host_open" in names and "host_shell" in names, "host open and shell tools present")
+    _ok("host_file_query" in names, "host_file_query tool present")
     _ok("host_ssh_exec" in names and "host_ssh_ls" in names and "host_ssh_read" in names, "ssh client tools present")
     shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
     desc = str((shell.get("function") or {}).get("description") or "")
@@ -104,6 +105,7 @@ def test_system_prompt_routing() -> None:
     _ok("完全透明" in prompt or "只谈结果" in prompt, "instructs outcome-only user speech")
     _ok("必须 host_ls" not in prompt, "no longer forces host_ls for largest/newest")
     _ok("host-file-query" in prompt, "routing mentions host-file-query skill")
+    _ok("host_file_query" in prompt, "routing prefers host_file_query tool")
 
 
 
@@ -135,7 +137,10 @@ def test_host_ls_tool_is_shallow_browse() -> None:
     _ok("limit" in props and "sort" in props and "glob" in props, "host_ls has limit/sort/glob params")
     shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
     sdesc = str((shell.get("function") or {}).get("description") or "")
-    _ok("host-file-query" in sdesc or "find" in sdesc.lower() or "summar" in sdesc.lower(), "host_shell mentions summaries")
+    _ok("host-file-query" in sdesc or "find" in sdesc.lower() or "summar" in sdesc.lower() or "host_file_query" in sdesc, "host_shell mentions summaries")
+    fq = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_file_query")
+    fdesc = str((fq.get("function") or {}).get("description") or "")
+    _ok("Read-only" in fdesc or "largest" in fdesc.lower(), "host_file_query tool registered")
 
 
 if __name__ == "__main__":

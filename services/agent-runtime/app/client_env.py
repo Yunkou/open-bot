@@ -255,13 +255,13 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
             "删除等危险操作：必须先调用 host_delete 等工具；确认卡由系统弹出（网页可点），"
             "禁止用文字假装「已发起删除 / 请在电脑上确认 / 已批准」；工具结果是 denied 就是用户拒绝了。"
             "用户说「再试一次」且上下文是删除时，必须再次调用 host_delete，不要只 host_ls 后编造批准状态。"
-            "问最大/最新/按扩展名/前几名/占空间等聚合查询：优先 load_skill host-file-query，再经 host_shell 跑脚本或只读 find/du/stat，只汇报摘要行；禁止依赖 host_ls dump 再在模型侧排序。"
-            "host_ls 仅用于浅层浏览（预期条目不多的已知目录）；大目录与筛选汇总用 host_shell / skill 脚本。"
+            "问最大/最新/按扩展名/前几名/占空间等聚合查询：优先 host_file_query（只读，走与 host_shell 相同审核）；不要先 dump host_ls 再在模型侧排序。load_skill host-file-query 仅作补充。"
+            "host_ls 仅用于浅层浏览（预期条目不多的已知目录）；大目录与筛选汇总用 host_file_query / host_shell。"
             "禁止用摘要或记忆编造文件名和大小；没有已连接电脑时先 list_machines 并如实说明。"
             "同时删除多个文件时，一次调用 host_delete 并传 paths 数组；不要每个文件单独调用（否则会出多张确认卡）。"
         )
     lines.append(
-        "Skills：目录 + load_skill；远程 SSH 用 host-ssh；本机文件聚合查询用 host-file-query，再 host_shell 执行 scripts/（load_skill 不自动跑脚本）。"
+        "Skills：目录 + load_skill；远程 SSH 用 host-ssh；本机文件聚合查询优先 host_file_query 工具；host-file-query skill 的 scripts/ 仅在需要定制时再 load_skill + host_shell（load_skill 不自动跑脚本）。"
     )
     return "\n".join(lines)
 
@@ -281,6 +281,7 @@ TOOL_DISPLAY_ALIASES: dict[str, str] = {
     "host_move": "移动本机文件",
     "host_open": "打开软件",
     "host_shell": "在本机运行命令",
+    "host_file_query": "查询本机文件摘要",
     "host_ssh_ls": "列出远程目录",
     "host_ssh_read": "读取远程文件",
     "host_ssh_write": "写入远程文件",

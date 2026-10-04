@@ -18,6 +18,7 @@ HOST_LIST_TOOLS = frozenset({
     "host_ssh_ls",
     "list_machines",
     "host_shell",
+    "host_file_query",
     "load_skill",
 })
 
@@ -37,8 +38,8 @@ CONTINUE_HOST_DELETE = (
 
 CONTINUE_HOST_LIST = (
     "用户在问本机目录/文件（如最大、最新、排行），但本轮还没有调用 "
-    "list_machines / host_shell / load_skill（host-file-query）/ host_ls（或对应 host_ssh_ls）。"
-    "聚合查询优先 load_skill host-file-query + host_shell 取摘要；"
+    "list_machines / host_file_query / host_shell / load_skill（host-file-query）/ host_ls（或对应 host_ssh_ls）。"
+    "聚合查询优先 host_file_query 取摘要；"
     "host_ls 仅浅层浏览。禁止根据摘要或记忆编造文件名和大小。"
 )
 
