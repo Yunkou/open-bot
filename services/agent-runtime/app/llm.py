@@ -56,38 +56,107 @@ def strip_think(text: str) -> str:
 REASONING_ONLY = "\u2063"
 
 
-def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
-    """Visible reply when tools already ran but the model left no user-facing text.
+# Cap quoted tool output so a think-only follow-up still shows the data
+# without pasting an unbounded host_shell dump into the chat.
+_TOOL_QUOTE_LIMIT = 4000
 
-    A timed-out or failed tool result is already in the thread. Dropping a
-    reasoning-only follow-up used to end the turn with an empty assistant
-    message. Say what happened instead of staying silent.
-    """
-    err = ""
-    for message in reversed(messages or []):
+_TOOL_QUOTE_SKIP = {
+    "ok",
+    "error",
+    "req_id",
+    "machine_id",
+    "type",
+    "terminal",
+    "usual",
+    "retry",
+    "command",
+    "label",
+    "exit_code",
+    "denied",
+}
+
+
+def _tool_payloads(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    for message in messages or []:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
         raw = str(message.get("content") or "")
+        if not raw.strip():
+            continue
         try:
             obj = json.loads(raw)
         except json.JSONDecodeError:
             obj = None
         if isinstance(obj, dict):
-            err = str(obj.get("error") or "").strip()
-            if not err and obj.get("ok") is False:
-                err = "工具失败"
-        elif raw.strip():
-            err = raw.strip()
-        break
-    folded = err.lower()
-    timed_out = (
-        "超时" in err
-        or "timed out" in folded
-        or "timeout" in folded
-        or ("超过" in err and "秒" in err)
-        or "没有在时限内" in err
-    )
-    if timed_out:
+            payloads.append(obj)
+        else:
+            payloads.append({"output": raw.strip()})
+    return payloads
+
+
+def _payload_error(obj: dict[str, Any]) -> str:
+    err = str(obj.get("error") or "").strip()
+    if not err and obj.get("ok") is False:
+        err = "工具失败"
+    return err
+
+
+def _payload_text(obj: dict[str, Any]) -> str:
+    """Stdout/stderr (or the rest of a non-shell tool result) the user should see."""
+    parts: list[str] = []
+    for key in ("output", "stdout", "stderr"):
+        val = obj.get(key)
+        if isinstance(val, str):
+            text = val.strip()
+        elif val in (None, "", [], {}):
+            continue
+        else:
+            text = json.dumps(val, ensure_ascii=False)
+        if text and text not in parts:
+            parts.append(text)
+    if parts:
+        return "\n".join(parts)
+    rest = {
+        key: value
+        for key, value in obj.items()
+        if key not in _TOOL_QUOTE_SKIP and value not in (None, "", [], {})
+    }
+    if not rest:
+        return ""
+    return json.dumps(rest, ensure_ascii=False, indent=2)
+
+
+def _quote_tool_outputs(payloads: list[dict[str, Any]]) -> str:
+    blocks: list[str] = []
+    seen: set[str] = set()
+    for obj in payloads:
+        text = _payload_text(obj)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cmd = " ".join(str(obj.get("command") or "").split())
+        if len(cmd) > 180:
+            cmd = cmd[:180] + "…"
+        blocks.append(f"`{cmd}`\n{text}" if cmd else text)
+    if not blocks:
+        return ""
+    body = "\n\n".join(blocks)
+    if len(body) > _TOOL_QUOTE_LIMIT:
+        body = body[:_TOOL_QUOTE_LIMIT].rstrip() + "\n…（输出过长，已截断）"
+    return "结果如下：\n\n" + body
+
+
+def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
+    """Visible reply when tools already ran but the model left no user-facing text.
+
+    A timed-out or failed tool still says so. A successful tool result is
+    quoted (truncated if huge) instead of an apology that offers a narrower
+    command — the data is already in the thread.
+    """
+    payloads = _tool_payloads(messages)
+    err = _payload_error(payloads[-1]) if payloads else ""
+    if _timeoutish(err):
         return (
             "刚才的命令超过时限被停掉了，所以这次没有查完。"
             "我可以改成更快的查法再试，比如只看目录顶层，或用 du 取最大的几条摘要。"
@@ -96,8 +165,16 @@ def tool_result_fallback(messages: list[dict[str, Any]]) -> str:
         short = " ".join(err.split())
         if len(short) > 180:
             short = short[:180] + "…"
-        return f"工具没有成功：{short}。需要的话我可以换个更窄的命令再试。"
-    return "工具已经返回，但我没能整理成可见回复。需要的话我可以换个更窄的命令再试。"
+        quoted = _quote_tool_outputs(payloads)
+        head = f"工具没有成功：{short}。"
+        tail = "需要的话我可以换个更窄的命令再试。"
+        if quoted:
+            return f"{head}\n\n{quoted}\n\n{tail}"
+        return f"{head}{tail}"
+    quoted = _quote_tool_outputs(payloads)
+    if quoted:
+        return quoted
+    return "命令已经执行完，但没有可显示的输出。"
 
 
 # Spoken to the model inside the tool result, not a second hardcoded shell.

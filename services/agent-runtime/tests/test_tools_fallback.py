@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.llm import (  # noqa: E402
     guide_tool_result,
     is_auto_tool_choice_unsupported,
     run_tool_loop,
+    tool_result_fallback,
 )
 from app.machines import HOST_EXEC_TIMEOUT_SEC  # noqa: E402
 
@@ -384,12 +386,118 @@ async def test_tool_exception_still_continues() -> None:
     _ok(calls["n"] == 2, f"second round happened (got {calls['n']})")
 
 
+
+async def test_success_stdout_think_only_is_quoted() -> None:
+    """A successful tool plus a think-only follow-up must show the stdout, not an apology."""
+    os.environ["OPENAI_ENABLE_TOOLS"] = "1"
+    calls = {"n": 0}
+    listing = "440M output.wav\n422M 择日飞升 第05集.ts\n"
+
+    async def fake_chat(
+        messages: list[dict[str, Any]],
+        *,
+        api_key: str,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict | None = None,
+        override: LLMOverride | None = None,
+    ) -> dict[str, Any]:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _shell_call("call_ok", "find ~/Downloads -name '*.ts' -o -name '*.mp4'")
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>结果已经有了，整理成列表</think>",
+                    }
+                }
+            ]
+        }
+
+    async def tool_handler(name: str, args: dict[str, Any]) -> str:
+        return json.dumps(
+            {
+                "ok": True,
+                "exit_code": 0,
+                "command": "find ~/Downloads -name '*.ts'",
+                "output": "440M output.wav\n422M 择日飞升 第05集.ts\n",
+            },
+            ensure_ascii=False,
+        )
+    with patch("app.llm.chat_completion", new=AsyncMock(side_effect=fake_chat)):
+        with patch(
+            "app.llm.openai_config",
+            return_value=("sk-test", "http://127.0.0.1:9/v1", "Qwen3-32B-AWQ"),
+        ):
+            final, used, _usage = await run_tool_loop(
+                [{"role": "user", "content": "看看我电脑上有哪些视频文件"}],
+                api_key="sk-test",
+                tool_handler=tool_handler,
+                max_rounds=4,
+                override=LLMOverride(enable_tools=True),
+            )
+
+    _ok(used == ["host_shell"], f"used {used}")
+    _ok(final and "<think>" not in final, f"think stripped (got {final!r})")
+    _ok("output.wav" in final and "择日飞升" in final, f"stdout quoted (got {final!r})")
+    _ok("没能整理成可见回复" not in final, f"no apology (got {final!r})")
+    _ok("更窄的命令" not in final, f"no narrower-retry on success (got {final!r})")
+    _ok(calls["n"] == 2, f"no extra completion (got {calls['n']})")
+    _ok(listing.splitlines()[0] in final, "first line kept")
+
+
+def test_quote_success_failure_and_truncation() -> None:
+    success = tool_result_fallback(
+        [
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "ok": True,
+                        "output": "find: $: unknown primary or operator\n",
+                        "stderr": "find: $: unknown primary or operator",
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+    )
+    _ok("unknown primary" in success, f"quotes stdout (got {success!r})")
+    _ok("更窄" not in success and "没能整理" not in success, f"success is not an apology (got {success!r})")
+    _ok(success.count("unknown primary") == 1, "stderr duplicate dropped")
+
+    empty = tool_result_fallback([{"role": "tool", "content": '{"ok": true, "output": ""}'}])
+    _ok("没有可显示的输出" in empty and "更窄" not in empty, f"empty success (got {empty!r})")
+
+    failed = tool_result_fallback(
+        [{"role": "tool", "content": '{"ok": false, "error": "启动失败", "output": "partial"}'}]
+    )
+    _ok("工具没有成功" in failed and "更窄的命令" in failed, f"failure still offers a narrower retry (got {failed!r})")
+    _ok("partial" in failed, f"failure still shows output (got {failed!r})")
+
+    timed = tool_result_fallback(
+        [{"role": "tool", "content": '{"ok": false, "error": "命令超过 30 秒还没结束", "output": "half"}'}]
+    )
+    _ok("超过时限" in timed and "half" not in timed, f"timeout stays the strategy text (got {timed!r})")
+
+    huge = "x" * 5000
+    quoted = tool_result_fallback(
+        [{"role": "tool", "content": '{"ok": true, "command": "find ~", "output": "' + huge + '"}'}]
+    )
+    _ok("输出过长，已截断" in quoted, f"huge stdout truncated (got len {len(quoted)})")
+    _ok(len(quoted) < 4500, f"quote bounded (got {len(quoted)})")
+    _ok("更窄" not in quoted, "truncation is not a retry hint")
+
+
 def main() -> None:
     print("test_tools_fallback")
     test_detector()
     asyncio.run(test_run_tool_loop_fallback())
     asyncio.run(test_run_tool_loop_markup_after_fallback())
     asyncio.run(test_tool_timeout_reasoning_only_is_visible())
+    asyncio.run(test_success_stdout_think_only_is_quoted())
+    test_quote_success_failure_and_truncation()
     test_host_waits_stay_above_desktop_shell()
     test_guide_on_timeout_and_shell_error()
     asyncio.run(test_timeout_allows_another_tool_round())
