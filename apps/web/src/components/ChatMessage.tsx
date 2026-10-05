@@ -1,8 +1,9 @@
-import type { AttachmentMeta, ReactionSummary } from "../api";
+import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
 import { MessageReactions } from "./MessageReactions";
 import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
 import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
+import { HandoffCard } from "./HandoffCard";
 
 export type ChatMessageData = {
   id: string;
@@ -16,6 +17,7 @@ export type ChatMessageData = {
   reply_to_id?: string;
   thread_root_id?: string;
   reactions?: ReactionSummary[];
+  handoff?: HandoffPayload;
 };
 
 type Props = {
@@ -65,6 +67,19 @@ function canReact(message: ChatMessageData): boolean {
   return true;
 }
 
+
+function resolveHandoff(message: ChatMessageData): HandoffPayload | null {
+  if (message.handoff && message.handoff.from_bot) return message.handoff;
+  if (message.role !== "handoff") return null;
+  try {
+    const j = JSON.parse(message.content) as HandoffPayload;
+    if (j && typeof j.from_bot === "string") return j;
+  } catch {
+    /* ignore */
+  }
+  return message.handoff || null;
+}
+
 export function ChatMessage({
   message,
   agentId,
@@ -88,15 +103,6 @@ export function ChatMessage({
   const speakerId = message.agent_id || agentId;
   const canReply = Boolean(onReply) && (message.role === "user" || message.role === "assistant") && !message.streaming;
 
-  const visible =
-    isUser || message.role === "host_confirm" ? message.content : stripThinkTags(message.content);
-  if (message.streaming && !visible && !isUser) {
-    return null;
-  }
-  if (!isUser && message.role !== "host_confirm" && !message.streaming && !visible.trim()) {
-    return null;
-  }
-
   if (message.role === "host_confirm") {
     const item = parseHostConfirm(message.content);
     if (!item) return null;
@@ -106,6 +112,32 @@ export function ChatMessage({
         {timeEl}
       </div>
     );
+  }
+
+  const handoff = resolveHandoff(message);
+  if (message.role === "handoff" || handoff) {
+    const payload: HandoffPayload = handoff || {
+      from_bot: "?",
+      to_bot: "?",
+      purpose: message.content || "",
+      status: "running",
+      agent_message_id: "",
+    };
+    return (
+      <div className="chat-row chat-row-handoff" data-msg-id={message.id}>
+        <HandoffCard handoff={payload} contentFallback={message.content} />
+        {timeEl}
+      </div>
+    );
+  }
+
+  const visible =
+    isUser ? message.content : stripThinkTags(message.content);
+  if (message.streaming && !visible && !isUser) {
+    return null;
+  }
+  if (!isUser && !message.streaming && !visible.trim()) {
+    return null;
   }
 
   const actions = canReply ? (

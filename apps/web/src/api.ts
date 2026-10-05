@@ -71,6 +71,14 @@ export type ReactionSummary = {
 /** P0 whitelist — keep in sync with API AllowedReactionEmojis */
 export const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌"] as const;
 
+export type HandoffPayload = {
+  from_bot: string;
+  to_bot: string;
+  purpose: string;
+  status: "running" | "done" | "failed" | "rejected" | "awaiting_approval" | string;
+  agent_message_id: string;
+};
+
 export type ReactionUpdatedEvent = {
   type?: string;
   conversation_id: string;
@@ -83,7 +91,7 @@ export type ReactionUpdatedEvent = {
 
 export type Message = {
   id: string;
-  role: "user" | "assistant" | string;
+  role: "user" | "assistant" | "handoff" | string;
   content: string;
   agent_id?: string;
   conversation_id?: string;
@@ -93,6 +101,8 @@ export type Message = {
   /** Thread root id (Slack-style); empty for main-timeline messages. */
   thread_root_id?: string;
   reactions?: ReactionSummary[];
+  agent_message_id?: string;
+  handoff?: HandoffPayload;
 };
 
 export type Conversation = {

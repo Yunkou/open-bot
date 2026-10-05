@@ -3037,3 +3037,92 @@ button.ghost {
 .msg-reaction-pick:hover {
   background: color-mix(in srgb, var(--accent, #6ea8fe) 16%, transparent);
 }
+
+/* Handoff projection card (P1) */
+.chat-row-handoff {
+  justify-content: center;
+}
+.handoff-card {
+  width: 100%;
+  max-width: 520px;
+  margin: 4px auto;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--assistant-bg, #1e1f22) 88%, transparent);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.handoff-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.handoff-badge {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.handoff-status {
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+}
+.handoff-status.status-running,
+.handoff-status.status-awaiting_approval {
+  color: #c9a227;
+  border-color: color-mix(in srgb, #c9a227 45%, var(--border));
+}
+.handoff-status.status-done {
+  color: #3d9a6a;
+  border-color: color-mix(in srgb, #3d9a6a 45%, var(--border));
+}
+.handoff-status.status-failed,
+.handoff-status.status-rejected {
+  color: #d16b6b;
+  border-color: color-mix(in srgb, #d16b6b 45%, var(--border));
+}
+.handoff-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.handoff-bot {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+.handoff-arrow {
+  color: var(--muted);
+}
+.handoff-purpose {
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.handoff-detail-btn {
+  margin-top: 8px;
+  border: none;
+  background: transparent;
+  color: var(--accent, #6ea8fe);
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+}
+.handoff-detail {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, #000 18%, transparent);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow: auto;
+  max-height: 140px;
+}
