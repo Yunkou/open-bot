@@ -91,6 +91,7 @@ func (s *Server) wakeOneAgent(ctx context.Context, userID string, msg *db.AgentB
 	title := fmt.Sprintf("协作唤醒 ← %s", msg.FromAgentID)
 	res, err := s.runAgentOnce(ctx, userID, targetAgentID, msg.Body, title, "", notice)
 	if err != nil {
+		s.projectHandoffStatus(userID, msg, "failed")
 		return err
 	}
 	reply := strings.TrimSpace(res.Reply)
@@ -100,5 +101,10 @@ func (s *Server) wakeOneAgent(ctx context.Context, userID string, msg *db.AgentB
 	to := msg.FromAgentID
 	replyTo := msg.ID
 	_, err = s.deliverAgentMessage(userID, targetAgentID, &to, msg.ChannelID, false, reply, &replyTo)
-	return err
+	if err != nil {
+		s.projectHandoffStatus(userID, msg, "failed")
+		return err
+	}
+	s.projectHandoffStatus(userID, msg, "done")
+	return nil
 }

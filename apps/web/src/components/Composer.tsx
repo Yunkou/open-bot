@@ -20,6 +20,12 @@ export type ComposerSkillOption = {
   description?: string;
 };
 
+export type ComposerReplyTarget = {
+  id: string;
+  who: string;
+  text: string;
+};
+
 type Props = {
   value: string;
   onChange: (value: string) => void;
@@ -37,6 +43,9 @@ type Props = {
   skillOptions?: ComposerSkillOption[];
   /** When true, @ targets group members; otherwise DM @ switches bot. */
   groupChat?: boolean;
+  /** Active reply target (Slack-style composer reply bar). */
+  replyTo?: ComposerReplyTarget | null;
+  onClearReply?: () => void;
 };
 
 function formatSize(n: number): string {
@@ -84,6 +93,8 @@ export function Composer({
   mentionItems,
   skillOptions,
   groupChat,
+  replyTo,
+  onClearReply,
 }: Props) {
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -270,6 +281,18 @@ export function Composer({
               </button>
             </div>
           ))}
+        </div>
+      ) : null}
+      {replyTo ? (
+        <div className="composer-reply-bar">
+          <div className="composer-reply-main">
+            <span className="composer-reply-label">回复</span>
+            <span className="composer-reply-who">{replyTo.who}</span>
+            <span className="composer-reply-text">{replyTo.text}</span>
+          </div>
+          <button type="button" className="composer-reply-clear" title="取消回复" onClick={onClearReply}>
+            ×
+          </button>
         </div>
       ) : null}
       <div className="composer-bar">

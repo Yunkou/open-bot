@@ -30,6 +30,7 @@ type Server struct {
 	db         *db.DB
 	hub        *busHub
 	events     *chatHub
+	convEvents *conversationEventHub // conversation SSE (reaction_updated, …)
 	hosts      *hostHub
 	confirms   *hostConfirmGate
 	// Serializes coalescing parallel delete confirms into one chat card.
@@ -49,6 +50,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 		db:         database,
 		hub:        newBusHub(),
 		events:     newChatHub(),
+		convEvents: newConversationEventHub(),
 		hosts:      newHostHub(),
 		confirms:   newHostConfirmGate(),
 		tasks:      newTaskControl(),
@@ -176,6 +178,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/conversations/{id}/events", s.requireAuth(s.handleConversationEvents))
 	mux.HandleFunc("GET /v1/conversations/{id}/run", s.requireAuth(s.handleConversationRunStatus))
 	mux.HandleFunc("POST /v1/conversations/{id}/attachments", s.requireAuth(s.handleUploadAttachment))
+	mux.HandleFunc("PUT /v1/messages/{id}/reactions", s.requireAuth(s.handleToggleReaction))
+	mux.HandleFunc("DELETE /v1/messages/{id}/reactions", s.requireAuth(s.handleDeleteReaction))
 
 	mux.HandleFunc("GET /v1/channels", s.requireAuth(s.handleListChannels))
 	mux.HandleFunc("POST /v1/channels", s.requireAuth(s.handleCreateChannel))
@@ -189,6 +193,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/events/ws", s.handleChatEventsWS)
 	// Internal: runtime send_to_agent → same deliver path (priority wake + WS)
 	mux.HandleFunc("POST /internal/agent-bus/messages", s.requireInternal(s.handleInternalPostAgentBusMessage))
+	mux.HandleFunc("POST /internal/handoff-notes", s.requireInternal(s.handleInternalHandoffNote))
 	mux.HandleFunc("GET /v1/compact-config", s.requireAuth(s.handleCompactConfig))
 
 	mux.HandleFunc("GET /v1/mcp-servers", s.requireAuth(s.handleListMCPServers))
@@ -1102,6 +1107,8 @@ type sendBody struct {
 	Attachments     []AttachmentRef `json:"attachments"`
 	AgentIDs        []string        `json:"agent_ids"` // group @targets; empty = first member / conv agent
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
+	// ReplyToID starts or continues a Slack/Grok-style conversation thread.
+	ReplyToID string `json:"reply_to_id"`
 	// PersistOnly stores the user message and returns JSON without running an agent.
 	PersistOnly bool `json:"persist_only"`
 	// HandoffContext is injected into runtime history (not stored) when @-handing off from another bot thread.
@@ -1156,7 +1163,27 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		storedContent = built
 	}
 
-	userMsg, err := s.db.AddMessage(conv.ID, "user", storedContent)
+	var replyParent *db.Message
+	replyToID := strings.TrimSpace(body.ReplyToID)
+	threadRootID := ""
+	if replyToID != "" {
+		parent, perr := s.db.GetMessage(uid, conv.ID, replyToID)
+		if perr != nil {
+			if errors.Is(perr, db.ErrNotFound) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reply_to_id not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": perr.Error()})
+			return
+		}
+		replyParent = parent
+		threadRootID = db.ResolveThreadRoot(parent)
+	}
+
+	userMsg, err := s.db.AddMessageWithOpts(conv.ID, "user", storedContent, db.AddMessageOpts{
+		ReplyToID:    replyToID,
+		ThreadRootID: threadRootID,
+	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1178,7 +1205,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	targetAgents, terr := s.resolveSendTargets(uid, conv, body.AgentIDs, content)
+	targetAgents, terr := s.resolveSendTargets(uid, conv, body.AgentIDs, content, replyParent)
 	if terr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": terr.Error()})
 		return
@@ -1233,6 +1260,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"agent_ids":  targetAgents,
 		"channel_id": conv.ChannelID,
 	})
+	// Replace optimistic local-user-* id with the real persisted id.
+	emit("meta", map[string]any{
+		"phase":           "user_saved",
+		"message_id":      userMsg.ID,
+		"conversation_id": conv.ID,
+		"reply_to_id":     userMsg.ReplyToID,
+		"thread_root_id":  userMsg.ThreadRootID,
+	})
 
 	if s.tryShortcutTurn(uid, conv, userMsg.ID, storedContent, targetAgents[0], emit) {
 		emit("done", map[string]any{"ok": true})
@@ -1257,7 +1292,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if err := runCtx.Err(); err != nil {
 			cancelled = true
 			// Cancelled before this agent produced tokens — keep a stop marker in history.
-			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", "（已停止）", agentID)
+			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", db.AddMessageOpts{
+				AgentID:      agentID,
+				ReplyToID:    userMsg.ID,
+				ThreadRootID: threadRootID,
+			})
 			break
 		}
 		systemPrompt := ""
@@ -1279,7 +1318,23 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			emit("error", map[string]string{"message": lerr.Error()})
 			return
 		}
-		history := historyForRuntime(msgs)
+		var history []runtimeMsg
+		runtimeContent := storedContent
+		if threadRootID != "" {
+			history = historyForThreadRuntime(msgs, threadRootID)
+			parentName := ""
+			if replyParent != nil && replyParent.Role == "assistant" {
+				if ag, aerr := s.db.GetAgent(uid, replyParent.AgentID); aerr == nil {
+					parentName = ag.Name
+				} else {
+					parentName = replyParent.AgentID
+				}
+			}
+			prefix := formatReplyContextPrefix(replyParent, parentName)
+			runtimeContent, history = injectReplyIntoUserContent(runtimeContent, history, prefix)
+		} else {
+			history = historyForRuntime(msgs)
+		}
 		if len(body.HandoffContext) > 0 {
 			history = mergeHandoffContext(history, body.HandoffContext)
 		}
@@ -1289,13 +1344,21 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		payloadMap := map[string]any{
 			"conversation_id": id,
-			"content":         storedContent,
+			"content":         runtimeContent,
 			"agent_id":        agentID,
 			"user_id":         uid,
 			"channel_id":      conv.ChannelID,
 			"system_prompt":   systemPrompt,
 			"messages":        history,
 			"enabled_skills":  enabledSkills,
+		}
+		if replyToID != "" {
+			payloadMap["reply_to_id"] = replyToID
+		}
+		if threadRootID != "" {
+			payloadMap["thread_root_id"] = threadRootID
+			threadMsgs := filterThreadMessages(msgs, threadRootID)
+			payloadMap["reply_context"] = threadRecallQuery(storedContent, replyParent, threadMsgs)
 		}
 		if llmPayload != nil {
 			payloadMap["llm"] = llmPayload
@@ -1315,16 +1378,23 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		assistantText, pendingSummary, runUsage, runErr := s.proxyRuntimeRun(runCtx, emit, payloadMap, recallCtx)
 		if pendingSummary != "" {
 			sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
-			_, _ = s.db.AddMessageAt(conv.ID, "summary", pendingSummary, sumAt)
+			_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
+				ThreadRootID: threadRootID,
+				At:           sumAt,
+			})
 		}
 		runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
 		// Persist partial assistant text even when cancelled mid-stream.
 		// Empty cancel → keep a light UI/history marker so the next turn still
 		// sees the interrupted turn (keep-partial-next-turn).
 		if strings.TrimSpace(assistantText) != "" {
-			s.saveAssistant(uid, conv.ID, agentID, assistantText, emit)
+			s.saveAssistantThreaded(uid, conv.ID, agentID, assistantText, userMsg.ID, threadRootID, emit)
 		} else if runCancelled {
-			_, _ = s.db.AddMessageWithAgent(conv.ID, "assistant", "（已停止）", agentID)
+			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", db.AddMessageOpts{
+				AgentID:      agentID,
+				ReplyToID:    userMsg.ID,
+				ThreadRootID: threadRootID,
+			})
 		}
 		if runErr != nil {
 			if runCancelled {
@@ -1357,9 +1427,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 // resolveSendTargets picks which agents should answer this turn.
 // DM: always the conversation's agent.
 // Group: explicit agent_ids and/or @mentions; if neither, first channel member (conv.AgentID).
+// Reply to a bot message with no @ defaults to that bot (Slack-style).
 // @everyone expands to all members. Otherwise only the first target owns this stage
 // (Grok-style single-stage owner); other mentions stay in the user text for context.
-func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string) ([]string, error) {
+func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) ([]string, error) {
 	if conv.ChannelID == "" {
 		return []string{conv.AgentID}, nil
 	}
@@ -1392,6 +1463,15 @@ func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit 
 	}
 	targets = dedupeStrings(targets)
 	if len(targets) == 0 {
+		// Reply to a bot's message → that bot owns the turn when no @.
+		if replyParent != nil && replyParent.Role == "assistant" {
+			aid := strings.TrimSpace(replyParent.AgentID)
+			if aid != "" {
+				if _, ok := memberSet[aid]; ok {
+					return []string{aid}, nil
+				}
+			}
+		}
 		// No @: first member / conversation agent
 		if conv.AgentID != "" {
 			return []string{conv.AgentID}, nil
@@ -1555,38 +1635,6 @@ func isCancelErr(err error) bool {
 	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "request canceled")
 }
 
-func historyForRuntime(msgs []db.Message) []runtimeMsg {
-	lastSummary := -1
-	for i, m := range msgs {
-		if m.Role == "summary" {
-			lastSummary = i
-		}
-	}
-	start := 0
-	if lastSummary >= 0 {
-		start = lastSummary
-	}
-	out := make([]runtimeMsg, 0, len(msgs)-start)
-	for _, m := range msgs[start:] {
-		switch m.Role {
-		case "user", "assistant", "summary", "system":
-			content := m.Content
-			if m.Role == "assistant" || m.Role == "summary" {
-				content = stripThinkTags(content)
-				if strings.TrimSpace(content) == "" {
-					continue
-				}
-			}
-			out = append(out, runtimeMsg{Role: m.Role, Content: content})
-		case "host_confirm":
-			if note := hostConfirmRuntimeNote(m.Content); note != "" {
-				// Visible to the model so it does not invent allow/deny outcomes.
-				out = append(out, runtimeMsg{Role: "system", Content: note})
-			}
-		}
-	}
-	return out
-}
 
 func hostConfirmRuntimeNote(content string) string {
 	var payload hostConfirmPayload

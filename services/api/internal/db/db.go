@@ -297,6 +297,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_user_channel
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(conversation_id, agent_id);
 
+-- Slack/Grok-style conversation threads (mirror agent_messages.reply_to_id).
+-- reply_to_id: immediate parent message the user clicked「回复」on.
+-- thread_root_id: root of the thread (parent id if parent is top-level; else inherit).
+-- Top-level messages keep both NULL. Indexes support list-by-thread and parent lookup.
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_id TEXT;
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS thread_root_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to_id) WHERE reply_to_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_thread_root ON messages(conversation_id, thread_root_id, created_at)
+  WHERE thread_root_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_conversations_user_agent
   ON conversations(user_id, agent_id);
 
@@ -400,6 +410,20 @@ CREATE INDEX IF NOT EXISTS idx_conversation_tasks_queued
   ON conversation_tasks(status, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_conversation_tasks_conv
   ON conversation_tasks(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS message_reactions (
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  emoji TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (message_id, user_id, emoji)
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_reactions_message ON message_reactions(message_id);
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS agent_message_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_agent_message_id
+  ON messages(agent_message_id) WHERE agent_message_id IS NOT NULL;
 `)
 	if err != nil {
 		return err

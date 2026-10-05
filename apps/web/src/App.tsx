@@ -47,6 +47,8 @@ import {
   startOIDCLogin,
   sendMessageStream,
   persistConversationMessage,
+  toggleReaction,
+  type ReactionUpdatedEvent,
   subscribeConversationEvents,
   cancelConversationRun,
   chatEventsWebSocketUrl,
@@ -134,7 +136,7 @@ import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
-import { Composer, PendingFile, type ComposerMentionItem, type ComposerSkillOption } from "./components/Composer";
+import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
   BotOnboardingCard,
@@ -145,7 +147,7 @@ import {
   type OnboardingOption,
 } from "./components/BotOnboardingCard";
 
-type UiMessage = Message & { streaming?: boolean; attachments?: AttachmentMeta[]; agent_name?: string };
+type UiMessage = Message & { streaming?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
 type SettingsTab =
   | "general"
   | "bot"
@@ -388,6 +390,13 @@ export default function App() {
   const [agentId, setAgentId] = useState("");
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  /** Composer reply target (Slack-style). */
+  const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
+  const replyTargetRef = useRef<ComposerReplyTarget | null>(null);
+  /** Open thread panel root id (null = main timeline). */
+  const [openThreadRootId, setOpenThreadRootId] = useState<string | null>(null);
+  const localUserIdRef = useRef<string | null>(null);
+
   const [input, setInput] = useState("");
   const [convSearch, setConvSearch] = useState("");
   const [showScrollBottom, setShowScrollBottom] = useState(false);
@@ -676,6 +685,63 @@ export default function App() {
     messagesLiveRef.current = messages;
   }, [messages]);
 
+
+  const applyReactionEvent = useCallback((evt: ReactionUpdatedEvent) => {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== evt.message_id) return m;
+        const list = [...(m.reactions || [])];
+        const idx = list.findIndex((r) => r.emoji === evt.emoji);
+        if (evt.count <= 0) {
+          if (idx >= 0) list.splice(idx, 1);
+        } else if (idx >= 0) {
+          list[idx] = { emoji: evt.emoji, count: evt.count, me: Boolean(evt.me) };
+        } else {
+          list.push({ emoji: evt.emoji, count: evt.count, me: Boolean(evt.me) });
+        }
+        return { ...m, reactions: list };
+      }),
+    );
+  }, []);
+
+  const onToggleReaction = useCallback(
+    async (messageId: string, emoji: string) => {
+      const prevSnapshot = messages.find((m) => m.id === messageId)?.reactions;
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const list = [...(m.reactions || [])];
+          const idx = list.findIndex((r) => r.emoji === emoji);
+          if (idx >= 0) {
+            const cur = list[idx];
+            if (cur.me) {
+              const nextCount = cur.count - 1;
+              if (nextCount <= 0) list.splice(idx, 1);
+              else list[idx] = { ...cur, count: nextCount, me: false };
+            } else {
+              list[idx] = { ...cur, count: cur.count + 1, me: true };
+            }
+          } else {
+            list.push({ emoji, count: 1, me: true });
+          }
+          return { ...m, reactions: list };
+        }),
+      );
+      try {
+        const evt = await toggleReaction(messageId, emoji);
+        applyReactionEvent(evt);
+      } catch (err) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, reactions: prevSnapshot } : m,
+          ),
+        );
+        toast.error(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [messages, applyReactionEvent],
+  );
+
   useEffect(() => {
     if (!token) return;
     let stopped = false;
@@ -729,6 +795,12 @@ export default function App() {
         if (data.type === "host_activity") {
           const row = data as { active?: boolean; label?: string };
           setHostActivity(row.active && row.label ? row.label : "");
+        }
+        if (data.type === "reaction_updated") {
+          const evt = data as ReactionUpdatedEvent;
+          if (evt.message_id && evt.emoji) {
+            applyReactionEvent(evt);
+          }
         }
       };
       ws.onclose = () => {
@@ -876,6 +948,71 @@ export default function App() {
     for (const a of agents) m.set(a.id, a.name);
     return m;
   }, [agents]);
+
+  const replyCountByRoot = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const m of messages) {
+      const root = (m.thread_root_id || "").trim();
+      if (!root) continue;
+      if (m.role === "summary") continue;
+      map.set(root, (map.get(root) || 0) + 1);
+    }
+    return map;
+  }, [messages]);
+
+  /** Main timeline: top-level messages only (thread replies live in the panel). */
+  const mainTimelineMessages = useMemo(
+    () => messages.filter((m) => !(m.thread_root_id || "").trim()),
+    [messages],
+  );
+
+  const openThreadMessages = useMemo(() => {
+    const rootId = (openThreadRootId || "").trim();
+    if (!rootId) return [] as UiMessage[];
+    return messages.filter((m) => m.id === rootId || (m.thread_root_id || "") === rootId);
+  }, [messages, openThreadRootId]);
+
+  const messageById = useMemo(() => {
+    const map = new Map<string, UiMessage>();
+    for (const m of messages) map.set(m.id, m);
+    return map;
+  }, [messages]);
+
+  const quoteFor = (m: UiMessage) => {
+    const pid = (m.reply_to_id || "").trim();
+    if (!pid) return null;
+    const parent = messageById.get(pid);
+    if (!parent) return null;
+    const who =
+      parent.role === "assistant"
+        ? parent.agent_name || agentNameById.get(parent.agent_id || "") || parent.agent_id || "助手"
+        : "你";
+    return { who, text: parent.content || "" };
+  };
+
+  const beginReplyTo = (m: UiMessage) => {
+    const who =
+      m.role === "assistant"
+        ? m.agent_name || agentNameById.get(m.agent_id || "") || m.agent_id || "助手"
+        : "你";
+    const text = (m.content || "").replace(/\s+/g, " ").trim().slice(0, 100);
+    const target = { id: m.id, who, text: text || "（无正文）" };
+    replyTargetRef.current = target;
+    setReplyTarget(target);
+    // Opening reply from a thread keeps the panel open; from main opens thread on that root.
+    const root = (m.thread_root_id || "").trim() || m.id;
+    setOpenThreadRootId(root);
+  };
+
+  const jumpToMessage = (id: string) => {
+    const el = document.querySelector(`[data-msg-id="${CSS.escape(id)}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("msg-highlight");
+      window.setTimeout(() => el.classList.remove("msg-highlight"), 1200);
+    }
+  };
+
 
   const filteredChannels = useMemo(() => {
     const q = convSearch.trim().toLowerCase();
@@ -1193,6 +1330,37 @@ export default function App() {
     }
   };
 
+  const stampUserSavedMessage = (
+    convId: string,
+    messageId: string,
+    extra?: { reply_to_id?: string; thread_root_id?: string },
+  ) => {
+    if (!messageId) return;
+    const localId = localUserIdRef.current;
+    patchConvMessages(convId, (prev) => {
+      if (prev.some((m) => m.id === messageId)) return prev;
+      const idx = localId
+        ? prev.findIndex((m) => m.id === localId)
+        : [...prev].reverse().findIndex((m) => m.role === "user" && m.id.startsWith("local-user-"));
+      const realIdx = localId ? idx : idx >= 0 ? prev.length - 1 - idx : -1;
+      if (realIdx < 0) return prev;
+      return prev.map((m, i) =>
+        i === realIdx
+          ? {
+              ...m,
+              id: messageId,
+              reply_to_id: extra?.reply_to_id || m.reply_to_id,
+              thread_root_id: extra?.thread_root_id || m.thread_root_id,
+            }
+          : m,
+      );
+    });
+    if (localUserIdRef.current === localId) localUserIdRef.current = messageId;
+    if (replyTargetRef.current?.id && replyTargetRef.current.id.startsWith("local-")) {
+      // keep reply target pointing at server id when we replied to a just-sent msg (rare)
+    }
+  };
+
   const snapshotViewedMessages = () => {
     const id = conversationRef.current?.id;
     if (!id) return;
@@ -1369,6 +1537,12 @@ export default function App() {
                 setRunLabel("正在思考…");
               }
             }
+            if (meta.phase === "user_saved" && typeof meta.message_id === "string") {
+              stampUserSavedMessage(conv.id, meta.message_id, {
+                reply_to_id: typeof meta.reply_to_id === "string" ? meta.reply_to_id : undefined,
+                thread_root_id: typeof meta.thread_root_id === "string" ? meta.thread_root_id : undefined,
+              });
+            }
             if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
               stampSavedMessage(conv.id, meta.message_id);
             }
@@ -1454,6 +1628,9 @@ export default function App() {
     // Sync ref immediately so in-flight tokens for the previous conv cannot paint into this view.
     conversationRef.current = conv;
     setConversation(conv);
+    replyTargetRef.current = null;
+    setReplyTarget(null);
+    setOpenThreadRootId(null);
     const activeRun = runsRef.current.get(conv.id);
     if (activeRun) {
       const buffered = messagesByConvRef.current.get(conv.id) ?? [];
@@ -1645,17 +1822,41 @@ export default function App() {
       size: f.file.size,
       path: "",
     }));
+    const activeReply = replyTargetRef.current;
+    const inheritedRoot = (() => {
+      if (!activeReply?.id) return undefined;
+      const parent =
+        messagesLiveRef.current.find((m) => m.id === activeReply.id) ||
+        messagesByConvRef.current.get(conversationRef.current?.id || "")?.find((m) => m.id === activeReply.id);
+      const existing = (parent?.thread_root_id || "").trim();
+      return existing || activeReply.id;
+    })();
     const userMsg: UiMessage = {
       id: `local-user-${Date.now()}`,
       role: "user",
       content: sendContent || (filesToSend.length ? `（${filesToSend.length} 个附件）` : ""),
       attachments: localAttachments.length ? localAttachments : undefined,
+      reply_to_id: activeReply?.id,
+      thread_root_id: inheritedRoot,
     };
+    localUserIdRef.current = userMsg.id;
+    // Clear reply bar after capturing (composer already cleared input above).
+    if (activeReply) {
+      replyTargetRef.current = null;
+      setReplyTarget(null);
+    }
     const assistantId = `local-asst-${Date.now()}`;
     const appendOptimistic = (prev: UiMessage[]) => [
       ...prev,
       userMsg,
-      { id: assistantId, role: "assistant" as const, content: "", streaming: true },
+      {
+        id: assistantId,
+        role: "assistant" as const,
+        content: "",
+        streaming: true,
+        reply_to_id: userMsg.id,
+        thread_root_id: userMsg.thread_root_id,
+      },
     ];
     const optTargetId = handoffConv?.id || conversationRef.current?.id || viewedId;
     if (optTargetId) {
@@ -1783,6 +1984,8 @@ export default function App() {
                   streaming: true,
                   agent_id: info.agent_id,
                   agent_name: name,
+                  reply_to_id: localUserIdRef.current || undefined,
+                  thread_root_id: userMsg.thread_root_id,
                 },
               ];
             });
@@ -1803,6 +2006,12 @@ export default function App() {
                 setSending(false);
                 setRunLabel("正在思考…");
               }
+            }
+            if (meta.phase === "user_saved" && typeof meta.message_id === "string") {
+              stampUserSavedMessage(streamConvId!, meta.message_id, {
+                reply_to_id: typeof meta.reply_to_id === "string" ? meta.reply_to_id : undefined,
+                thread_root_id: typeof meta.thread_root_id === "string" ? meta.thread_root_id : undefined,
+              });
             }
             if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
               stampSavedMessage(streamConvId!, meta.message_id);
@@ -1873,6 +2082,7 @@ export default function App() {
           return { ...clientEnv, machine_id: mid, machine_label, timezone: tz };
         })(),
         handoffContext,
+        activeReply?.id,
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -3081,12 +3291,23 @@ export default function App() {
               <p>{agents.length === 0 ? "暂无助手，点击左上角「+」创建一个。" : "从左侧选择一位助手进入连续对话；群聊里可用 @ 点名助手。回复经 Go API 流式代理到 Python runtime。"}</p>
             </div>
           ) : null}
-          {messages.map((m) => (
+          {mainTimelineMessages.map((m) => (
             <ChatMessage
               key={m.id}
               message={m}
               agentId={m.agent_id || agentId}
               onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+              replyQuote={quoteFor(m)}
+              replyCount={replyCountByRoot.get(m.id) || 0}
+              onReply={beginReplyTo}
+              onOpenThread={(rootId) => setOpenThreadRootId(rootId)}
+              onJumpToParent={(pid) => {
+                const parent = messageById.get(pid);
+                if (parent?.thread_root_id) setOpenThreadRootId(parent.thread_root_id);
+                else if (parent) setOpenThreadRootId(parent.id);
+                window.setTimeout(() => jumpToMessage(pid), 50);
+              }}
+              onToggleReaction={onToggleReaction}
             />
           ))}
           {sending || taskBusy ? (
@@ -3098,6 +3319,41 @@ export default function App() {
             ) : null
           ) : null}
         </div>
+
+        {openThreadRootId ? (
+          <div className="thread-panel" role="dialog" aria-label="对话线程">
+            <div className="thread-panel-head">
+              <div className="thread-panel-title">线程</div>
+              <button
+                type="button"
+                className="thread-panel-close"
+                onClick={() => setOpenThreadRootId(null)}
+              >
+                关闭
+              </button>
+            </div>
+            <div className="thread-panel-body">
+              {openThreadMessages.map((m) => (
+                <ChatMessage
+                  key={`thread-${m.id}`}
+                  message={m}
+                  agentId={m.agent_id || agentId}
+                  dense
+                  replyQuote={quoteFor(m)}
+                  onReply={beginReplyTo}
+                  onJumpToParent={(pid) => jumpToMessage(pid)}
+                  onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+                  onToggleReaction={onToggleReaction}
+                />
+              ))}
+              {openThreadMessages.length === 0 ? (
+                <p className="muted small" style={{ padding: "12px 16px" }}>
+                  暂无回复
+                </p>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         <div className="composer-wrap">
           {showScrollBottom ? (
@@ -3124,6 +3380,11 @@ export default function App() {
             mentionItems={composerMentionItems}
             skillOptions={composerSkills}
             groupChat={Boolean(activeChannel)}
+            replyTo={replyTarget}
+            onClearReply={() => {
+              replyTargetRef.current = null;
+              setReplyTarget(null);
+            }}
           />
         </div>
       </main>

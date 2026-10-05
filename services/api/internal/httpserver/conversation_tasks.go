@@ -326,10 +326,18 @@ func (s *Server) abortUserTasks(userID string) {
 }
 
 func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emit func(event string, data any)) *db.Message {
+	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", emit)
+}
+
+func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID string, emit func(event string, data any)) *db.Message {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	msg, err := s.db.AddMessageWithAgent(conversationID, "assistant", text, agentID)
+	msg, err := s.db.AddMessageWithOpts(conversationID, "assistant", text, db.AddMessageOpts{
+		AgentID:      agentID,
+		ReplyToID:    strings.TrimSpace(replyToID),
+		ThreadRootID: strings.TrimSpace(threadRootID),
+	})
 	if err != nil {
 		log.Printf("save assistant conv=%s: %v", conversationID, err)
 		return nil
@@ -339,6 +347,8 @@ func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emi
 			"phase":           "message_saved",
 			"message_id":      msg.ID,
 			"conversation_id": conversationID,
+			"reply_to_id":     msg.ReplyToID,
+			"thread_root_id":  msg.ThreadRootID,
 		})
 	}
 	s.publishConversationMessage(userID, msg)

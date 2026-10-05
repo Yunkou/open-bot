@@ -62,6 +62,25 @@ export type SkillFile = {
   content: string;
 };
 
+export type ReactionSummary = {
+  emoji: string;
+  count: number;
+  me: boolean;
+};
+
+/** P0 whitelist — keep in sync with API AllowedReactionEmojis */
+export const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌"] as const;
+
+export type ReactionUpdatedEvent = {
+  type?: string;
+  conversation_id: string;
+  message_id: string;
+  emoji: string;
+  count: number;
+  me: boolean;
+  action: "add" | "remove" | string;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant" | string;
@@ -69,6 +88,11 @@ export type Message = {
   agent_id?: string;
   conversation_id?: string;
   created_at?: string;
+  /** Immediate parent when this message is a thread reply. */
+  reply_to_id?: string;
+  /** Thread root id (Slack-style); empty for main-timeline messages. */
+  thread_root_id?: string;
+  reactions?: ReactionSummary[];
 };
 
 export type Conversation = {
@@ -692,6 +716,7 @@ export async function sendMessageStream(
   agentIds?: string[],
   client?: import("./lib/clientEnv").ClientContext,
   handoffContext?: HandoffContextMsg[],
+  replyToId?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (attachments && attachments.length > 0) {
@@ -705,6 +730,9 @@ export async function sendMessageStream(
   }
   if (handoffContext && handoffContext.length > 0) {
     body.handoff_context = handoffContext;
+  }
+  if (replyToId) {
+    body.reply_to_id = replyToId;
   }
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -735,6 +763,32 @@ export async function persistConversationMessage(
   const data = await res.json();
   return data.message as Message;
 }
+
+export async function toggleReaction(
+  messageId: string,
+  emoji: string,
+): Promise<ReactionUpdatedEvent> {
+  const res = await fetch(`${API_BASE}/v1/messages/${encodeURIComponent(messageId)}/reactions`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ emoji }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteReaction(messageId: string, emoji: string): Promise<ReactionUpdatedEvent> {
+  const res = await fetch(
+    `${API_BASE}/v1/messages/${encodeURIComponent(messageId)}/reactions?emoji=${encodeURIComponent(emoji)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 
 /** Rejoin an in-flight server run after refresh / reconnect. Does not cancel on abort. */
 export async function subscribeConversationEvents(

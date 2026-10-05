@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -21,12 +22,34 @@ type Conversation struct {
 }
 
 type Message struct {
-	ID             string    `json:"id"`
-	ConversationID string    `json:"conversation_id,omitempty"`
-	Role           string    `json:"role"`
-	Content        string    `json:"content"`
-	AgentID        string    `json:"agent_id,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string            `json:"id"`
+	ConversationID string            `json:"conversation_id,omitempty"`
+	Role           string            `json:"role"`
+	Content        string            `json:"content"`
+	AgentID        string            `json:"agent_id,omitempty"`
+	ReplyToID      string            `json:"reply_to_id,omitempty"`
+	ThreadRootID   string            `json:"thread_root_id,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	Reactions      []ReactionSummary `json:"reactions"`
+	AgentMessageID string            `json:"agent_message_id,omitempty"`
+	Handoff        *HandoffPayload   `json:"handoff,omitempty"`
+}
+
+// HandoffPayload is the visible Bot↔Bot projection card (not sent to the model).
+type HandoffPayload struct {
+	FromBot        string `json:"from_bot"`
+	ToBot          string `json:"to_bot"`
+	Purpose        string `json:"purpose"`
+	Status         string `json:"status"` // running|done|failed|rejected|awaiting_approval
+	AgentMessageID string `json:"agent_message_id"`
+}
+
+// AddMessageOpts carries optional thread fields when inserting a message.
+type AddMessageOpts struct {
+	AgentID      string
+	ReplyToID    string
+	ThreadRootID string
+	At           time.Time
 }
 
 // AgentThreadPreview is sidebar metadata for one bot's primary thread.
@@ -155,18 +178,23 @@ func (d *DB) TouchConversation(userID, id string) error {
 }
 
 func (d *DB) AddMessage(conversationID, role, content string) (*Message, error) {
-	return d.AddMessageWithAgentAt(conversationID, role, content, "", Now())
+	return d.AddMessageWithOpts(conversationID, role, content, AddMessageOpts{})
 }
 
 func (d *DB) AddMessageWithAgent(conversationID, role, content, agentID string) (*Message, error) {
-	return d.AddMessageWithAgentAt(conversationID, role, content, agentID, Now())
+	return d.AddMessageWithOpts(conversationID, role, content, AddMessageOpts{AgentID: agentID})
 }
 
 func (d *DB) AddMessageAt(conversationID, role, content string, at time.Time) (*Message, error) {
-	return d.AddMessageWithAgentAt(conversationID, role, content, "", at)
+	return d.AddMessageWithOpts(conversationID, role, content, AddMessageOpts{At: at})
 }
 
 func (d *DB) AddMessageWithAgentAt(conversationID, role, content, agentID string, at time.Time) (*Message, error) {
+	return d.AddMessageWithOpts(conversationID, role, content, AddMessageOpts{AgentID: agentID, At: at})
+}
+
+func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMessageOpts) (*Message, error) {
+	at := opts.At
 	if at.IsZero() {
 		at = Now()
 	}
@@ -175,7 +203,9 @@ func (d *DB) AddMessageWithAgentAt(conversationID, role, content, agentID string
 		ConversationID: conversationID,
 		Role:           role,
 		Content:        content,
-		AgentID:        strings.TrimSpace(agentID),
+		AgentID:        strings.TrimSpace(opts.AgentID),
+		ReplyToID:      strings.TrimSpace(opts.ReplyToID),
+		ThreadRootID:   strings.TrimSpace(opts.ThreadRootID),
 		CreatedAt:      at,
 	}
 	tx, err := d.SQL.Begin()
@@ -183,9 +213,18 @@ func (d *DB) AddMessageWithAgentAt(conversationID, role, content, agentID string
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var replyAny any
+	if m.ReplyToID != "" {
+		replyAny = m.ReplyToID
+	}
+	var rootAny any
+	if m.ThreadRootID != "" {
+		rootAny = m.ThreadRootID
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO messages (id, conversation_id, role, content, agent_id, created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, m.CreatedAt,
+		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -201,13 +240,48 @@ func (d *DB) AddMessageWithAgentAt(conversationID, role, content, agentID string
 	return m, nil
 }
 
+// GetMessage returns one message in a conversation the user owns.
+func (d *DB) GetMessage(userID, conversationID, messageID string) (*Message, error) {
+	if _, err := d.GetConversation(userID, conversationID); err != nil {
+		return nil, err
+	}
+	row := d.SQL.QueryRow(
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at
+		 FROM messages WHERE id = $1 AND conversation_id = $2`,
+		messageID, conversationID,
+	)
+	var m Message
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+// ResolveThreadRoot returns the thread_root_id for a new reply to parent.
+// If parent is already in a thread, inherit; otherwise parent becomes the root.
+func ResolveThreadRoot(parent *Message) string {
+	if parent == nil {
+		return ""
+	}
+	if r := strings.TrimSpace(parent.ThreadRootID); r != "" {
+		return r
+	}
+	return parent.ID
+}
+
 func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	// ownership check
 	if _, err := d.GetConversation(userID, conversationID); err != nil {
 		return nil, err
 	}
 	rows, err := d.SQL.Query(
-		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''), created_at
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
+		        COALESCE(agent_message_id, '')
 		 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
 		conversationID,
 	)
@@ -218,17 +292,37 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID); err != nil {
 			return nil, err
+		}
+		if m.Role == "handoff" {
+			if hp, herr := ParseHandoffContent(m.Content); herr == nil {
+				m.Handoff = hp
+			}
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sums, err := d.ListReactionSummariesForConversation(userID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if rs, ok := sums[out[i].ID]; ok {
+			out[i].Reactions = rs
+		} else {
+			out[i].Reactions = []ReactionSummary{}
+		}
+	}
+	return out, nil
 }
 
 func (d *DB) RecentHostConfirms(conversationID string) ([]Message, error) {
 	rows, err := d.SQL.Query(
-		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''), created_at
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at
 		 FROM messages
 		 WHERE conversation_id = $1 AND role = 'host_confirm'
 		 ORDER BY created_at DESC
@@ -242,7 +336,7 @@ func (d *DB) RecentHostConfirms(conversationID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -263,12 +357,13 @@ func (d *DB) UpdateMessageContent(conversationID, messageID, content string) (*M
 		return nil, ErrNotFound
 	}
 	row := d.SQL.QueryRow(
-		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''), created_at
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at
 		 FROM messages WHERE id = $1`,
 		messageID,
 	)
 	var m Message
-	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.CreatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -443,4 +538,169 @@ func (d *DB) GetAgentThreadPreview(userID, agentID string) (*AgentThreadPreview,
 		return nil, err
 	}
 	return &p, nil
+}
+
+
+func ParseHandoffContent(content string) (*HandoffPayload, error) {
+	var hp HandoffPayload
+	if err := json.Unmarshal([]byte(content), &hp); err != nil {
+		return nil, err
+	}
+	return &hp, nil
+}
+
+func FormatHandoffContent(hp HandoffPayload) (string, error) {
+	b, err := json.Marshal(hp)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// AddHandoffNote inserts a visible handoff side-note. Idempotent on agent_message_id.
+func (d *DB) AddHandoffNote(conversationID, threadRootID string, hp HandoffPayload) (*Message, bool, error) {
+	hp.FromBot = strings.TrimSpace(hp.FromBot)
+	hp.ToBot = strings.TrimSpace(hp.ToBot)
+	hp.Purpose = strings.TrimSpace(hp.Purpose)
+	hp.Status = strings.TrimSpace(hp.Status)
+	hp.AgentMessageID = strings.TrimSpace(hp.AgentMessageID)
+	if hp.FromBot == "" || hp.ToBot == "" || hp.Purpose == "" || hp.Status == "" || hp.AgentMessageID == "" {
+		return nil, false, errors.New("from_bot, to_bot, purpose, status, agent_message_id required")
+	}
+	threadRootID = strings.TrimSpace(threadRootID)
+
+	row := d.SQL.QueryRow(
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
+		        COALESCE(agent_message_id, '')
+		 FROM messages WHERE agent_message_id = $1`,
+		hp.AgentMessageID,
+	)
+	var existing Message
+	err := row.Scan(&existing.ID, &existing.ConversationID, &existing.Role, &existing.Content, &existing.AgentID, &existing.ReplyToID, &existing.ThreadRootID, &existing.CreatedAt, &existing.AgentMessageID)
+	if err == nil {
+		existing.Handoff = &hp
+		if parsed, perr := ParseHandoffContent(existing.Content); perr == nil {
+			existing.Handoff = parsed
+		}
+		existing.Reactions = []ReactionSummary{}
+		return &existing, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+
+	content, err := FormatHandoffContent(hp)
+	if err != nil {
+		return nil, false, err
+	}
+	m := &Message{
+		ID:             uuid.NewString(),
+		ConversationID: conversationID,
+		Role:           "handoff",
+		Content:        content,
+		CreatedAt:      Now(),
+		AgentMessageID: hp.AgentMessageID,
+		ThreadRootID:   threadRootID,
+		Handoff:        &hp,
+		Reactions:      []ReactionSummary{},
+	}
+	tx, err := d.SQL.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var threadArg any
+	if threadRootID != "" {
+		threadArg = threadRootID
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO messages (id, conversation_id, role, content, created_at, agent_message_id, thread_root_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		m.ID, m.ConversationID, m.Role, m.Content, m.CreatedAt, m.AgentMessageID, threadArg,
+	); err != nil {
+		return nil, false, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE conversations SET updated_at = $1 WHERE id = $2`,
+		m.CreatedAt, conversationID,
+	); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return m, true, nil
+}
+
+// FindConversationForUserAgent picks the most recently updated conversation for user+agent.
+func (d *DB) FindConversationForUserAgent(userID, agentID string) (*Conversation, error) {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		agentID = "open-bot"
+	}
+	row := d.SQL.QueryRow(
+		`SELECT id, user_id, agent_id, title, COALESCE(channel_id,''), created_at, updated_at
+		 FROM conversations WHERE user_id = $1 AND agent_id = $2
+		 ORDER BY updated_at DESC LIMIT 1`,
+		userID, agentID,
+	)
+	var c Conversation
+	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Title, &c.ChannelID, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &c, nil
+}
+
+// HasHandoffForAgentMessage reports whether a projection already exists.
+func (d *DB) HasHandoffForAgentMessage(agentMessageID string) (bool, error) {
+	agentMessageID = strings.TrimSpace(agentMessageID)
+	if agentMessageID == "" {
+		return false, nil
+	}
+	var exists bool
+	err := d.SQL.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM messages WHERE agent_message_id = $1)`,
+		agentMessageID,
+	).Scan(&exists)
+	return exists, err
+}
+
+// UpdateHandoffStatus rewrites status inside an existing handoff note (by agent_message_id).
+func (d *DB) UpdateHandoffStatus(agentMessageID, status string) (*Message, error) {
+	agentMessageID = strings.TrimSpace(agentMessageID)
+	status = strings.TrimSpace(status)
+	row := d.SQL.QueryRow(
+		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
+		        COALESCE(agent_message_id, '')
+		 FROM messages WHERE agent_message_id = $1 AND role = 'handoff'`,
+		agentMessageID,
+	)
+	var m Message
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	hp, err := ParseHandoffContent(m.Content)
+	if err != nil {
+		return nil, err
+	}
+	hp.Status = status
+	content, err := FormatHandoffContent(*hp)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := d.SQL.Exec(`UPDATE messages SET content = $1 WHERE id = $2`, content, m.ID); err != nil {
+		return nil, err
+	}
+	m.Content = content
+	m.Handoff = hp
+	m.Reactions = []ReactionSummary{}
+	return &m, nil
 }
