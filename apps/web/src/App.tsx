@@ -51,6 +51,7 @@ import {
   createMessageFeedback,
   type ReactionUpdatedEvent,
   type BotPresenceEvent,
+  type BotOnlineEvent,
   type BotPresenceStatus,
   updateAgent,
   subscribeConversationEvents,
@@ -441,6 +442,30 @@ export default function App() {
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
   // bot_presence per agent (idle|working|awaiting_approval|error), pushed by server.
   const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
+  // bot_online overrides pushed by server (green dot); independent of presence face.
+  // Agent-global (not reset on conversation switch). Seeded from ListAgents `online`,
+  // updated live by `bot_online` (chat WS + conversation SSE).
+  const [onlineByAgent, setOnlineByAgent] = useState<Record<string, boolean>>({});
+  const applyBotOnline = useCallback((agentId: string, on: boolean) => {
+    setOnlineByAgent((prev) => (prev[agentId] === on ? prev : { ...prev, [agentId]: on }));
+    setAgents((prev) =>
+      prev.some((a) => a.id === agentId && a.online !== on)
+        ? prev.map((a) => (a.id === agentId ? { ...a, online: on } : a))
+        : prev,
+    );
+  }, []);
+  const seedOnlineFromAgents = useCallback((list: Agent[]) => {
+    setOnlineByAgent((prev) => {
+      let next = prev;
+      for (const a of list) {
+        if (typeof a.online === "boolean" && prev[a.id] !== a.online) {
+          if (next === prev) next = { ...prev };
+          next[a.id] = a.online;
+        }
+      }
+      return next;
+    });
+  }, []);
   // Message feedback → pending lessons; TrainPanel confirms (only active lessons reach the runtime).
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [trainAgent, setTrainAgent] = useState<Agent | null>(null);
@@ -652,6 +677,7 @@ export default function App() {
   const refreshAgents = useCallback(async (): Promise<Agent[]> => {
     const list = await listAgents();
     setAgents(list);
+    seedOnlineFromAgents(list);
     setAgentId((prev) => {
       if (prev && list.some((a) => a.id === prev)) return prev;
       const uid = getStoredUser()?.id;
@@ -668,7 +694,7 @@ export default function App() {
       return list[0]?.id ?? "";
     });
     return list;
-  }, []);
+  }, [seedOnlineFromAgents]);
 
   const saveAvatarSettings = useCallback(
     async (id: string, patch: { avatar_shape: string; avatar_color: string }) => {
@@ -875,6 +901,13 @@ export default function App() {
         if (data.type === "host_activity") {
           const row = data as { active?: boolean; label?: string };
           setHostActivity(row.active && row.label ? row.label : "");
+        }
+        if (data.type === "bot_online") {
+          const evt = data as unknown as BotOnlineEvent;
+          if (evt.agent_id) {
+            applyBotOnline(evt.agent_id, evt.online === true);
+          }
+          return;
         }
         if (data.type === "bot_presence") {
           const evt = data as unknown as BotPresenceEvent;
@@ -1104,8 +1137,25 @@ export default function App() {
 
   // Group member avatar: live agent state (reflects just-saved settings) first,
   // then the channel's server-side member_profiles snapshot.
+  // Green dot: latest bot_online push wins, else server `online` snapshot; default hidden.
+  const isBotOnline = useCallback(
+    (agentId?: string | null, snapshot?: boolean): boolean => {
+      if (!agentId) return false;
+      if (agentId in onlineByAgent) return onlineByAgent[agentId];
+      const a = agents.find((x) => x.id === agentId);
+      return (a?.online ?? snapshot) === true;
+    },
+    [onlineByAgent, agents],
+  );
+
   const channelMemberProfiles = useCallback(
-    (ch: Channel): { agent_id: string; name: string; avatar_shape?: string; avatar_color?: string }[] =>
+    (ch: Channel): {
+      agent_id: string;
+      name: string;
+      avatar_shape?: string;
+      avatar_color?: string;
+      online?: boolean;
+    }[] =>
       (ch.members || []).map((id) => {
         const a = agents.find((x) => x.id === id);
         const p = ch.member_profiles?.find((x) => x.agent_id === id);
@@ -1114,6 +1164,7 @@ export default function App() {
           name: a?.name || p?.name || agentNameById.get(id) || id,
           avatar_shape: a?.avatar_shape || p?.avatar_shape,
           avatar_color: a?.avatar_color || p?.avatar_color,
+          online: a?.online ?? p?.online,
         };
       }),
     [agents, agentNameById],
@@ -1625,6 +1676,7 @@ export default function App() {
       await subscribeConversationEvents(
         conv.id,
         {
+          onBotOnline: (evt) => applyBotOnline(evt.agent_id, evt.online === true),
           onAgentStart: (info) => {
             if (!isRunCurrent()) return;
             const name =
@@ -2962,6 +3014,7 @@ export default function App() {
       await deleteAgent(a.id);
       const list = await listAgents();
       setAgents(list);
+      seedOnlineFromAgents(list);
       await refreshConversations().catch(() => {});
       // Cancel any in-flight runs owned by this agent (viewed or background).
       const agentKey = `agent:${a.id}`;
@@ -3238,6 +3291,7 @@ export default function App() {
                     shape={a.avatar_shape}
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
+                    online={isBotOnline(a.id)}
                     onClick={() => openAvatarSettings(a)}
                   />
                   <div className="agent-item-body">
@@ -3301,6 +3355,7 @@ export default function App() {
                           size={22}
                           shape={p.avatar_shape}
                           color={p.avatar_color}
+                          online={isBotOnline(p.agent_id, p.online)}
                         />
                       ))}
                   </div>
@@ -3378,6 +3433,7 @@ export default function App() {
                       shape={p.avatar_shape}
                       color={p.avatar_color}
                       status={presenceByAgent[p.agent_id] || "idle"}
+                      online={isBotOnline(p.agent_id, p.online)}
                     />
                   ))}
                 </span>
@@ -3399,6 +3455,7 @@ export default function App() {
                   shape={activeAgent?.avatar_shape}
                   color={activeAgent?.avatar_color}
                   status={(activeAgent && presenceByAgent[activeAgent.id]) || "idle"}
+                  online={isBotOnline(activeAgent?.id)}
                   onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
                 <span className="agent-pill-name">{activeAgent?.name ?? "助手"}</span>

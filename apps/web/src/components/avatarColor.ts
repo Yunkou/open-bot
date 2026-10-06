@@ -1,4 +1,4 @@
-/** Formal palette — locked with open bot / UI UE design v1. */
+/** Formal palette — locked with open bot / UI UE design (unchanged in v2). */
 export const AVATAR_COLOR_PALETTE = [
   "#e85d4c",
   "#2a9d8f",
@@ -14,18 +14,28 @@ export const AVATAR_COLOR_PALETTE = [
   "#118ab2",
 ] as const;
 
-/** Formal shapes — locked with open bot / UI UE design v1. */
+/** Formal shapes — avatar v2 organic silhouettes. */
 export const AVATAR_SHAPES = [
-  "circle",
-  "rounded",
-  "squircle",
-  "hex",
-  "diamond",
-  "soft-square",
+  "cloud",
+  "bean",
+  "drop",
+  "soft-hex",
+  "petal",
+  "puff",
 ] as const;
 
 export type AvatarShape = (typeof AVATAR_SHAPES)[number];
 export type AvatarColor = (typeof AVATAR_COLOR_PALETTE)[number] | string;
+
+/** Old CSS-shape ids → v2 silhouette ids (read-path compat). */
+export const LEGACY_SHAPE_MAP: Record<string, AvatarShape> = {
+  circle: "cloud",
+  rounded: "puff",
+  squircle: "bean",
+  hex: "soft-hex",
+  diamond: "drop",
+  "soft-square": "petal",
+};
 
 export type BotPresenceStatus = "idle" | "working" | "awaiting_approval" | "error";
 
@@ -57,10 +67,11 @@ export function resolveAvatarColor(seed: string, override?: string | null): stri
 export function resolveAvatarShape(seed: string, override?: string | null): AvatarShape {
   const s = (override || "").trim();
   if ((AVATAR_SHAPES as readonly string[]).includes(s)) return s as AvatarShape;
+  if (s && LEGACY_SHAPE_MAP[s]) return LEGACY_SHAPE_MAP[s];
   return avatarShape(seed);
 }
 
-/** Initial letter(s) for avatar. */
+/** Initial letter(s) — kept for non-avatar uses; AgentAvatar must not show letters. */
 export function avatarInitials(name: string): string {
   const t = (name || "?").trim();
   if (!t) return "?";

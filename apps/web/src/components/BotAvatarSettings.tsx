@@ -6,6 +6,7 @@ import {
   resolveAvatarColor,
   resolveAvatarShape,
   type AvatarShape,
+  type BotPresenceStatus,
 } from "./avatarColor";
 import { AgentAvatar } from "./AgentAvatar";
 
@@ -16,9 +17,17 @@ type Props = {
   onSave: (agentId: string, patch: { avatar_shape: string; avatar_color: string }) => Promise<void>;
 };
 
+const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
+  { id: "idle", label: "idle" },
+  { id: "working", label: "working" },
+  { id: "awaiting_approval", label: "awaiting" },
+  { id: "error", label: "error" },
+];
+
 export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
-  const [shape, setShape] = useState<AvatarShape>("rounded");
+  const [shape, setShape] = useState<AvatarShape>("cloud");
   const [color, setColor] = useState("#457b9d");
+  const [previewStatus, setPreviewStatus] = useState<BotPresenceStatus>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -27,6 +36,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     const seed = agent.id || agent.name;
     setShape(resolveAvatarShape(seed, agent.avatar_shape));
     setColor(resolveAvatarColor(seed, agent.avatar_color));
+    setPreviewStatus("idle");
     setErr("");
   }, [agent, open]);
 
@@ -63,9 +73,21 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
               size={64}
               shape={shape}
               color={color}
-              status="idle"
+              status={previewStatus}
             />
-            <div className="muted small">预览（工作态动效在侧边栏/顶栏实时显示）</div>
+            <div className="bot-avatar-status-toggles" role="group" aria-label="预览表情">
+              {PREVIEW_STATUSES.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className={`bot-avatar-status-opt${previewStatus === s.id ? " active" : ""}`}
+                  onClick={() => setPreviewStatus(s.id)}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+            <div className="muted small">预览四态（仅本地试看，不改真实 presence）</div>
           </div>
 
           <label className="bot-avatar-label">形状</label>
@@ -77,6 +99,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                 className={`bot-avatar-shape-opt${shape === s ? " active" : ""}`}
                 onClick={() => setShape(s)}
                 title={s}
+                aria-label={s}
               >
                 <AgentAvatar id={agent.id} name={agent.name} size={36} shape={s} color={color} />
               </button>

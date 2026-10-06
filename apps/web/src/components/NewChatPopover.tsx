@@ -46,7 +46,7 @@ export function NewChatPopover({
   const [botName, setBotName] = useState("");
   const [botDesc, setBotDesc] = useState("");
   const [botPrompt, setBotPrompt] = useState("");
-  const [botShape, setBotShape] = useState<AvatarShape>("rounded");
+  const [botShape, setBotShape] = useState<AvatarShape>("cloud");
   const [botColor, setBotColor] = useState("#457b9d");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -255,7 +255,7 @@ export function NewChatPopover({
                     role="option"
                     onClick={() => void onSelectAgent(a)}
                   >
-                    <AgentAvatar id={a.id} name={a.name} size={36} shape={a.avatar_shape} color={a.avatar_color} />
+                    <AgentAvatar id={a.id} name={a.name} size={36} shape={a.avatar_shape} color={a.avatar_color} online={a.online === true} />
                     <div className="new-chat-row-main">
                       <div className="new-chat-row-name">{a.name}</div>
                       {a.description ? (
@@ -387,7 +387,7 @@ export function NewChatPopover({
                       checked={checked}
                       onChange={() => toggleMember(a.id)}
                     />
-                    <AgentAvatar id={a.id} name={a.name} size={28} shape={a.avatar_shape} color={a.avatar_color} />
+                    <AgentAvatar id={a.id} name={a.name} size={28} shape={a.avatar_shape} color={a.avatar_color} online={a.online === true} />
                     <span>{a.name}</span>
                   </label>
                 );

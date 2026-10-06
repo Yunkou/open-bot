@@ -24,10 +24,12 @@ export type Agent = {
   is_builtin?: boolean;
   computer_mode?: "team" | "private" | string;
   user_id?: string;
-  /** Whitelisted: circle|rounded|squircle|hex|diamond|soft-square */
+  /** Whitelisted v2: cloud|bean|drop|soft-hex|petal|puff (legacy ids mapped client-side). */
   avatar_shape?: string;
   /** Whitelisted 12-color palette (#rrggbb). */
   avatar_color?: string;
+  /** Host/runtime connected + heartbeat within BOT_ONLINE_THRESHOLD_SEC (server-computed). */
+  online?: boolean;
   created_at?: string;
   updated_at?: string;
   /** Primary thread id (assistant-level). */
@@ -57,6 +59,23 @@ export type BotPresenceEvent = {
   conversation_id: string;
   agent_id: string;
   status: BotPresenceStatus | string;
+  updated_at?: string;
+};
+
+/**
+ * Bot online rule (PM locked): online iff host/runtime channel connected AND
+ * heartbeat within the machine online threshold (90s, single constant on server).
+ * Server computes `online` on ListAgents / member_profiles / participants and pushes
+ * `bot_online` frames; client only consumes, never polls machines. Independent of
+ * bot_presence face states.
+ */
+export const BOT_ONLINE_THRESHOLD_SEC = 90;
+export type BotOnlineEvent = {
+  type?: "bot_online" | string;
+  /** Optional; online is agent-global so clients do not filter on it. */
+  conversation_id?: string;
+  agent_id: string;
+  online: boolean;
   updated_at?: string;
 };
 
@@ -645,6 +664,8 @@ export type StreamHandlers = {
   onDone?: () => void;
   /** Group multi-agent: called when a new bot starts streaming. */
   onAgentStart?: (info: { agent_id: string; agent_name?: string; index?: number; total?: number }) => void;
+  /** Conversation SSE `bot_online` (agent-global green dot; independent of bot_presence). */
+  onBotOnline?: (evt: BotOnlineEvent) => void;
 };
 
 export async function uploadConversationAttachment(
@@ -715,6 +736,10 @@ async function readSSEStream(
           handlers.onMeta?.(data);
         } else if (eventName === "status") {
           handlers.onStatus?.(data as StatusEvent);
+        } else if (eventName === "bot_online") {
+          if (typeof data.agent_id === "string" && data.agent_id) {
+            handlers.onBotOnline?.(data as unknown as BotOnlineEvent);
+          }
         } else if (eventName === "error") {
           const msg =
             typeof data.message === "string"
@@ -857,6 +882,8 @@ export type ChannelMemberProfile = {
   name?: string;
   avatar_shape: string;
   avatar_color: string;
+  /** Server-computed bot online (see BOT_ONLINE_THRESHOLD_SEC). */
+  online?: boolean;
 };
 
 export type AgentBusMessage = {
