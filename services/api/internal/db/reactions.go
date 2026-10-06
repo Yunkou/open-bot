@@ -7,7 +7,7 @@ import (
 )
 
 // AllowedReactionEmojis is the P0 whitelist shared with the web client.
-var AllowedReactionEmojis = []string{"👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌"}
+var AllowedReactionEmojis = []string{"👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌", "👎"}
 
 var allowedReactionSet = func() map[string]struct{} {
 	m := make(map[string]struct{}, len(AllowedReactionEmojis))

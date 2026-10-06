@@ -1,4 +1,5 @@
 import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
+import { NEGATIVE_REACTION_EMOJIS } from "../api";
 import { MessageReactions } from "./MessageReactions";
 import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
@@ -35,7 +36,13 @@ type Props = {
   /** Compact style inside an open thread panel. */
   dense?: boolean;
   onToggleReaction?: (messageId: string, emoji: string) => void | Promise<void>;
+  /** Open the feedback dialog for a bot reply (explicit submit → pending lesson). */
+  onFeedback?: (message: ChatMessageData) => void;
+  /** Called after the user *adds* 👎/❌ on a bot reply; reaction alone stores no feedback. */
+  onNegativeReaction?: (message: ChatMessageData, emoji: string) => void;
 };
+
+const NEGATIVE_REACTION_SET = new Set<string>(NEGATIVE_REACTION_EMOJIS as readonly string[]);
 
 export function formatMessageTime(iso?: string): string {
   if (!iso) return "";
@@ -91,6 +98,8 @@ export function ChatMessage({
   onJumpToParent,
   dense,
   onToggleReaction,
+  onFeedback,
+  onNegativeReaction,
 }: Props) {
   const isUser = message.role === "user";
   const isSummary = message.role === "summary";
@@ -140,11 +149,27 @@ export function ChatMessage({
     return null;
   }
 
-  const actions = canReply ? (
+  const canFeedback =
+    Boolean(onFeedback) && message.role === "assistant" && canReact(message);
+  const feedbackBtn = canFeedback ? (
+    <button
+      type="button"
+      className="msg-action-btn msg-action-feedback"
+      title="反馈（提交后生成待确认经验）"
+      onClick={() => onFeedback?.(message)}
+    >
+      👎 反馈
+    </button>
+  ) : null;
+
+  const actions = canReply || canFeedback ? (
     <div className="msg-actions">
-      <button type="button" className="msg-action-btn" title="回复" onClick={() => onReply?.(message)}>
-        回复
-      </button>
+      {canReply ? (
+        <button type="button" className="msg-action-btn" title="回复" onClick={() => onReply?.(message)}>
+          回复
+        </button>
+      ) : null}
+      {feedbackBtn}
       {replyCount > 0 && onOpenThread ? (
         <button
           type="button"
@@ -198,7 +223,16 @@ export function ChatMessage({
       interactive={interactive}
       onToggle={
         interactive
-          ? (emoji) => onToggleReaction?.(message.id, emoji)
+          ? async (emoji) => {
+              const alreadyMine = Boolean(
+                message.reactions?.some((r) => r.emoji === emoji && r.me),
+              );
+              await onToggleReaction?.(message.id, emoji);
+              // Only follow up when *adding* 👎/❌ on a bot reply, never on removal.
+              if (!alreadyMine && message.role === "assistant" && NEGATIVE_REACTION_SET.has(emoji)) {
+                onNegativeReaction?.(message, emoji);
+              }
+            }
           : undefined
       }
     />

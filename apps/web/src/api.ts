@@ -88,7 +88,9 @@ export type ReactionSummary = {
 };
 
 /** P0 whitelist — keep in sync with API AllowedReactionEmojis */
-export const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌"] as const;
+export const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌", "👎"] as const;
+/** Adding one of these on a bot reply opens the feedback dialog (reaction alone never creates a lesson). */
+export const NEGATIVE_REACTION_EMOJIS = ["👎", "❌"] as const;
 
 export type HandoffPayload = {
   from_bot: string;
@@ -1720,3 +1722,111 @@ export async function exchangeOIDCCode(
   return res.json();
 }
 
+// ---- Message feedback + bot lessons (training) ----
+
+export type FeedbackPolarity = "positive" | "negative";
+export type FeedbackSource = "feedback_menu" | "reaction_followup";
+export type LessonStatus = "pending" | "active" | "ignored";
+
+export type MessageFeedback = {
+  id: string;
+  message_id: string;
+  agent_id: string;
+  conversation_id: string;
+  polarity: FeedbackPolarity | string;
+  reasons: string[];
+  note?: string;
+  source: FeedbackSource | string;
+  created_at: string;
+};
+
+export type BotLesson = {
+  id: string;
+  agent_id: string;
+  feedback_id?: string;
+  title: string;
+  body: string;
+  tags: string[];
+  status: LessonStatus | string;
+  created_at: string;
+  updated_at: string;
+  confirmed_at?: string | null;
+};
+
+export type CreateFeedbackInput = {
+  message_id: string;
+  agent_id: string;
+  conversation_id: string;
+  polarity: FeedbackPolarity;
+  reasons: string[];
+  note?: string;
+  source: FeedbackSource;
+};
+
+export async function createMessageFeedback(body: CreateFeedbackInput): Promise<MessageFeedback> {
+  const res = await fetch(`${API_BASE}/v1/message-feedbacks`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function listAgentFeedbacks(agentId: string): Promise<MessageFeedback[]> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/feedbacks`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.feedbacks ?? [];
+}
+
+export async function listAgentLessons(
+  agentId: string,
+  status?: LessonStatus | string,
+): Promise<BotLesson[]> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await fetch(
+    `${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/lessons${q}`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.lessons ?? [];
+}
+
+export async function listActiveAgentLessons(agentId: string): Promise<BotLesson[]> {
+  const res = await fetch(
+    `${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/lessons/active`,
+    { headers: authHeaders() },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  const data = await res.json();
+  return data.lessons ?? [];
+}
+
+export type LessonPatch = {
+  title?: string;
+  body?: string;
+  tags?: string[];
+  status?: LessonStatus | string;
+};
+
+export async function updateLesson(id: string, body: LessonPatch): Promise<BotLesson> {
+  const res = await fetch(`${API_BASE}/v1/lessons/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function deleteLesson(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/lessons/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}

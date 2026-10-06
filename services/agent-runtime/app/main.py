@@ -530,6 +530,19 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             client=client_ctx,
             machines=host_machines,
         )
+        # Confirmed lessons only (pending/ignored never inject; feedback ≠ memory).
+        injected_lessons: list[dict[str, Any]] = []
+        try:
+            from . import lessons as lessons_mod
+
+            injected_lessons, lesson_block = lessons_mod.active_lessons_with_block(
+                str(body.user_id or ""),
+                str(body.agent_id or "open-bot"),
+            )
+            if lesson_block:
+                system = system + "\n\n" + lesson_block
+        except Exception:  # noqa: BLE001
+            injected_lessons = []
         if body.system_prompt and body.system_prompt.strip():
             system = body.system_prompt.strip() + "\n\n" + system
 
@@ -565,6 +578,8 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             "llm_override": override is not None,
             "compact_thresholds": compact_meta.get("thresholds") or compact_mod.compact_config(context_window=llm_cw, model=llm_model),
             "tools_enabled": tools_on,
+            "lessons_injected": len(injected_lessons),
+            "lesson_ids": [str(x.get("id") or "") for x in injected_lessons],
         }
         if compact_meta.get("summary_new") and compact_meta.get("summary"):
             meta["summary"] = compact_meta["summary"]

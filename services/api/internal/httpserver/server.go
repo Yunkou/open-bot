@@ -180,6 +180,14 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/conversations/{id}/attachments", s.requireAuth(s.handleUploadAttachment))
 	mux.HandleFunc("PUT /v1/messages/{id}/reactions", s.requireAuth(s.handleToggleReaction))
 	mux.HandleFunc("DELETE /v1/messages/{id}/reactions", s.requireAuth(s.handleDeleteReaction))
+	// Message feedback → pending lessons (only confirmed/active lessons reach the runtime).
+	mux.HandleFunc("POST /v1/message-feedbacks", s.requireAuth(s.handleCreateFeedback))
+	mux.HandleFunc("GET /v1/agents/{id}/feedbacks", s.requireAuth(s.handleListFeedback))
+	mux.HandleFunc("GET /v1/agents/{id}/lessons", s.requireAuth(s.handleListLessons))
+	mux.HandleFunc("GET /v1/agents/{id}/lessons/active", s.requireAuth(s.handleListActiveLessons))
+	mux.HandleFunc("POST /v1/agents/{id}/lessons", s.requireAuth(s.handleCreateLesson))
+	mux.HandleFunc("PATCH /v1/lessons/{id}", s.requireAuth(s.handlePatchLesson))
+	mux.HandleFunc("DELETE /v1/lessons/{id}", s.requireAuth(s.handleDeleteLesson))
 
 	mux.HandleFunc("GET /v1/channels", s.requireAuth(s.handleListChannels))
 	mux.HandleFunc("POST /v1/channels", s.requireAuth(s.handleCreateChannel))
@@ -195,6 +203,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/agent-bus/messages", s.requireInternal(s.handleInternalPostAgentBusMessage))
 	mux.HandleFunc("POST /internal/handoff-notes", s.requireInternal(s.handleInternalHandoffNote))
 	mux.HandleFunc("POST /internal/bot-presence", s.requireInternal(s.handleInternalBotPresence))
+	mux.HandleFunc("GET /internal/lessons/active", s.requireInternal(s.handleInternalActiveLessons))
 	mux.HandleFunc("GET /v1/compact-config", s.requireAuth(s.handleCompactConfig))
 
 	mux.HandleFunc("GET /v1/mcp-servers", s.requireAuth(s.handleListMCPServers))

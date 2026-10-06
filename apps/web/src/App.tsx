@@ -48,6 +48,7 @@ import {
   sendMessageStream,
   persistConversationMessage,
   toggleReaction,
+  createMessageFeedback,
   type ReactionUpdatedEvent,
   type BotPresenceEvent,
   type BotPresenceStatus,
@@ -133,6 +134,8 @@ import {
   SettingsEmpty,
 } from "./components/SettingsLayout";
 import { AgentAvatar } from "./components/AgentAvatar";
+import { FeedbackModal, type FeedbackTarget } from "./components/FeedbackModal";
+import { TrainPanel } from "./components/TrainPanel";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
 import { resolveAvatarColor } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
@@ -438,6 +441,10 @@ export default function App() {
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
   // bot_presence per agent (idle|working|awaiting_approval|error), pushed by server.
   const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
+  // Message feedback → pending lessons; TrainPanel confirms (only active lessons reach the runtime).
+  const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
+  const [trainAgent, setTrainAgent] = useState<Agent | null>(null);
+  const [trainReload, setTrainReload] = useState(0);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillsMsg, setSkillsMsg] = useState("");
   const [skillsBusy, setSkillsBusy] = useState(false);
@@ -769,6 +776,50 @@ export default function App() {
       }
     },
     [messages, applyReactionEvent],
+  );
+
+  const openFeedbackForMessage = useCallback(
+    (message: { id: string; agent_id?: string; agent_name?: string }, source: FeedbackTarget["source"]) => {
+      const convId = conversationRef.current?.id || "";
+      const aid = message.agent_id || agentId;
+      if (!convId || !aid) {
+        toast.error("无法定位这条回复所属的会话或 Bot");
+        return;
+      }
+      const agent = agents.find((a) => a.id === aid);
+      setFeedbackTarget({
+        messageId: message.id,
+        agentId: aid,
+        agentName: agent?.name || message.agent_name || "Bot",
+        conversationId: convId,
+        polarity: "negative",
+        source,
+      });
+    },
+    [agentId, agents],
+  );
+
+  const submitFeedback = useCallback(
+    async (input: {
+      polarity: FeedbackTarget["polarity"];
+      reasons: string[];
+      note: string;
+      source: FeedbackTarget["source"];
+    }) => {
+      if (!feedbackTarget) return;
+      await createMessageFeedback({
+        message_id: feedbackTarget.messageId,
+        agent_id: feedbackTarget.agentId,
+        conversation_id: feedbackTarget.conversationId,
+        polarity: input.polarity,
+        reasons: input.reasons,
+        note: input.note,
+        source: input.source,
+      });
+      setTrainReload((n) => n + 1);
+      toast.success("已提交反馈，已生成待确认经验（在「训练」里确认后才生效）");
+    },
+    [feedbackTarget],
   );
 
   useEffect(() => {
@@ -3280,6 +3331,16 @@ export default function App() {
                   onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
                 <span className="agent-pill-name">{activeAgent?.name ?? "助手"}</span>
+                {activeAgent ? (
+                  <button
+                    type="button"
+                    className="ghost train-entry-btn"
+                    title="训练：确认 / 停用从反馈生成的经验"
+                    onClick={() => setTrainAgent(activeAgent)}
+                  >
+                    训练
+                  </button>
+                ) : null}
               </>
             )}
           </div>
@@ -3359,6 +3420,8 @@ export default function App() {
                 window.setTimeout(() => jumpToMessage(pid), 50);
               }}
               onToggleReaction={onToggleReaction}
+              onFeedback={(msg) => openFeedbackForMessage(msg, "feedback_menu")}
+              onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
             />
           ))}
           {sending || taskBusy ? (
@@ -3395,6 +3458,8 @@ export default function App() {
                   onJumpToParent={(pid) => jumpToMessage(pid)}
                   onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
                   onToggleReaction={onToggleReaction}
+                  onFeedback={(msg) => openFeedbackForMessage(msg, "feedback_menu")}
+                  onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
                 />
               ))}
               {openThreadMessages.length === 0 ? (
@@ -4934,6 +4999,17 @@ export default function App() {
         agent={avatarSettingsAgent}
         onClose={() => setAvatarSettingsAgent(null)}
         onSave={saveAvatarSettings}
+      />
+      <FeedbackModal
+        target={feedbackTarget}
+        onClose={() => setFeedbackTarget(null)}
+        onSubmit={submitFeedback}
+      />
+      <TrainPanel
+        open={Boolean(trainAgent)}
+        agent={trainAgent}
+        reloadToken={trainReload}
+        onClose={() => setTrainAgent(null)}
       />
     </div>
   );

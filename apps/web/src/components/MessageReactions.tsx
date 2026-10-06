@@ -2,16 +2,17 @@ import { useState } from "react";
 import { REACTION_EMOJIS, type ReactionSummary } from "../api";
 
 type Props = {
-  reactions?: ReactionSummary[];
+  /** Server may send null for messages without reactions. */
+  reactions?: ReactionSummary[] | null;
   /** When false, hide interactive controls (local/temp messages). */
   interactive?: boolean;
   onToggle?: (emoji: string) => void | Promise<void>;
 };
 
-export function MessageReactions({ reactions = [], interactive = true, onToggle }: Props) {
+export function MessageReactions({ reactions, interactive = true, onToggle }: Props) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const visible = reactions.filter((r) => r.count > 0);
+  const visible = (reactions ?? []).filter((r) => r.count > 0);
 
   const handleToggle = async (emoji: string) => {
     if (!interactive || !onToggle || busy) return;

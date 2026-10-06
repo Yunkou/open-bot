@@ -3267,3 +3267,100 @@ button.ghost {
 .new-chat-shape-grid {
   grid-template-columns: repeat(6, 1fr);
 }
+
+/* ---- Message feedback + training (lessons) ---- */
+.feedback-modal { max-width: 420px; }
+.feedback-sub { margin: 0 0 12px; }
+.feedback-form { display: flex; flex-direction: column; gap: 10px; }
+.feedback-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4b5563;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.feedback-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.feedback-chip {
+  border: 1px solid var(--border, #e2e5ea);
+  background: #fff;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.feedback-chip.active {
+  border-color: #457b9d;
+  background: #e8f1f8;
+  color: #1d3557;
+}
+.feedback-note {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--border, #e2e5ea);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+.feedback-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.train-panel-modal { max-width: 520px; max-height: 80vh; display: flex; flex-direction: column; }
+.train-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border, #e2e5ea);
+}
+.train-tab {
+  border: none;
+  background: transparent;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #6b7280;
+  border-bottom: 2px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.train-tab.active {
+  color: #1f2937;
+  border-bottom-color: #457b9d;
+  font-weight: 600;
+}
+.train-tab-count {
+  font-size: 11px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+.train-list {
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 120px;
+}
+.train-empty { padding: 24px 8px; text-align: center; font-size: 13px; }
+.train-card {
+  border: 1px solid var(--border, #e2e5ea);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fafbfc;
+}
+.train-card-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.train-card-body { margin-bottom: 6px; white-space: pre-wrap; }
+.train-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.train-edit { display: flex; flex-direction: column; gap: 10px; }
+.train-entry-btn {
+  margin-left: 6px;
+  font-size: 12px !important;
+  padding: 2px 8px !important;
+}
+.danger-text { color: #b91c1c !important; }
+.msg-action-feedback { color: #b45309; }

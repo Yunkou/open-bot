@@ -427,6 +427,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_agent_message_id
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_shape TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '';
+
+-- Message feedback (explicit submit only; reactions never create rows here).
+CREATE TABLE IF NOT EXISTS message_feedbacks (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  polarity TEXT NOT NULL,
+  reasons_json TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT 'feedback_menu',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_message_feedbacks_agent ON message_feedbacks(user_id, agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_feedbacks_message ON message_feedbacks(message_id);
+
+-- Bot lessons: pending drafts from feedback; only status=active is injected by runtime.
+CREATE TABLE IF NOT EXISTS bot_lessons (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  agent_id TEXT NOT NULL,
+  feedback_id TEXT REFERENCES message_feedbacks(id) ON DELETE SET NULL,
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  confirmed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_bot_lessons_agent ON bot_lessons(user_id, agent_id, status, updated_at DESC);
 `)
 	if err != nil {
 		return err
