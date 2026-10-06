@@ -17,6 +17,7 @@ def test_system_prompt_triggers_diagram_skill():
     assert "load_skill" in DIAGRAM_SKILL_TRIGGER
     assert "技能不可用" in DIAGRAM_SKILL_TRIGGER
     assert "===|" in DIAGRAM_SKILL_TRIGGER
+    assert "英文" in DIAGRAM_SKILL_TRIGGER or "节点" in DIAGRAM_SKILL_TRIGGER
 
 
 def test_trigger_mentions_diagram_kinds():
@@ -34,3 +35,5 @@ def test_diagram_skill_on_disk_has_hard_rules():
     assert "成对" in body
     assert "人物" in body or "关系图" in body
     assert "技能不可用" in body
+    assert "英文" in body or "节点 ID" in body
+    assert "\\" in body or "转义" in body or "反斜杠" in body
