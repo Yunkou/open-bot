@@ -27,6 +27,8 @@ type ChannelMemberProfile struct {
 	Name        string `json:"name,omitempty"`
 	AvatarShape string `json:"avatar_shape"`
 	AvatarColor string `json:"avatar_color"`
+	// Online is computed by the API from this agent's bound machine_id; not stored.
+	Online bool `json:"online"`
 }
 
 type AgentBusMessage struct {
@@ -101,6 +103,7 @@ func (d *DB) GetChannel(userID, id string) (*Channel, error) {
 	}
 	members, _ := d.ListChannelMembers(c.ID)
 	c.Members = members
+	c.MemberProfiles = d.channelMemberProfiles(userID, members)
 	return &c, nil
 }
 
@@ -333,6 +336,11 @@ func (d *DB) MarkAgentMessageRead(userID, id string) error {
 		}
 	}
 	return nil
+}
+
+// ChannelMemberProfiles builds avatar profiles for agent IDs (online stamped by API).
+func (d *DB) ChannelMemberProfiles(userID string, agentIDs []string) []ChannelMemberProfile {
+	return d.channelMemberProfiles(userID, agentIDs)
 }
 
 func (d *DB) channelMemberProfiles(userID string, agentIDs []string) []ChannelMemberProfile {

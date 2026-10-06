@@ -277,6 +277,9 @@ func (d *DB) UpdateMachine(userID, id string, label, execPolicy *string) (*Machi
 }
 
 func (d *DB) DeleteMachine(userID, id string) error {
+	if err := d.ClearAgentMachineIDForMachine(userID, id); err != nil {
+		return err
+	}
 	res, err := d.SQL.Exec(
 		`DELETE FROM user_machines WHERE id = $1 AND user_id = $2`,
 		id, userID,

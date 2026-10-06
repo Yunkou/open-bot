@@ -125,6 +125,7 @@ func (d *DB) CloneAgent(userID, sourceID string, opts CloneAgentOptions) (*Clone
 		SystemPrompt: sp,
 		IsBuiltin:    false,
 		ComputerMode: mode,
+		MachineID:    strings.TrimSpace(src.MachineID),
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
@@ -143,9 +144,9 @@ func (d *DB) CloneAgent(userID, sourceID string, opts CloneAgentOptions) (*Clone
 	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = shape, color, false
 
 	if _, err := tx.Exec(
-		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,FALSE,$9,$10)`,
-		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.CreatedAt, a.UpdatedAt,
+		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,FALSE,$9,$10,$11)`,
+		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.MachineID, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

@@ -67,6 +67,7 @@ func (s *Server) handleRegisterMachine(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	s.publishAgentsOnlineForMachine(uid, m.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"machine": m})
 }
 
@@ -82,12 +83,15 @@ func (s *Server) handleHeartbeatMachine(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.publishAgentsOnlineForMachine(uid, m.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"machine": m})
 }
 
 func (s *Server) handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
+	// Capture bindings before DeleteMachine clears machine_id.
+	bound, _ := s.db.ListAgentsByMachineID(uid, id)
 	if err := s.db.DeleteMachine(uid, id); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "machine not found"})
@@ -95,6 +99,13 @@ func (s *Server) handleDeleteMachine(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	for _, a := range bound {
+		if a == nil {
+			continue
+		}
+		a.MachineID = ""
+		s.publishAgentOnlineIfChanged(uid, a)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -201,6 +212,8 @@ func (s *Server) handleHostExecWS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("host exec heartbeat: %v", err)
 	}
 	s.hosts.serve(claims.UserID, m.ID, conn)
+	// serve returns on disconnect; onChange already fired, but refresh last_seen window seed.
+	s.publishAgentsOnlineForMachine(claims.UserID, m.ID)
 }
 
 func supportedHostOp(op string) bool {

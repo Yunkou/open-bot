@@ -19,6 +19,9 @@ type Conversation struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Messages  []Message `json:"messages,omitempty"`
+	// Participants carries agent avatar + online for the primary bot (DM) or channel members.
+	// Online is stamped by the API; not stored.
+	Participants []ChannelMemberProfile `json:"participants,omitempty"`
 }
 
 type Message struct {
@@ -634,6 +637,34 @@ func (d *DB) AddHandoffNote(conversationID, threadRootID string, hp HandoffPaylo
 		return nil, false, err
 	}
 	return m, true, nil
+}
+
+
+// ListConversationIDsForAgent returns conversation ids where agent_id is the primary bot
+// (DM thread or channel conversation whose agent_id points at this agent).
+func (d *DB) ListConversationIDsForAgent(userID, agentID string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	agentID = strings.TrimSpace(agentID)
+	if userID == "" || agentID == "" {
+		return nil, nil
+	}
+	rows, err := d.SQL.Query(
+		`SELECT id FROM conversations WHERE user_id = $1 AND agent_id = $2 ORDER BY updated_at DESC`,
+		userID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // FindConversationForUserAgent picks the most recently updated conversation for user+agent.

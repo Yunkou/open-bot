@@ -10,19 +10,24 @@ import (
 )
 
 type Agent struct {
-	ID            string     `json:"id"`
-	UserID        string     `json:"user_id,omitempty"`
-	Name          string     `json:"name"`
-	Description   string     `json:"description"`
-	SystemPrompt  string     `json:"system_prompt"`
-	IsBuiltin     bool       `json:"is_builtin"`
-	ComputerMode  string     `json:"computer_mode"` // team|private
-	AvatarShape   string     `json:"avatar_shape"`
-	AvatarColor   string     `json:"avatar_color"`
-	AvatarUserSet bool       `json:"avatar_user_set"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
+	ID            string `json:"id"`
+	UserID        string `json:"user_id,omitempty"`
+	Name          string `json:"name"`
+	Description   string `json:"description"`
+	SystemPrompt  string `json:"system_prompt"`
+	IsBuiltin     bool   `json:"is_builtin"`
+	ComputerMode  string `json:"computer_mode"` // team|private
+	AvatarShape   string `json:"avatar_shape"`
+	AvatarColor   string `json:"avatar_color"`
+	AvatarUserSet bool   `json:"avatar_user_set"`
+	// MachineID binds this Bot to a user_machines.id (host/runtime exec channel).
+	// Empty = unbound = offline for green-dot online.
+	MachineID string     `json:"machine_id,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	// Online is computed by the API (bound machine Connected + MachineOfflineAfter); not stored.
+	Online bool `json:"online"`
 }
 
 // PurgeBuiltinAgents removes seeded built-in assistants (open-bot / general / any is_builtin).
@@ -61,7 +66,8 @@ func (d *DB) ResolveAgentID(userID, agentID string) (string, error) {
 func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
-		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE), created_at, updated_at
+		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
+		        COALESCE(machine_id,''), created_at, updated_at
 		 FROM agents
 		 WHERE user_id = $1 AND deleted_at IS NULL
 		 ORDER BY created_at ASC`,
@@ -75,7 +81,7 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	for rows.Next() {
 		var a Agent
 		var uid string
-		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.UserID = uid
@@ -91,13 +97,14 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 func (d *DB) GetAgent(userID, id string) (*Agent, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
-		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE), created_at, updated_at
+		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
+		        COALESCE(machine_id,''), created_at, updated_at
 		 FROM agents WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		id, userID,
 	)
 	var a Agent
 	var uid string
-	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -160,9 +167,9 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = s, c, userSet
 
 	if _, err := tx.Exec(
-		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10,$11)`,
-		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.AvatarUserSet, a.CreatedAt, a.UpdatedAt,
+		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10,$11,$12)`,
+		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.AvatarUserSet, a.MachineID, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -311,6 +318,87 @@ func (d *DB) UpdateAgentAvatar(userID, id, shape, color string) (*Agent, error) 
 		return nil, err
 	}
 	return a, nil
+}
+
+// SetAgentMachineID binds (or clears) the Bot's host/runtime exec channel.
+// machineID empty clears the binding. Non-empty must be a user_machines.id owned by userID.
+func (d *DB) SetAgentMachineID(userID, id, machineID string) (*Agent, error) {
+	userID = strings.TrimSpace(userID)
+	id = strings.TrimSpace(id)
+	machineID = strings.TrimSpace(machineID)
+	if userID == "" || id == "" {
+		return nil, errors.New("user_id and agent id required")
+	}
+	if machineID != "" {
+		if _, err := d.GetMachine(userID, machineID); err != nil {
+			return nil, err
+		}
+	}
+	a, err := d.GetAgent(userID, id)
+	if err != nil {
+		return nil, err
+	}
+	a.MachineID = machineID
+	a.UpdatedAt = Now()
+	_, err = d.SQL.Exec(
+		`UPDATE agents SET machine_id=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
+		machineID, a.UpdatedAt, id, userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// ListAgentsByMachineID returns live agents bound to machineID.
+func (d *DB) ListAgentsByMachineID(userID, machineID string) ([]*Agent, error) {
+	userID = strings.TrimSpace(userID)
+	machineID = strings.TrimSpace(machineID)
+	if userID == "" || machineID == "" {
+		return nil, nil
+	}
+	rows, err := d.SQL.Query(
+		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
+		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
+		        COALESCE(machine_id,''), created_at, updated_at
+		 FROM agents
+		 WHERE user_id = $1 AND deleted_at IS NULL AND machine_id = $2
+		 ORDER BY created_at ASC`,
+		userID, machineID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Agent
+	for rows.Next() {
+		var a Agent
+		var uid string
+		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		a.UserID = uid
+		if canon := CanonicalAvatarShape(a.AvatarShape); canon != "" {
+			a.AvatarShape = canon
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+// ClearAgentMachineIDForMachine clears bindings when a machine is deleted.
+func (d *DB) ClearAgentMachineIDForMachine(userID, machineID string) error {
+	userID = strings.TrimSpace(userID)
+	machineID = strings.TrimSpace(machineID)
+	if userID == "" || machineID == "" {
+		return nil
+	}
+	_, err := d.SQL.Exec(
+		`UPDATE agents SET machine_id='', updated_at=$3
+		 WHERE user_id=$1 AND machine_id=$2 AND deleted_at IS NULL`,
+		userID, machineID, Now(),
+	)
+	return err
 }
 
 func (d *DB) DeleteAgent(userID, id string) error {

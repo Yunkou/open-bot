@@ -43,6 +43,8 @@ type hostExecRequest struct {
 type hostHub struct {
 	mu       sync.Mutex
 	sessions map[string]*hostSession
+	// onChange fires after register/unregister (userID, machineID, connected).
+	onChange func(userID, machineID string, connected bool)
 }
 
 type hostSession struct {
@@ -74,20 +76,30 @@ func (h *hostHub) register(s *hostSession) {
 	h.mu.Lock()
 	old := h.sessions[key]
 	h.sessions[key] = s
+	cb := h.onChange
 	h.mu.Unlock()
 	if old != nil && old != s {
 		_ = old.conn.Close()
+	}
+	if cb != nil {
+		cb(s.userID, s.machineID, true)
 	}
 }
 
 func (h *hostHub) unregister(s *hostSession) {
 	key := hostKey(s.userID, s.machineID)
 	h.mu.Lock()
+	removed := false
 	if cur := h.sessions[key]; cur == s {
 		delete(h.sessions, key)
+		removed = true
 	}
+	cb := h.onChange
 	h.mu.Unlock()
 	s.failPending("执行连接已断开")
+	if removed && cb != nil {
+		cb(s.userID, s.machineID, false)
+	}
 }
 
 func (s *hostSession) failPending(msg string) {

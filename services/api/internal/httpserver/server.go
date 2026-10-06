@@ -38,6 +38,8 @@ type Server struct {
 	tasks           *taskControl
 	sbx             *sandbox.Manager
 	runs            *activeRuns
+	// Last published owner-host online bit (bot_online SSE dedupe).
+	botOnline *botOnlineCache
 }
 
 func Listen(addr, runtimeURL string, database *db.DB) error {
@@ -56,6 +58,10 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 		tasks:      newTaskControl(),
 		sbx:        sandbox.NewManager(sandbox.LoadConfig()),
 		runs:       newActiveRuns(),
+		botOnline:  &botOnlineCache{last: make(map[string]bool), seen: make(map[string]struct{})},
+	}
+	s.hosts.onChange = func(userID, machineID string, _ bool) {
+		s.publishAgentsOnlineForMachine(userID, machineID)
 	}
 	// In-process routines scheduler (disable with ROUTINES_INPROCESS=0 when using make dev-worker).
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("ROUTINES_INPROCESS"))); v != "0" && v != "false" && v != "off" {
@@ -676,6 +682,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		activeTasks = map[string]struct{}{}
 	}
 	for _, a := range list {
+		s.stampAgentOnline(uid, a)
 		item := map[string]any{
 			"id":              a.ID,
 			"name":            a.Name,
@@ -686,6 +693,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"avatar_shape":    a.AvatarShape,
 			"avatar_color":    a.AvatarColor,
 			"avatar_user_set": a.AvatarUserSet,
+			"machine_id":      a.MachineID,
+			"online":          a.Online,
 			"user_id":         a.UserID,
 			"created_at":      a.CreatedAt.UTC().Format(time.RFC3339Nano),
 			"updated_at":      a.UpdatedAt.UTC().Format(time.RFC3339Nano),
@@ -725,16 +734,18 @@ func (s *Server) handlePrimaryAgentConversation(w http.ResponseWriter, r *http.R
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.enrichConversationOnline(uid, conv)
 	writeJSON(w, http.StatusOK, map[string]any{"conversation": conv})
 }
 
 type agentBody struct {
-	Name         string `json:"name"`
-	Description  string `json:"description"`
-	SystemPrompt string `json:"system_prompt"`
-	ComputerMode string `json:"computer_mode"`
-	AvatarShape  string `json:"avatar_shape"`
-	AvatarColor  string `json:"avatar_color"`
+	Name         string  `json:"name"`
+	Description  string  `json:"description"`
+	SystemPrompt string  `json:"system_prompt"`
+	ComputerMode string  `json:"computer_mode"`
+	AvatarShape  string  `json:"avatar_shape"`
+	AvatarColor  string  `json:"avatar_color"`
+	MachineID    *string `json:"machine_id"` // optional; "" clears binding
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -749,6 +760,19 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if body.MachineID != nil {
+		a2, e2 := s.db.SetAgentMachineID(uid, a.ID, *body.MachineID)
+		if e2 != nil {
+			if errors.Is(e2, db.ErrNotFound) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "machine not found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": e2.Error()})
+			return
+		}
+		a = a2
+	}
+	s.stampAgentOnline(uid, a)
 	writeJSON(w, http.StatusCreated, a)
 }
 
@@ -793,6 +817,20 @@ func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		a = a2
 	}
+	if body.MachineID != nil {
+		a2, e2 := s.db.SetAgentMachineID(uid, id, *body.MachineID)
+		if e2 != nil {
+			if errors.Is(e2, db.ErrNotFound) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "machine not found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": e2.Error()})
+			return
+		}
+		a = a2
+		s.publishAgentOnlineIfChanged(uid, a)
+	}
+	s.stampAgentOnline(uid, a)
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -1069,6 +1107,9 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	for _, c := range list {
+		s.enrichConversationOnline(uid, c)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"conversations": list})
 }
 
@@ -1098,6 +1139,7 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.enrichConversationOnline(uid, conv)
 	writeJSON(w, http.StatusCreated, conv)
 }
 
@@ -1696,7 +1738,6 @@ func isCancelErr(err error) bool {
 	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "request canceled")
 }
 
-
 func hostConfirmRuntimeNote(content string) string {
 	var payload hostConfirmPayload
 	if json.Unmarshal([]byte(content), &payload) != nil {
@@ -1781,6 +1822,7 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 				ch.TaskActive = true
 			}
 		}
+		s.enrichChannelOnline(uid, ch)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": list})
 }
@@ -1831,6 +1873,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.ConversationID = conv.ID
+	s.enrichChannelOnline(uid, c)
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -1883,6 +1926,7 @@ func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) 
 			c.ConversationID = conv.ID
 		}
 	}
+	s.enrichChannelOnline(uid, c)
 	writeJSON(w, http.StatusOK, c)
 }
 
@@ -1915,6 +1959,8 @@ func (s *Server) handleChannelConversation(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	s.enrichChannelOnline(uid, ch)
+	s.enrichConversationOnline(uid, conv)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"channel":      ch,
 		"conversation": conv,
