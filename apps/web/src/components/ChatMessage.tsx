@@ -210,10 +210,10 @@ export function ChatMessage({
       type="button"
       className="msg-reply-quote"
       title="跳到原消息"
+      aria-label={`引用 ${replyQuote.who}`}
       onClick={() => message.reply_to_id && onJumpToParent?.(message.reply_to_id)}
     >
-      <span className="msg-reply-quote-who">{replyQuote.who}</span>
-      <span className="msg-reply-quote-text">{previewText(replyQuote.text, 100)}</span>
+      <span className="msg-reply-quote-text">{previewText(replyQuote.text, 120)}</span>
     </button>
   ) : null;
 

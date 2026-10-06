@@ -3149,31 +3149,35 @@ button.ghost {
   color: #2563eb;
   border-color: #bfdbfe;
 }
+/* Light in-bubble quote: 2px bar + one-line text (design v1 §3). */
 .msg-reply-quote {
   display: block;
   width: 100%;
+  max-width: 100%;
   text-align: left;
   border: none;
-  border-left: 3px solid #93c5fd;
-  background: rgba(37, 99, 235, 0.06);
-  padding: 6px 10px;
-  margin-bottom: 8px;
-  border-radius: 0 8px 8px 0;
+  border-left: 2px solid #6b7280;
+  border-radius: 1px;
+  background: transparent;
+  padding: 4px 0 4px 8px;
+  margin: 0 0 6px;
   cursor: pointer;
-}
-.msg-reply-quote-who {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: #2563eb;
+  font: inherit;
 }
 .msg-reply-quote-text {
   display: block;
-  font-size: 12px;
+  font-size: 12.5px;
+  line-height: 1.4;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.bubble-user .msg-reply-quote {
+  border-left-color: rgba(255, 255, 255, 0.55);
+}
+.bubble-user .msg-reply-quote-text {
+  color: rgba(255, 255, 255, 0.72);
 }
 .msg-highlight {
   outline: 2px solid #93c5fd;
@@ -3183,52 +3187,95 @@ button.ghost {
 .chat-row-dense {
   margin-bottom: 8px;
 }
-.composer-reply-bar {
+/* Grok-style quote bar inside the composer card (design v1 §2). */
+.composer-card.has-quote {
+  background: var(--bg-elevated);
+  border-radius: 22px;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border);
+  overflow: visible;
+}
+.composer-card.has-quote .composer-bar {
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  border-radius: 0 0 22px 22px;
+}
+/* A long nowrap quote must not widen the composer (mobile overflow). */
+.composer-card.has-quote {
+  min-width: 0;
+  max-width: 100%;
+}
+.composer-quote-bar {
+  contain: inline-size;
+  min-width: 0;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  max-width: 800px;
-  margin: 0 auto 8px;
-  padding: 8px 12px;
-  border-radius: 14px;
-  background: rgba(37, 99, 235, 0.08);
-  border: 1px solid #bfdbfe;
+  height: 38px;
+  padding: 0 8px 0 16px;
+  color: var(--muted);
 }
-.composer-reply-main {
+.composer-quote-icon {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+.composer-quote-text {
   flex: 1;
   min-width: 0;
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
   font-size: 13px;
-}
-.composer-reply-label {
-  color: #2563eb;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.composer-reply-who {
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.composer-reply-text {
-  color: var(--muted);
+  color: #6b7280;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.composer-reply-clear {
+.composer-quote-clear {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
   border: none;
+  border-radius: 50%;
   background: transparent;
-  font-size: 18px;
-  line-height: 1;
   color: var(--muted);
   cursor: pointer;
-  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  padding: 0;
 }
-.composer-reply-clear:hover {
+.composer-quote-clear:hover {
   color: var(--text);
+  background: var(--bg-hover);
+}
+.composer-quote-divider {
+  height: 1px;
+  margin: 0 16px;
+  background: rgba(0, 0, 0, 0.06);
+}
+[data-theme="dark"] .composer-quote-divider {
+  background: rgba(255, 255, 255, 0.08);
+}
+[data-theme="dark"] .composer-quote-text {
+  color: #9ca3af;
+}
+/* Quote bar makes the composer taller: keep the thread panel clear of it. */
+.main:has(.composer-card.has-quote) .thread-panel {
+  bottom: 152px;
+}
+@media (max-width: 720px) {
+  .main:has(.composer-card.has-quote) .thread-panel {
+    bottom: 148px;
+  }
+}
+@media (max-width: 767px) {
+  .composer-quote-clear {
+    width: 44px;
+    height: 44px;
+    margin-right: -6px;
+  }
+  .composer-quote-bar {
+    height: 40px;
+  }
 }
 .thread-panel {
   position: absolute;

@@ -1126,7 +1126,14 @@ export default function App() {
       m.role === "assistant"
         ? m.agent_name || agentNameById.get(m.agent_id || "") || m.agent_id || "助手"
         : "你";
-    const text = (m.content || "").replace(/\s+/g, " ").trim().slice(0, 100);
+    // Plain one-line preview for the composer quote bar (CSS ellipsis does the rest).
+    const text = (m.content || "")
+      .replace(/```\w*/g, " ")
+      .replace(/^\s{0,3}(#{1,6}|>)\s*/gm, "")
+      .replace(/(\*\*|__|~~|`)/g, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
     const target = { id: m.id, who, text: text || "（无正文）" };
     replyTargetRef.current = target;
     setReplyTarget(target);
@@ -2044,7 +2051,7 @@ export default function App() {
         role: "assistant" as const,
         content: "",
         streaming: true,
-        reply_to_id: userMsg.id,
+        // No reply_to_id: Bot answers are not quotes (only explicit「回复」).
         thread_root_id: userMsg.thread_root_id,
       },
     ];
@@ -2174,7 +2181,6 @@ export default function App() {
                   streaming: true,
                   agent_id: info.agent_id,
                   agent_name: name,
-                  reply_to_id: localUserIdRef.current || undefined,
                   thread_root_id: userMsg.thread_root_id,
                 },
               ];

@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, KeyboardEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
 import { AgentAvatar } from "./AgentAvatar";
 
 export type PendingFile = {
@@ -45,7 +45,7 @@ type Props = {
   skillOptions?: ComposerSkillOption[];
   /** When true, @ targets group members; otherwise DM @ switches bot. */
   groupChat?: boolean;
-  /** Active reply target (Slack-style composer reply bar). */
+  /** Active reply target (Grok-style quote bar inside the composer card). */
   replyTo?: ComposerReplyTarget | null;
   onClearReply?: () => void;
 };
@@ -105,7 +105,9 @@ export function Composer({
 
   const hasMentions = Boolean(mentionItems?.length);
   const hasSkills = Boolean(skillOptions?.length);
-  const placeholder = hasMentions
+  const placeholder = replyTo
+    ? "回复…"
+    : hasMentions
     ? groupChat
       ? `给群聊发消息，@ 点名成员`
       : `给 ${agentName || "助手"} 发消息 · @ 可转给其他 Bot`
@@ -176,6 +178,11 @@ export function Composer({
     applyInsert(`请 load_skill ${skill.name} `);
   };
 
+  // Picking「回复」focuses the input so the user can type straight away.
+  useEffect(() => {
+    if (replyTo?.id) taRef.current?.focus();
+  }, [replyTo?.id]);
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (showPicker && activeOptions.length > 0) {
       if (e.key === "ArrowDown") {
@@ -203,6 +210,11 @@ export function Composer({
         setTrigger(null);
         return;
       }
+    }
+    if (e.key === "Escape" && replyTo && onClearReply) {
+      e.preventDefault();
+      onClearReply();
+      return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -285,17 +297,41 @@ export function Composer({
           ))}
         </div>
       ) : null}
+      <div className={`composer-card${replyTo ? " has-quote" : ""}`}>
       {replyTo ? (
-        <div className="composer-reply-bar">
-          <div className="composer-reply-main">
-            <span className="composer-reply-label">回复</span>
-            <span className="composer-reply-who">{replyTo.who}</span>
-            <span className="composer-reply-text">{replyTo.text}</span>
+        <>
+          <div className="composer-quote-bar" title={replyTo.text}>
+            <svg
+              className="composer-quote-icon"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <polyline points="9 14 4 9 9 4" />
+              <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+            </svg>
+            <span className="composer-quote-text">{replyTo.text}</span>
+            <button
+              type="button"
+              className="composer-quote-clear"
+              title="取消回复"
+              aria-label="取消回复"
+              onClick={onClearReply}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden>
+                <line x1="6" y1="6" x2="18" y2="18" />
+                <line x1="18" y1="6" x2="6" y2="18" />
+              </svg>
+            </button>
           </div>
-          <button type="button" className="composer-reply-clear" title="取消回复" onClick={onClearReply}>
-            ×
-          </button>
-        </div>
+          <div className="composer-quote-divider" aria-hidden />
+        </>
       ) : null}
       <div className="composer-bar">
         <input
@@ -415,6 +451,7 @@ export function Composer({
             ↑
           </button>
         )}
+      </div>
       </div>
     </form>
   );
