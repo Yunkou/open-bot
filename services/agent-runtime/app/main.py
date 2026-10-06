@@ -580,6 +580,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             "tools_enabled": tools_on,
             "lessons_injected": len(injected_lessons),
             "lesson_ids": [str(x.get("id") or "") for x in injected_lessons],
+            "run_id": run_id,
         }
         if compact_meta.get("summary_new") and compact_meta.get("summary"):
             meta["summary"] = compact_meta["summary"]

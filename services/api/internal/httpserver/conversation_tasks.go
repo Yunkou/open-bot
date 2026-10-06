@@ -164,7 +164,7 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 			return
 		}
 		_ = s.db.SetConversationTaskAttempt(task.ID, attempt)
-		reply, runErr := s.runConversationTaskOnce(ctx, task)
+		reply, requestID, runErr := s.runConversationTaskOnce(ctx, task)
 		if runErr != nil {
 			lastErr = runErr
 			if ctx.Err() != nil {
@@ -173,7 +173,7 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 			continue
 		}
 		if strings.TrimSpace(reply) != "" {
-			s.finishTaskMessage(task, reply, db.TaskDone, "", channelID)
+			s.finishTaskMessage(task, reply, db.TaskDone, "", channelID, requestID)
 			return
 		}
 		lastErr = errors.New("empty")
@@ -195,10 +195,10 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 	} else if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
-	s.finishTaskMessage(task, msg, status, errText, channelID)
+	s.finishTaskMessage(task, msg, status, errText, channelID, "")
 }
 
-func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, lastError, channelID string) {
+func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, lastError, channelID, requestID string) {
 	cur, err := s.db.GetConversationTask(task.ID)
 	if err != nil || cur == nil || cur.Status != db.TaskRunning {
 		return
@@ -207,7 +207,10 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	if err != nil || !ok {
 		return
 	}
-	msg, err := s.db.AddMessageWithAgent(task.ConversationID, "assistant", text, task.AgentID)
+	msg, err := s.db.AddMessageWithOpts(task.ConversationID, "assistant", text, db.AddMessageOpts{
+		AgentID:   task.AgentID,
+		RequestID: strings.TrimSpace(requestID),
+	})
 	if err != nil {
 		log.Printf("conversation task message %s: %v", task.ID, err)
 	} else {
@@ -220,14 +223,14 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, channelID, "idle", label)
 }
 
-func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.ConversationTask) (string, error) {
+func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.ConversationTask) (string, string, error) {
 	msgs, err := s.db.ListMessages(task.UserID, task.ConversationID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	conv, err := s.db.GetConversation(task.UserID, task.ConversationID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	systemPrompt := ""
 	if agent, aerr := s.db.GetAgent(task.UserID, task.AgentID); aerr == nil {
@@ -246,7 +249,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	var llmPayload map[string]any
 	conn, err := s.db.ResolveEffectiveLLM(task.UserID)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		return "", err
+		return "", "", err
 	}
 	if conn != nil {
 		llmPayload = llmRuntimePayload(conn)
@@ -292,12 +295,12 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		MessageID:      task.SourceMessageID,
 		Source:         "defer_work",
 	}
-	text, _, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap, recallCtx)
+	text, _, runID, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap, recallCtx)
 	if runErr == nil {
 		_ = s.db.RecordUsageRun("", task.UserID, task.AgentID, task.ConversationID, "defer_work",
 			runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
 	}
-	return text, runErr
+	return text, runID, runErr
 }
 
 func (s *Server) abortTask(conversationID string) {
@@ -326,10 +329,10 @@ func (s *Server) abortUserTasks(userID string) {
 }
 
 func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emit func(event string, data any)) *db.Message {
-	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", emit)
+	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", "", emit)
 }
 
-func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID string, emit func(event string, data any)) *db.Message {
+func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID, requestID string, emit func(event string, data any)) *db.Message {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -337,19 +340,24 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 		AgentID:      agentID,
 		ReplyToID:    strings.TrimSpace(replyToID),
 		ThreadRootID: strings.TrimSpace(threadRootID),
+		RequestID:    strings.TrimSpace(requestID),
 	})
 	if err != nil {
 		log.Printf("save assistant conv=%s: %v", conversationID, err)
 		return nil
 	}
 	if emit != nil {
-		emit("meta", map[string]any{
+		meta := map[string]any{
 			"phase":           "message_saved",
 			"message_id":      msg.ID,
 			"conversation_id": conversationID,
 			"reply_to_id":     msg.ReplyToID,
 			"thread_root_id":  msg.ThreadRootID,
-		})
+		}
+		if msg.RequestID != "" {
+			meta["request_id"] = msg.RequestID
+		}
+		emit("meta", meta)
 	}
 	s.publishConversationMessage(userID, msg)
 	return msg

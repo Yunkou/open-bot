@@ -32,6 +32,7 @@ type Message struct {
 	CreatedAt      time.Time         `json:"created_at"`
 	Reactions      []ReactionSummary `json:"reactions"`
 	AgentMessageID string            `json:"agent_message_id,omitempty"`
+	RequestID      string            `json:"request_id,omitempty"`
 	Handoff        *HandoffPayload   `json:"handoff,omitempty"`
 }
 
@@ -49,6 +50,7 @@ type AddMessageOpts struct {
 	AgentID      string
 	ReplyToID    string
 	ThreadRootID string
+	RequestID    string
 	At           time.Time
 }
 
@@ -206,6 +208,7 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 		AgentID:        strings.TrimSpace(opts.AgentID),
 		ReplyToID:      strings.TrimSpace(opts.ReplyToID),
 		ThreadRootID:   strings.TrimSpace(opts.ThreadRootID),
+		RequestID:      strings.TrimSpace(opts.RequestID),
 		CreatedAt:      at,
 	}
 	tx, err := d.SQL.Begin()
@@ -222,9 +225,9 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 		rootAny = m.ThreadRootID
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.CreatedAt,
+		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, request_id, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.RequestID, m.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -281,7 +284,7 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
 		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
-		        COALESCE(agent_message_id, '')
+		        COALESCE(agent_message_id, ''), COALESCE(request_id, '')
 		 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
 		conversationID,
 	)
@@ -292,7 +295,7 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID, &m.RequestID); err != nil {
 			return nil, err
 		}
 		if m.Role == "handoff" {

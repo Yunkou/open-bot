@@ -3691,15 +3691,15 @@ button.ghost {
   border: none;
   background: transparent !important;
   border-radius: 6px;
-  color: #1f2937;
+  color: #6b7280;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
 }
 .msg-hover-btn:hover {
-  background: rgba(0, 0, 0, 0.06) !important;
-  color: #111827;
+  background: rgba(0, 0, 0, 0.05) !important;
+  color: #374151;
 }
 .msg-hover-btn svg {
   display: block;
@@ -3707,7 +3707,10 @@ button.ghost {
 .msg-more-menu {
   position: absolute;
   top: calc(100% + 4px);
-  right: 0;
+  /* Align under ⋯; slight right overhang like reference */
+  left: 50%;
+  right: auto;
+  transform: translateX(calc(-100% + 14px));
   min-width: 168px;
   background: #fff;
   border: 1px solid #e5e7eb;
@@ -3736,7 +3739,7 @@ button.ghost {
 }
 .msg-more-item svg {
   flex-shrink: 0;
-  color: #374151;
+  color: #6b7280;
 }
 .msg-more-sep {
   height: 1px;

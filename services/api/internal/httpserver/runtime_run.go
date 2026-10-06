@@ -130,6 +130,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	var assistant strings.Builder
 	var eventName string
 	var pendingSummary string
+	var runID string
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -151,6 +152,9 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 							if sum, ok := payload["summary"].(string); ok && strings.TrimSpace(sum) != "" {
 								pendingSummary = sum
 							}
+						}
+						if rid := runIDFromRuntimeMeta(payload); rid != "" {
+							runID = rid
 						}
 						s.persistMemoryRecallFromMeta(payload, recallPersistContext{
 							UserID:         userID,
@@ -185,7 +189,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	}
 	reply := stripThinkTags(assistant.String())
 	if reply != "" {
-		_, _ = s.db.AddMessage(conv.ID, "assistant", reply)
+		_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", reply, db.AddMessageOpts{RequestID: runID})
 	}
 	source := sourceHint(title)
 	_ = s.db.RecordUsageRun("", userID, agentID, conv.ID, source, 0, 0, 0)

@@ -1434,14 +1434,20 @@ export default function App() {
     releaseHostConfirm(parsed.req_id, ok);
   };
 
-  const stampSavedMessage = (convId: string, messageId: string) => {
+  const stampSavedMessage = (convId: string, messageId: string, requestId?: string) => {
     if (!messageId) return;
     const run = runsRef.current.get(convId);
     const localId = run?.assistantId;
+    const rid = (requestId || "").trim();
     patchConvMessages(convId, (prev) => {
-      if (prev.some((m) => m.id === messageId)) return prev;
+      if (prev.some((m) => m.id === messageId)) {
+        if (!rid) return prev;
+        return prev.map((m) => (m.id === messageId && !m.request_id ? { ...m, request_id: rid } : m));
+      }
       if (!localId) return prev;
-      return prev.map((m) => (m.id === localId ? { ...m, id: messageId } : m));
+      return prev.map((m) =>
+        m.id === localId ? { ...m, id: messageId, ...(rid ? { request_id: rid } : {}) } : m,
+      );
     });
     if (run && localId && run.assistantId === localId) {
       run.assistantId = messageId;
@@ -1662,7 +1668,11 @@ export default function App() {
               });
             }
             if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
-              stampSavedMessage(conv.id, meta.message_id);
+              stampSavedMessage(
+                conv.id,
+                meta.message_id,
+                typeof meta.request_id === "string" ? meta.request_id : undefined,
+              );
             }
             if (meta.phase === "task_queued") {
               noteTask(conv.id, true, "正在做，做好会发在这里");
@@ -2132,7 +2142,11 @@ export default function App() {
               });
             }
             if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
-              stampSavedMessage(streamConvId!, meta.message_id);
+              stampSavedMessage(
+                streamConvId!,
+                meta.message_id,
+                typeof meta.request_id === "string" ? meta.request_id : undefined,
+              );
             }
             if (meta.phase === "task_queued") {
               noteTask(streamConvId!, true, "正在做，做好会发在这里");

@@ -425,6 +425,10 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS agent_message_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_agent_message_id
   ON messages(agent_message_id) WHERE agent_message_id IS NOT NULL;
 
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_messages_request_id
+  ON messages(request_id) WHERE request_id <> '';
+
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_shape TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_user_set BOOLEAN NOT NULL DEFAULT FALSE;

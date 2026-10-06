@@ -6,6 +6,7 @@ type Flip = "right" | "left" | "top";
 
 type Props = {
   isBot: boolean;
+  /** Kept for callers; Copy Request ID uses requestId only. */
   messageId: string;
   content: string;
   requestId?: string;
@@ -17,7 +18,6 @@ type Props = {
 
 export function MessageHoverBar({
   isBot,
-  messageId,
   content,
   requestId,
   onToggleReaction,
@@ -88,8 +88,9 @@ export function MessageHoverBar({
   };
 
   const copyId = async () => {
+    if (!requestId) return;
     try {
-      await navigator.clipboard.writeText(requestId || messageId);
+      await navigator.clipboard.writeText(requestId);
     } catch {
       /* ignore */
     }
@@ -179,10 +180,12 @@ export function MessageHoverBar({
                 <IconCopy size={15} />
                 <span>复制</span>
               </button>
-              <button type="button" className="msg-more-item" role="menuitem" onClick={() => void copyId()}>
-                <IconCopy size={15} />
-                <span>复制请求 ID</span>
-              </button>
+              {requestId ? (
+                <button type="button" className="msg-more-item" role="menuitem" onClick={() => void copyId()}>
+                  <IconCopy size={15} />
+                  <span>复制请求 ID</span>
+                </button>
+              ) : null}
               {isBot ? (
                 <>
                   <div className="msg-more-sep" />

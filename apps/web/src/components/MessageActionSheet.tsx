@@ -5,6 +5,7 @@ import { IconCopy, IconFlag, IconReply, IconSmile } from "./MsgActionIcons";
 type Props = {
   open: boolean;
   isBot: boolean;
+  /** Kept for callers; Copy Request ID uses requestId only. */
   messageId: string;
   content: string;
   requestId?: string;
@@ -17,7 +18,6 @@ type Props = {
 export function MessageActionSheet({
   open,
   isBot,
-  messageId,
   content,
   requestId,
   onClose,
@@ -58,8 +58,9 @@ export function MessageActionSheet({
   };
 
   const copyId = async () => {
+    if (!requestId) return;
     try {
-      await navigator.clipboard.writeText(requestId || messageId);
+      await navigator.clipboard.writeText(requestId);
     } catch {
       /* ignore */
     }
@@ -130,9 +131,11 @@ export function MessageActionSheet({
             <button type="button" className="action-sheet-row action-sheet-row-icon" onClick={() => void copyText()}>
               <IconCopy size={18} /> 复制
             </button>
-            <button type="button" className="action-sheet-row action-sheet-row-icon" onClick={() => void copyId()}>
-              <IconCopy size={18} /> 复制请求 ID
-            </button>
+            {requestId ? (
+              <button type="button" className="action-sheet-row action-sheet-row-icon" onClick={() => void copyId()}>
+                <IconCopy size={18} /> 复制请求 ID
+              </button>
+            ) : null}
             {isBot && onFeedback ? (
               <button
                 type="button"

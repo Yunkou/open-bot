@@ -21,8 +21,9 @@ export type ChatMessageData = {
   created_at?: string;
   reply_to_id?: string;
   thread_root_id?: string;
-  /** Upstream run/request id when available (More → 复制请求 ID). */
   agent_message_id?: string;
+  /** Runtime run id on Bot replies (More → 复制请求 ID); absent on historical messages. */
+  request_id?: string;
   reactions?: ReactionSummary[];
   handoff?: HandoffPayload;
 };
@@ -122,6 +123,8 @@ export function ChatMessage({
   const touchUi = useIsTouchUi();
   const [sheetOpen, setSheetOpen] = useState(false);
   const timerRef = useRef<number | null>(null);
+  /** Set when the long-press timer opened the sheet; the release must not "click" the mask. */
+  const longPressFiredRef = useRef(false);
   const startRef = useRef<{ x: number; y: number } | null>(null);
   const clearTimer = () => {
     if (timerRef.current != null) {
@@ -234,7 +237,7 @@ export function ChatMessage({
   );
 
   const hasActions = interactive || canReply || canFeedback;
-  const requestId = message.agent_message_id || message.id;
+  const requestId = message.request_id?.trim() || undefined;
   const replyFn = canReply ? () => onReply?.(message) : undefined;
   const feedbackFn = canFeedback ? () => onFeedback?.(message) : undefined;
 
@@ -242,11 +245,13 @@ export function ChatMessage({
     if (!hasActions || !touchUi) return;
     if (e.pointerType === "mouse") return;
     startRef.current = { x: e.clientX, y: e.clientY };
+    longPressFiredRef.current = false;
     clearTimer();
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
       const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
       if (sel && sel.toString().length > 0) return;
+      longPressFiredRef.current = true;
       setSheetOpen(true);
       try {
         navigator.vibrate?.(10);
@@ -264,6 +269,18 @@ export function ChatMessage({
   const onPointerEnd = () => {
     clearTimer();
     startRef.current = null;
+    if (longPressFiredRef.current) {
+      longPressFiredRef.current = false;
+      // Swallow the ghost click from lifting the finger, which would otherwise
+      // land on the freshly opened sheet's mask and close it immediately.
+      const swallow = (ev: Event) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.removeEventListener("click", swallow, true);
+      };
+      window.addEventListener("click", swallow, true);
+      window.setTimeout(() => window.removeEventListener("click", swallow, true), 500);
+    }
   };
   const touchHandlers =
     touchUi && hasActions

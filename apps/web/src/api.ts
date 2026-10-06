@@ -123,6 +123,8 @@ export type Message = {
   thread_root_id?: string;
   reactions?: ReactionSummary[];
   agent_message_id?: string;
+  /** Runtime run id for Bot replies (omitted on historical / non-run messages). */
+  request_id?: string;
   handoff?: HandoffPayload;
 };
 
