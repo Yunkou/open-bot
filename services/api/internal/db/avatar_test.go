@@ -3,13 +3,27 @@ package db
 import "testing"
 
 func TestAvatarWhitelist(t *testing.T) {
-	for _, s := range []string{"circle", "rounded", "squircle", "hex", "diamond", "soft-square"} {
+	for _, s := range []string{"cloud", "bean", "drop", "soft-hex", "petal", "puff"} {
 		if !IsAllowedAvatarShape(s) {
 			t.Fatalf("shape %q should be allowed", s)
 		}
 	}
-	if IsAllowedAvatarShape("star") {
-		t.Fatal("star must be rejected")
+	for _, s := range []string{"circle", "rounded", "squircle", "hex", "diamond", "soft-square", "star"} {
+		if IsAllowedAvatarShape(s) {
+			t.Fatalf("legacy/unknown shape %q must not be in whitelist", s)
+		}
+	}
+	want := map[string]string{
+		"circle": "cloud", "rounded": "puff", "squircle": "bean",
+		"hex": "soft-hex", "diamond": "drop", "soft-square": "petal",
+	}
+	for old, neu := range want {
+		if MapLegacyAvatarShape(old) != neu {
+			t.Fatalf("legacy %s → %s, got %s", old, neu, MapLegacyAvatarShape(old))
+		}
+	}
+	if CanonicalAvatarShape("rounded") != "puff" || CanonicalAvatarShape("cloud") != "cloud" {
+		t.Fatal("CanonicalAvatarShape mismatch")
 	}
 	if len(AllowedAvatarColors) != 12 {
 		t.Fatalf("palette size=%d", len(AllowedAvatarColors))

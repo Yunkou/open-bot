@@ -50,9 +50,9 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "avatar-http-"+uid[:8], org.ID, db.RoleMember
 
 	// 1. Create with avatar in body (no PATCH fallback).
 	rec, out := do(s.handleCreateAgent, http.MethodPost, "/v1/agents", "", map[string]any{
-		"name": "形象Bot", "avatar_shape": "hex", "avatar_color": "#9B5DE5",
+		"name": "形象Bot", "avatar_shape": "soft-hex", "avatar_color": "#9B5DE5",
 	})
-	if rec.Code != http.StatusCreated || out["avatar_shape"] != "hex" || out["avatar_color"] != "#9b5de5" {
+	if rec.Code != http.StatusCreated || out["avatar_shape"] != "soft-hex" || out["avatar_color"] != "#9b5de5" {
 		t.Fatalf("create code=%d out=%v", rec.Code, out)
 	}
 	agentID, _ := out["id"].(string)
@@ -72,7 +72,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "avatar-http-"+uid[:8], org.ID, db.RoleMember
 	for _, raw := range out["agents"].([]any) {
 		a := raw.(map[string]any)
 		if a["id"] == agentID {
-			found = a["avatar_shape"] == "hex" && a["avatar_color"] == "#9b5de5"
+			found = a["avatar_shape"] == "soft-hex" && a["avatar_color"] == "#9b5de5"
 		}
 		if a["avatar_shape"] == "" || a["avatar_color"] == "" {
 			t.Fatalf("list missing avatar: %v", a)
@@ -84,9 +84,9 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "avatar-http-"+uid[:8], org.ID, db.RoleMember
 
 	// 3. PATCH avatar-only keeps name; whitelist enforced.
 	rec, out = do(s.handlePatchAgent, http.MethodPatch, "/v1/agents/"+agentID, agentID, map[string]any{
-		"avatar_shape": "diamond", "avatar_color": "#118ab2",
+		"avatar_shape": "drop", "avatar_color": "#118ab2",
 	})
-	if rec.Code != http.StatusOK || out["avatar_shape"] != "diamond" || out["avatar_color"] != "#118ab2" || out["name"] != "形象Bot" {
+	if rec.Code != http.StatusOK || out["avatar_shape"] != "drop" || out["avatar_color"] != "#118ab2" || out["name"] != "形象Bot" {
 		t.Fatalf("patch code=%d out=%v", rec.Code, out)
 	}
 	rec, _ = do(s.handlePatchAgent, http.MethodPatch, "/v1/agents/"+agentID, agentID, map[string]any{"avatar_color": "#123456"})

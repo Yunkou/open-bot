@@ -677,17 +677,18 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, a := range list {
 		item := map[string]any{
-			"id":            a.ID,
-			"name":          a.Name,
-			"description":   a.Description,
-			"system_prompt": a.SystemPrompt,
-			"is_builtin":    a.IsBuiltin,
-			"computer_mode": a.ComputerMode,
-			"avatar_shape":  a.AvatarShape,
-			"avatar_color":  a.AvatarColor,
-			"user_id":       a.UserID,
-			"created_at":    a.CreatedAt.UTC().Format(time.RFC3339Nano),
-			"updated_at":    a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"id":              a.ID,
+			"name":            a.Name,
+			"description":     a.Description,
+			"system_prompt":   a.SystemPrompt,
+			"is_builtin":      a.IsBuiltin,
+			"computer_mode":   a.ComputerMode,
+			"avatar_shape":    a.AvatarShape,
+			"avatar_color":    a.AvatarColor,
+			"avatar_user_set": a.AvatarUserSet,
+			"user_id":         a.UserID,
+			"created_at":      a.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"updated_at":      a.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		}
 		if prev, perr := s.db.GetAgentThreadPreview(uid, a.ID); perr == nil && prev != nil && prev.ConversationID != "" {
 			item["conversation_id"] = prev.ConversationID

@@ -10,18 +10,19 @@ import (
 )
 
 type Agent struct {
-	ID           string     `json:"id"`
-	UserID       string     `json:"user_id,omitempty"`
-	Name         string     `json:"name"`
-	Description  string     `json:"description"`
-	SystemPrompt string     `json:"system_prompt"`
-	IsBuiltin    bool       `json:"is_builtin"`
-	ComputerMode string     `json:"computer_mode"` // team|private
-	AvatarShape  string     `json:"avatar_shape"`
-	AvatarColor  string     `json:"avatar_color"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
+	ID            string     `json:"id"`
+	UserID        string     `json:"user_id,omitempty"`
+	Name          string     `json:"name"`
+	Description   string     `json:"description"`
+	SystemPrompt  string     `json:"system_prompt"`
+	IsBuiltin     bool       `json:"is_builtin"`
+	ComputerMode  string     `json:"computer_mode"` // team|private
+	AvatarShape   string     `json:"avatar_shape"`
+	AvatarColor   string     `json:"avatar_color"`
+	AvatarUserSet bool       `json:"avatar_user_set"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
 }
 
 // PurgeBuiltinAgents removes seeded built-in assistants (open-bot / general / any is_builtin).
@@ -60,7 +61,7 @@ func (d *DB) ResolveAgentID(userID, agentID string) (string, error) {
 func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
-		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), created_at, updated_at
+		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE), created_at, updated_at
 		 FROM agents
 		 WHERE user_id = $1 AND deleted_at IS NULL
 		 ORDER BY created_at ASC`,
@@ -74,54 +75,37 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	for rows.Next() {
 		var a Agent
 		var uid string
-		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.UserID = uid
+		// Read-only canonicalize for response; never write back on list.
+		if canon := CanonicalAvatarShape(a.AvatarShape); canon != "" {
+			a.AvatarShape = canon
+		}
 		out = append(out, &a)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// Backfill avatar for rows created before avatar columns existed,
-	// avoiding shape+color pairs already used by this user.
-	used := make(map[string]struct{})
-	for _, a := range out {
-		if a.AvatarShape != "" && a.AvatarColor != "" {
-			used[a.AvatarShape+"|"+a.AvatarColor] = struct{}{}
-		}
-	}
-	for _, a := range out {
-		if a.AvatarShape == "" || a.AvatarColor == "" {
-			s, c := AssignAvatarAvoiding(a.ID, used)
-			a.AvatarShape, a.AvatarColor = s, c
-			used[s+"|"+c] = struct{}{}
-			_, _ = d.SQL.Exec(`UPDATE agents SET avatar_shape=$1, avatar_color=$2 WHERE id=$3`, s, c, a.ID)
-		}
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (d *DB) GetAgent(userID, id string) (*Agent, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
-		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), created_at, updated_at
+		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE), created_at, updated_at
 		 FROM agents WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		id, userID,
 	)
 	var a Agent
 	var uid string
-	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	a.UserID = uid
-	if a.AvatarShape == "" || a.AvatarColor == "" {
-		s, c := AssignAvatarFromID(a.ID)
-		a.AvatarShape, a.AvatarColor = s, c
-		_, _ = d.SQL.Exec(`UPDATE agents SET avatar_shape=$1, avatar_color=$2 WHERE id=$3`, s, c, a.ID)
+	if canon := CanonicalAvatarShape(a.AvatarShape); canon != "" {
+		a.AvatarShape = canon
 	}
 	return &a, nil
 }
@@ -132,6 +116,7 @@ func (d *DB) CreateAgent(userID, name, description, systemPrompt string) (*Agent
 
 // CreateAgentWithAvatar creates an agent with optional whitelisted avatar_shape / avatar_color.
 // Empty values are auto-assigned (agent_id hash, avoiding the user's used shape+color pairs).
+// Any client-provided shape or color marks avatar_user_set=true.
 func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shape, color string) (*Agent, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -149,6 +134,7 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 	} else {
 		color = ""
 	}
+	userSet := shape != "" || color != ""
 	now := Now()
 	a := &Agent{
 		ID:           uuid.NewString(),
@@ -171,12 +157,12 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 	if err != nil {
 		return nil, err
 	}
-	a.AvatarShape, a.AvatarColor = s, c
+	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = s, c, userSet
 
 	if _, err := tx.Exec(
-		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10)`,
-		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.CreatedAt, a.UpdatedAt,
+		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10,$11)`,
+		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.AvatarUserSet, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -228,6 +214,9 @@ func usedAvatarPairsTx(tx *sql.Tx, userID string) (map[string]struct{}, error) {
 		var s, c string
 		if err := rows.Scan(&s, &c); err != nil {
 			return nil, err
+		}
+		if canon := CanonicalAvatarShape(s); canon != "" {
+			s = canon
 		}
 		if s != "" && c != "" {
 			used[s+"|"+c] = struct{}{}
@@ -285,6 +274,7 @@ func (d *DB) SetAgentComputerMode(userID, id, mode string) (*Agent, error) {
 }
 
 // UpdateAgentAvatar sets avatar_shape / avatar_color (whitelisted). Empty values keep current.
+// Always marks avatar_user_set=true (manual choice; migrate will not reassign).
 func (d *DB) UpdateAgentAvatar(userID, id, shape, color string) (*Agent, error) {
 	shape = strings.TrimSpace(shape)
 	colorRaw := strings.TrimSpace(color)
@@ -311,9 +301,10 @@ func (d *DB) UpdateAgentAvatar(userID, id, shape, color string) (*Agent, error) 
 	if color != "" {
 		a.AvatarColor = color
 	}
+	a.AvatarUserSet = true
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(
-		`UPDATE agents SET avatar_shape=$1, avatar_color=$2, updated_at=$3 WHERE id=$4 AND user_id=$5 AND deleted_at IS NULL`,
+		`UPDATE agents SET avatar_shape=$1, avatar_color=$2, avatar_user_set=TRUE, updated_at=$3 WHERE id=$4 AND user_id=$5 AND deleted_at IS NULL`,
 		a.AvatarShape, a.AvatarColor, a.UpdatedAt, id, userID,
 	)
 	if err != nil {
