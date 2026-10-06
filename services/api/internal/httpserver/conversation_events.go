@@ -2,8 +2,10 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -75,6 +77,17 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 		flusher.Flush()
 		return true
 	}
+	// convEventName names a conversation-hub frame by its JSON "type"
+	// (reaction_updated, bot_presence, …); legacy payloads default to reaction_updated.
+	convEventName := func(payload []byte) string {
+		var meta struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(payload, &meta) == nil && strings.TrimSpace(meta.Type) != "" {
+			return strings.TrimSpace(meta.Type)
+		}
+		return "reaction_updated"
+	}
 	writeRaw := func(event string, payload []byte) bool {
 		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload); err != nil {
 			return false
@@ -91,7 +104,7 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 
 	handle := s.runs.get(id)
 	if handle == nil {
-		// No active run: long-lived stream for reaction_updated (and future conv events).
+		// No active run: long-lived stream for reaction_updated / bot_presence.
 		if !writeFrame("ready", map[string]any{"conversation_id": id, "active": false}) {
 			return
 		}
@@ -110,7 +123,7 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 				if !open {
 					return
 				}
-				if !writeRaw("reaction_updated", payload) {
+				if !writeRaw(convEventName(payload), payload) {
 					return
 				}
 			}
@@ -140,7 +153,7 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 			return
 		case payload, open := <-reactCh:
 			if open {
-				if !writeRaw("reaction_updated", payload) {
+				if !writeRaw(convEventName(payload), payload) {
 					return
 				}
 			}

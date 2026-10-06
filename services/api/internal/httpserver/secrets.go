@@ -161,6 +161,11 @@ func (s *Server) handleInternalRequestSecret(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if cid := strings.TrimSpace(body.ConversationID); cid != "" {
+		if aid := strings.TrimSpace(body.AgentID); aid != "" {
+			s.publishBotPresence(uid, cid, aid, "awaiting_approval")
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"need_user_input": true,
 		"event":           "secret_needed",

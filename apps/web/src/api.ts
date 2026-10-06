@@ -24,6 +24,10 @@ export type Agent = {
   is_builtin?: boolean;
   computer_mode?: "team" | "private" | string;
   user_id?: string;
+  /** Whitelisted: circle|rounded|squircle|hex|diamond|soft-square */
+  avatar_shape?: string;
+  /** Whitelisted 12-color palette (#rrggbb). */
+  avatar_color?: string;
   created_at?: string;
   updated_at?: string;
   /** Primary thread id (assistant-level). */
@@ -39,6 +43,21 @@ export type AgentInput = {
   description: string;
   system_prompt: string;
   computer_mode?: "team" | "private" | string;
+  avatar_shape?: string;
+  avatar_color?: string;
+};
+
+/** PATCH /v1/agents/{id}: omitted / empty fields keep current values. */
+export type AgentPatch = Partial<AgentInput>;
+
+/** bot_presence frame (conversation SSE + chat WS). */
+export type BotPresenceStatus = "idle" | "working" | "awaiting_approval" | "error";
+export type BotPresenceEvent = {
+  type?: "bot_presence" | string;
+  conversation_id: string;
+  agent_id: string;
+  status: BotPresenceStatus | string;
+  updated_at?: string;
 };
 
 export type AgentSkill = {
@@ -250,7 +269,7 @@ export async function createAgent(body: AgentInput): Promise<Agent> {
   return res.json();
 }
 
-export async function updateAgent(id: string, body: AgentInput): Promise<Agent> {
+export async function updateAgent(id: string, body: AgentPatch): Promise<Agent> {
   const res = await fetch(`${API_BASE}/v1/agents/${id}`, {
     method: "PATCH",
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -824,8 +843,16 @@ export type Channel = {
   name: string;
   created_at: string;
   members?: string[];
+  member_profiles?: ChannelMemberProfile[];
   conversation_id?: string;
   task_active?: boolean;
+};
+
+export type ChannelMemberProfile = {
+  agent_id: string;
+  name?: string;
+  avatar_shape: string;
+  avatar_color: string;
 };
 
 export type AgentBusMessage = {

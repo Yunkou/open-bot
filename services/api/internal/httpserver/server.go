@@ -194,6 +194,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	// Internal: runtime send_to_agent → same deliver path (priority wake + WS)
 	mux.HandleFunc("POST /internal/agent-bus/messages", s.requireInternal(s.handleInternalPostAgentBusMessage))
 	mux.HandleFunc("POST /internal/handoff-notes", s.requireInternal(s.handleInternalHandoffNote))
+	mux.HandleFunc("POST /internal/bot-presence", s.requireInternal(s.handleInternalBotPresence))
 	mux.HandleFunc("GET /v1/compact-config", s.requireAuth(s.handleCompactConfig))
 
 	mux.HandleFunc("GET /v1/mcp-servers", s.requireAuth(s.handleListMCPServers))
@@ -673,6 +674,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"system_prompt": a.SystemPrompt,
 			"is_builtin":    a.IsBuiltin,
 			"computer_mode": a.ComputerMode,
+			"avatar_shape":  a.AvatarShape,
+			"avatar_color":  a.AvatarColor,
 			"user_id":       a.UserID,
 			"created_at":    a.CreatedAt.UTC().Format(time.RFC3339Nano),
 			"updated_at":    a.UpdatedAt.UTC().Format(time.RFC3339Nano),
@@ -720,6 +723,8 @@ type agentBody struct {
 	Description  string `json:"description"`
 	SystemPrompt string `json:"system_prompt"`
 	ComputerMode string `json:"computer_mode"`
+	AvatarShape  string `json:"avatar_shape"`
+	AvatarColor  string `json:"avatar_color"`
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
@@ -729,7 +734,7 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	a, err := s.db.CreateAgent(uid, body.Name, body.Description, body.SystemPrompt)
+	a, err := s.db.CreateAgentWithAvatar(uid, body.Name, body.Description, body.SystemPrompt, body.AvatarShape, body.AvatarColor)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -745,7 +750,14 @@ func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	a, err := s.db.UpdateAgent(uid, id, body.Name, body.Description, body.SystemPrompt)
+	var a *db.Agent
+	var err error
+	// Avatar/computer-mode-only PATCH must not wipe name/description/prompt.
+	if body.Name != "" || body.Description != "" || body.SystemPrompt != "" {
+		a, err = s.db.UpdateAgent(uid, id, body.Name, body.Description, body.SystemPrompt)
+	} else {
+		a, err = s.db.GetAgent(uid, id)
+	}
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
@@ -758,6 +770,18 @@ func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 		if a2, e2 := s.db.SetAgentComputerMode(uid, id, body.ComputerMode); e2 == nil {
 			a = a2
 		}
+	}
+	if body.AvatarShape != "" || body.AvatarColor != "" {
+		a2, e2 := s.db.UpdateAgentAvatar(uid, id, body.AvatarShape, body.AvatarColor)
+		if e2 != nil {
+			if errors.Is(e2, db.ErrNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": e2.Error()})
+			return
+		}
+		a = a2
 	}
 	writeJSON(w, http.StatusOK, a)
 }
@@ -1532,7 +1556,12 @@ func usageFromDonePayload(payload map[string]any) runtimeUsage {
 
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text + optional summary.
 // emit must not cancel the run on client write failure — disconnect is not stop.
-func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (string, string, runtimeUsage, error) {
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (_ string, _ string, _ runtimeUsage, runErr error) {
+	presConv, _ := payloadMap["conversation_id"].(string)
+	presAgent, _ := payloadMap["agent_id"].(string)
+	presUser, _ := payloadMap["user_id"].(string)
+	s.publishBotPresence(presUser, presConv, presAgent, "working")
+	defer func() { s.finishBotPresence(presUser, presConv, presAgent, runErr) }()
 	payload, _ := json.Marshal(payloadMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
 	if err != nil {

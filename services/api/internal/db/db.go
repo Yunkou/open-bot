@@ -424,6 +424,9 @@ CREATE INDEX IF NOT EXISTS idx_message_reactions_message ON message_reactions(me
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS agent_message_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_agent_message_id
   ON messages(agent_message_id) WHERE agent_message_id IS NOT NULL;
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_shape TEXT NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '';
 `)
 	if err != nil {
 		return err

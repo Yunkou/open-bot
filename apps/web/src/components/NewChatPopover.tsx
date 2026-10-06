@@ -1,11 +1,19 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Agent } from "../api";
 import { AgentAvatar } from "./AgentAvatar";
+import {
+  AVATAR_COLOR_PALETTE,
+  AVATAR_SHAPES,
+  pickDefaultAvatar,
+  type AvatarShape,
+} from "./avatarColor";
 
 export type CreateBotInput = {
   name: string;
   description: string;
   system_prompt: string;
+  avatar_shape: string;
+  avatar_color: string;
 };
 
 export type NewChatPopoverProps = {
@@ -38,6 +46,8 @@ export function NewChatPopover({
   const [botName, setBotName] = useState("");
   const [botDesc, setBotDesc] = useState("");
   const [botPrompt, setBotPrompt] = useState("");
+  const [botShape, setBotShape] = useState<AvatarShape>("rounded");
+  const [botColor, setBotColor] = useState("#457b9d");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pos, setPos] = useState<{ top: number; left: number }>({ top: 24, left: 300 });
@@ -60,6 +70,14 @@ export function NewChatPopover({
     setBotName("");
     setBotDesc("");
     setBotPrompt("");
+    {
+      const used = agents
+        .filter((a) => a.avatar_shape && a.avatar_color)
+        .map((a) => `${a.avatar_shape}|${a.avatar_color}`);
+      const d = pickDefaultAvatar("new-bot", used);
+      setBotShape(d.shape);
+      setBotColor(d.color);
+    }
     setBusy(false);
     setError("");
     const place = () => {
@@ -77,7 +95,7 @@ export function NewChatPopover({
       window.clearTimeout(t);
       window.removeEventListener("resize", place);
     };
-  }, [open, anchorRef]);
+  }, [open, anchorRef, agents]);
 
   useEffect(() => {
     if (!open) return;
@@ -145,6 +163,8 @@ export function NewChatPopover({
         name,
         description: botDesc.trim(),
         system_prompt: botPrompt.trim(),
+        avatar_shape: botShape,
+        avatar_color: botColor,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -186,7 +206,14 @@ export function NewChatPopover({
                 onClick={() => {
                   setMode("bot");
                   setError("");
-                  setBotName(query.trim());
+                  const n = query.trim();
+                  setBotName(n);
+                  const used = agents
+                    .filter((a) => a.avatar_shape && a.avatar_color)
+                    .map((a) => `${a.avatar_shape}|${a.avatar_color}`);
+                  const d = pickDefaultAvatar(n || `new-bot-${Date.now()}`, used);
+                  setBotShape(d.shape);
+                  setBotColor(d.color);
                 }}
               >
                 <span className="new-chat-action-icon" aria-hidden>
@@ -276,6 +303,52 @@ export function NewChatPopover({
                 placeholder="你是……"
               />
             </label>
+            <div className="new-chat-avatar-block">
+              <div className="bot-avatar-preview">
+                <AgentAvatar
+                  id={botName || "new-bot"}
+                  name={botName || "Bot"}
+                  size={48}
+                  shape={botShape}
+                  color={botColor}
+                />
+                <div className="muted small">形象预览（可改；不改则用自动分配）</div>
+              </div>
+              <div className="bot-avatar-label">形状</div>
+              <div className="bot-avatar-shape-grid new-chat-shape-grid">
+                {AVATAR_SHAPES.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className={`bot-avatar-shape-opt${botShape === s ? " active" : ""}`}
+                    onClick={() => setBotShape(s)}
+                    title={s}
+                  >
+                    <AgentAvatar
+                      id={botName || "new-bot"}
+                      name={botName || "Bot"}
+                      size={28}
+                      shape={s}
+                      color={botColor}
+                    />
+                  </button>
+                ))}
+              </div>
+              <div className="bot-avatar-label">主色</div>
+              <div className="bot-avatar-color-grid">
+                {AVATAR_COLOR_PALETTE.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`bot-avatar-color-opt${botColor.toLowerCase() === c.toLowerCase() ? " active" : ""}`}
+                    style={{ background: c }}
+                    onClick={() => setBotColor(c)}
+                    title={c}
+                    aria-label={c}
+                  />
+                ))}
+              </div>
+            </div>
             {error ? <div className="new-chat-error">{error}</div> : null}
             <button
               type="button"

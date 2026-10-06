@@ -114,13 +114,16 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
 	}
+	s.publishBotPresence(userID, conv.ID, agentID, "working")
 	resp, err := client.Do(req)
 	if err != nil {
+		s.publishBotPresence(userID, conv.ID, agentID, "error")
 		return nil, fmt.Errorf("runtime unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
+		s.publishBotPresence(userID, conv.ID, agentID, "error")
 		return nil, fmt.Errorf("runtime error: %s", strings.TrimSpace(string(b)))
 	}
 
@@ -158,6 +161,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 						})
 					case "error":
 						if msg, ok := payload["message"].(string); ok && msg != "" {
+							s.publishBotPresence(userID, conv.ID, agentID, "error")
 							return nil, errors.New(msg)
 						}
 					}
@@ -168,6 +172,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		}
 		if err != nil {
 			if err != io.EOF {
+				s.finishBotPresence(userID, conv.ID, agentID, err)
 				return nil, err
 			}
 			break
@@ -184,6 +189,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	}
 	source := sourceHint(title)
 	_ = s.db.RecordUsageRun("", userID, agentID, conv.ID, source, 0, 0, 0)
+	s.publishBotPresence(userID, conv.ID, agentID, "idle")
 	return &runOnceResult{
 		ConversationID: conv.ID,
 		Reply:          reply,

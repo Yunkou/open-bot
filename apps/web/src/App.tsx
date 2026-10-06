@@ -49,6 +49,9 @@ import {
   persistConversationMessage,
   toggleReaction,
   type ReactionUpdatedEvent,
+  type BotPresenceEvent,
+  type BotPresenceStatus,
+  updateAgent,
   subscribeConversationEvents,
   cancelConversationRun,
   chatEventsWebSocketUrl,
@@ -131,7 +134,8 @@ import {
 } from "./components/SettingsLayout";
 import { AgentAvatar } from "./components/AgentAvatar";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
-import { avatarColor } from "./components/avatarColor";
+import { resolveAvatarColor } from "./components/avatarColor";
+import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
@@ -431,6 +435,9 @@ export default function App() {
   const [agentBusy, setAgentBusy] = useState(false);
   const [channelBusy, setChannelBusy] = useState(false);
 
+  const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
+  // bot_presence per agent (idle|working|awaiting_approval|error), pushed by server.
+  const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
   const [skills, setSkills] = useState<Skill[]>([]);
   const [skillsMsg, setSkillsMsg] = useState("");
   const [skillsBusy, setSkillsBusy] = useState(false);
@@ -656,6 +663,28 @@ export default function App() {
     return list;
   }, []);
 
+  const saveAvatarSettings = useCallback(
+    async (id: string, patch: { avatar_shape: string; avatar_color: string }) => {
+      const updated = await updateAgent(id, patch);
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.id === id
+            ? {
+                ...a,
+                avatar_shape: updated.avatar_shape || patch.avatar_shape,
+                avatar_color: updated.avatar_color || patch.avatar_color,
+              }
+            : a,
+        ),
+      );
+    },
+    [],
+  );
+
+  const openAvatarSettings = useCallback((a: Agent) => {
+    setAvatarSettingsAgent(a);
+  }, []);
+
   const refreshSkills = useCallback(async () => {
     const list = await listSkills();
     setSkills(list);
@@ -795,6 +824,14 @@ export default function App() {
         if (data.type === "host_activity") {
           const row = data as { active?: boolean; label?: string };
           setHostActivity(row.active && row.label ? row.label : "");
+        }
+        if (data.type === "bot_presence") {
+          const evt = data as unknown as BotPresenceEvent;
+          if (evt.agent_id) {
+            const st = (evt.status || "idle") as BotPresenceStatus;
+            setPresenceByAgent((prev) => ({ ...prev, [evt.agent_id]: st }));
+          }
+          return;
         }
         if (data.type === "reaction_updated") {
           const evt = data as ReactionUpdatedEvent;
@@ -2545,6 +2582,8 @@ export default function App() {
       name: input.name,
       description: input.description,
       system_prompt: input.system_prompt,
+      avatar_shape: input.avatar_shape,
+      avatar_color: input.avatar_color,
     });
     await refreshAgents();
     setShowNewChat(false);
@@ -3097,7 +3136,15 @@ export default function App() {
                     }
                   }}
                 >
-                  <AgentAvatar id={a.id} name={a.name} size={32} />
+                  <AgentAvatar
+                    id={a.id}
+                    name={a.name}
+                    size={32}
+                    shape={a.avatar_shape}
+                    color={a.avatar_color}
+                    status={presenceByAgent[a.id] || "idle"}
+                    onClick={() => openAvatarSettings(a)}
+                  />
                   <div className="agent-item-body">
                     <div className="agent-name">
                       {a.name}
@@ -3227,6 +3274,10 @@ export default function App() {
                   id={activeAgent?.id}
                   name={activeAgent?.name ?? "助手"}
                   size={28}
+                  shape={activeAgent?.avatar_shape}
+                  color={activeAgent?.avatar_color}
+                  status={(activeAgent && presenceByAgent[activeAgent.id]) || "idle"}
+                  onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
                 <span className="agent-pill-name">{activeAgent?.name ?? "助手"}</span>
               </>
@@ -3314,7 +3365,7 @@ export default function App() {
             !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
               <RunStatus
                 label={taskBusy && !sending ? runLabel || "正在做，做好会发在这里" : runLabel || "正在思考…"}
-                color={avatarColor(activeAgent?.id || activeAgent?.name || "open-bot")}
+                color={resolveAvatarColor(activeAgent?.id || activeAgent?.name || "open-bot", activeAgent?.avatar_color)}
               />
             ) : null
           ) : null}
@@ -4877,6 +4928,12 @@ export default function App() {
         request={secretPrompt}
         onClose={() => setSecretPrompt(null)}
         onResolved={() => void refreshSecrets()}
+      />
+      <BotAvatarSettings
+        open={Boolean(avatarSettingsAgent)}
+        agent={avatarSettingsAgent}
+        onClose={() => setAvatarSettingsAgent(null)}
+        onSave={saveAvatarSettings}
       />
     </div>
   );
