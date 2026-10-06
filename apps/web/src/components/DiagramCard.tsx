@@ -1,9 +1,8 @@
 /**
- * DiagramCard — in-bubble diagram card (design: bot-diagram-card-design-v1).
+ * DiagramCard — in-bubble diagram card (design: bot-diagram-card-design-v1 / v2).
  *
- * This pack implements the Mermaid card only. `DiagramCardFrame` is the shared shell
- * (12px card + 32px toolbar + type pill + body) so HTML / 图片 cards can plug in later with
- * `kind="html" | "image"`; those kinds are intentionally NOT implemented here.
+ * Shared shell (`DiagramCardFrame`) + Mermaid card. HTML → `HtmlDiagramCard`; image kind is
+ * reserved (stub) until authenticated attachment GET exists — see NOTES.
  *
  * States: pending (stream, fence unclosed) → rendering → ok | error. The renderer is only
  * called once the fence is closed (or the stream ended); see lib/mermaidFence.ts.
@@ -23,14 +22,11 @@ import { diagramFilename } from "../lib/mermaidFence";
 import { peekDiagram, renderDiagram, type DiagramRenderResult, type DiagramTheme } from "../lib/mermaidRender";
 import { copyText, downloadPng, downloadSvg } from "../lib/diagramExport";
 import { useAppTheme } from "./useAppTheme";
+import { HtmlDiagramCard, ImageDiagramCardStub } from "./HtmlDiagramCard";
+import { DiagramCardFrame, type DiagramKind } from "./DiagramCardFrame";
 
-export type DiagramKind = "mermaid" | "html" | "image";
-
-const KIND_LABEL: Record<DiagramKind, string> = {
-  mermaid: "Mermaid",
-  html: "HTML", // reserved (step 2)
-  image: "图片", // reserved (step 2)
-};
+export type { DiagramKind } from "./DiagramCardFrame";
+export { DiagramCardFrame } from "./DiagramCardFrame";
 
 const INLINE_ZOOM = { min: 0.5, max: 2 };
 const FULLSCREEN_ZOOM = { min: 0.25, max: 4 };
@@ -284,32 +280,6 @@ function DownloadMenu({
   );
 }
 
-/** Shared card shell: pill + actions toolbar + body. HTML / 图片 kinds reuse this in step 2. */
-export function DiagramCardFrame({
-  kind,
-  pending,
-  extra,
-  actions,
-  children,
-}: {
-  kind: DiagramKind;
-  pending?: boolean;
-  extra?: ReactNode;
-  actions: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <div className={`diagram-card${pending ? " is-pending" : ""}`} data-kind={kind}>
-      <div className="diagram-toolbar">
-        <span className="diagram-pill">{KIND_LABEL[kind]}</span>
-        {extra}
-        <div className="diagram-actions">{actions}</div>
-      </div>
-      {children}
-    </div>
-  );
-}
-
 /* ---------------- fullscreen ---------------- */
 
 function DiagramFullscreen({
@@ -492,11 +462,27 @@ export function DiagramCard({
   pending = false,
   kind = "mermaid",
 }: {
-  /** Mermaid text inside the fence (fences themselves excluded). */
+  /** Fence body (mermaid / html source). Image kind ignores source until attachment GET exists. */
   source: string;
-  /** Streaming and the fence is not closed yet → source preview only, renderer not loaded. */
+  /** Streaming and the fence is not closed yet → source preview only, renderer / iframe not loaded. */
   pending?: boolean;
   kind?: DiagramKind;
+}) {
+  if (kind === "html") {
+    return <HtmlDiagramCard source={source} pending={pending} />;
+  }
+  if (kind === "image") {
+    return <ImageDiagramCardStub />;
+  }
+  return <MermaidDiagramCard source={source} pending={pending} />;
+}
+
+function MermaidDiagramCard({
+  source,
+  pending = false,
+}: {
+  source: string;
+  pending?: boolean;
 }) {
   const theme: DiagramTheme = useAppTheme();
   const reducedMotion = usePrefersReducedMotion();
@@ -660,7 +646,7 @@ export function DiagramCard({
 
   return (
     <>
-      <DiagramCardFrame kind={kind} pending={loading} extra={zoomBadge} actions={actions}>
+      <DiagramCardFrame kind="mermaid" pending={loading} extra={zoomBadge} actions={actions}>
         {body}
       </DiagramCardFrame>
       {fullscreen && ok ? (

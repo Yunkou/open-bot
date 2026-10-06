@@ -10,7 +10,12 @@ import {
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { downloadSandboxFile, downloadTextFile, readSandboxFile } from "../api";
-import { isMermaidLang, isMermaidPending, type SourcePosition } from "../lib/mermaidFence";
+import {
+  isFencePending,
+  isHtmlDiagramLang,
+  isMermaidLang,
+  type SourcePosition,
+} from "../lib/mermaidFence";
 import { DiagramCard } from "./DiagramCard";
 import {
   HtmlPreviewModal,
@@ -45,7 +50,7 @@ function urlTransform(url: string): string {
   return defaultUrlTransform(url);
 }
 
-const PREVIEWABLE_LANGS = new Set(["html", "htm", "svg", "xhtml"]);
+const PREVIEWABLE_LANGS = new Set(["htm", "svg", "xhtml"]); // `html` / `html-diagram` → DiagramCard
 
 type PreviewState = {
   open: boolean;
@@ -119,11 +124,19 @@ const MdRenderContext = createContext<{ markdown: string; streaming: boolean }>(
   streaming: false,
 });
 
-/** ```mermaid fence → DiagramCard. Pending (no renderer) until the fence closes or the stream ends. */
-function MermaidBlock({ code, position }: { code: string; position: SourcePosition }) {
+/** ```mermaid / ```html fence → DiagramCard. Pending until the fence closes or the stream ends. */
+function DiagramFenceBlock({
+  kind,
+  code,
+  position,
+}: {
+  kind: "mermaid" | "html";
+  code: string;
+  position: SourcePosition;
+}) {
   const { markdown, streaming } = useContext(MdRenderContext);
-  const pending = isMermaidPending(markdown, position, streaming);
-  return <DiagramCard kind="mermaid" source={code} pending={pending} />;
+  const pending = isFencePending(markdown, position, streaming);
+  return <DiagramCard kind={kind} source={code} pending={pending} />;
 }
 
 export function MarkdownMessage({ content, streaming, agentId }: Props) {
@@ -254,7 +267,22 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
         }
         const lang = /language-([\w-]+)/.exec(className || "")?.[1];
         if (isMermaidLang(lang)) {
-          return <MermaidBlock code={raw.replace(/\n$/, "")} position={node?.position} />;
+          return (
+            <DiagramFenceBlock
+              kind="mermaid"
+              code={raw.replace(/\n$/, "")}
+              position={node?.position}
+            />
+          );
+        }
+        if (isHtmlDiagramLang(lang)) {
+          return (
+            <DiagramFenceBlock
+              kind="html"
+              code={raw.replace(/\n$/, "")}
+              position={node?.position}
+            />
+          );
         }
         return (
           <CodeBlock className={className} onPreview={openHtmlPreview}>

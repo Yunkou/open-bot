@@ -91,3 +91,9 @@ export async function copyText(text: string): Promise<void> {
   ta.remove();
   if (!ok) throw new Error("copy failed");
 }
+
+/** Download raw HTML source as `.html` (UTF-8). */
+export function downloadHtml(source: string, base: string) {
+  const name = /\.html?$/i.test(base) ? base : `${base}.html`;
+  saveBlob(new Blob([source], { type: "text/html;charset=utf-8" }), name);
+}

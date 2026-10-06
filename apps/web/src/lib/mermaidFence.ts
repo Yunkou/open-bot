@@ -1,7 +1,7 @@
 /**
- * Pure helpers for Mermaid fences inside chat markdown (no DOM, no mermaid import).
+ * Pure helpers for diagram fences inside chat markdown (no DOM, no mermaid import).
  *
- * Streaming rule (design v1 §3): an unfinished ```mermaid fence must NOT mount the renderer.
+ * Streaming rule (design v1/v2): an unfinished fence must NOT mount the renderer / iframe.
  * CommonMark lets an unclosed fence run to the end of its container, so react-markdown happily
  * renders it as a code block. We decide "closed" from the fence's own source slice
  * (`node.position` offsets): it is closed iff its last line is a closing fence of the same char
@@ -9,9 +9,15 @@
  */
 
 export const MERMAID_LANGS = new Set(["mermaid", "mmd"]);
+/** Acceptance language is `html`; `html-diagram` is an optional alias (design v2 §1.1). */
+export const HTML_DIAGRAM_LANGS = new Set(["html", "html-diagram"]);
 
 export function isMermaidLang(lang: string | null | undefined): boolean {
   return Boolean(lang) && MERMAID_LANGS.has(String(lang).toLowerCase());
+}
+
+export function isHtmlDiagramLang(lang: string | null | undefined): boolean {
+  return Boolean(lang) && HTML_DIAGRAM_LANGS.has(String(lang).toLowerCase());
 }
 
 /** Strip container prefixes (blockquote `>` markers and indentation) from a fence line. */
@@ -38,12 +44,12 @@ export type SourcePosition = {
 } | null | undefined;
 
 /**
- * Should this mermaid block stay in "pending" (source preview, no renderer)?
+ * Should this diagram fence stay in "pending" (source preview, no renderer / iframe)?
  * - stream ended → never pending (render once, even if the model never closed the fence)
  * - streaming + known position → pending until the closing fence arrives
  * - streaming + no position info → pending (safe default: render after stream ends)
  */
-export function isMermaidPending(
+export function isFencePending(
   markdown: string,
   position: SourcePosition,
   streaming: boolean | undefined,
@@ -55,11 +61,14 @@ export function isMermaidPending(
   return !isFenceClosed(markdown.slice(s, e));
 }
 
+/** @deprecated alias — use isFencePending */
+export const isMermaidPending = isFencePending;
+
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** `diagram-YYYYMMDD-HHmmss` in local time (design v1 §2). */
+/** `diagram-YYYYMMDD-HHmmss` in local time (design v1 §2 / v2). */
 export function diagramFilename(date = new Date()): string {
   return (
     `diagram-${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}` +

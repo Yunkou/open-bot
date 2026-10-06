@@ -4410,6 +4410,35 @@ button.ghost {
   }
 }
 
+
+
+/* HTML diagram preview (sandbox="" iframe) */
+.diagram-body-html {
+  height: var(--diagram-max-h);
+  max-height: var(--diagram-max-h);
+  overflow: hidden;
+  padding: 0;
+}
+.diagram-html-iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color-scheme: inherit;
+}
+.diagram-fs-body.is-html {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+.diagram-html-iframe-fs {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .diagram-canvas.is-enter,
   .diagram-pending-dot {
