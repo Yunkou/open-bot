@@ -194,6 +194,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/conversations/{id}/events", s.requireAuth(s.handleConversationEvents))
 	mux.HandleFunc("GET /v1/conversations/{id}/run", s.requireAuth(s.handleConversationRunStatus))
 	mux.HandleFunc("POST /v1/conversations/{id}/attachments", s.requireAuth(s.handleUploadAttachment))
+	mux.HandleFunc("GET /v1/conversations/{id}/attachments/{attachmentId}", s.requireAuth(s.handleGetAttachment))
 	mux.HandleFunc("PUT /v1/messages/{id}/reactions", s.requireAuth(s.handleToggleReaction))
 	mux.HandleFunc("DELETE /v1/messages/{id}/reactions", s.requireAuth(s.handleDeleteReaction))
 	// Message feedback → pending lessons (only confirmed/active lessons reach the runtime).
@@ -1305,6 +1306,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if len(body.Attachments) > 0 {
+		if eerr := s.ensureAttachmentRows(uid, conv.ID, body.Attachments); eerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": eerr.Error()})
+			return
+		}
+	}
 	userMsg, err := s.db.AddMessageWithOpts(conv.ID, "user", storedContent, db.AddMessageOpts{
 		ReplyToID:    replyToID,
 		ThreadRootID: threadRootID,
@@ -1312,6 +1319,20 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if len(body.Attachments) > 0 {
+		ids := make([]string, 0, len(body.Attachments))
+		for _, a := range body.Attachments {
+			if id := strings.TrimSpace(a.ID); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		linked, lerr := s.db.LinkAttachmentsToMessage(uid, conv.ID, userMsg.ID, ids)
+		if lerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": lerr.Error()})
+			return
+		}
+		userMsg.Attachments = linked
 	}
 	if body.PersistOnly {
 		writeJSON(w, http.StatusOK, map[string]any{"message": userMsg, "persist_only": true})

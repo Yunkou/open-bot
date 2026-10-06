@@ -25,18 +25,19 @@ type Conversation struct {
 }
 
 type Message struct {
-	ID             string            `json:"id"`
-	ConversationID string            `json:"conversation_id,omitempty"`
-	Role           string            `json:"role"`
-	Content        string            `json:"content"`
-	AgentID        string            `json:"agent_id,omitempty"`
-	ReplyToID      string            `json:"reply_to_id,omitempty"`
-	ThreadRootID   string            `json:"thread_root_id,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	Reactions      []ReactionSummary `json:"reactions"`
-	AgentMessageID string            `json:"agent_message_id,omitempty"`
-	RequestID      string            `json:"request_id,omitempty"`
-	Handoff        *HandoffPayload   `json:"handoff,omitempty"`
+	ID             string               `json:"id"`
+	ConversationID string               `json:"conversation_id,omitempty"`
+	Role           string               `json:"role"`
+	Content        string               `json:"content"`
+	AgentID        string               `json:"agent_id,omitempty"`
+	ReplyToID      string               `json:"reply_to_id,omitempty"`
+	ThreadRootID   string               `json:"thread_root_id,omitempty"`
+	CreatedAt      time.Time            `json:"created_at"`
+	Reactions      []ReactionSummary    `json:"reactions"`
+	Attachments    []MessageAttachment  `json:"attachments,omitempty"`
+	AgentMessageID string               `json:"agent_message_id,omitempty"`
+	RequestID      string               `json:"request_id,omitempty"`
+	Handoff        *HandoffPayload      `json:"handoff,omitempty"`
 }
 
 // HandoffPayload is the visible Bot↔Bot projection card (not sent to the model).
@@ -323,6 +324,19 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 			out[i].Reactions = rs
 		} else {
 			out[i].Reactions = []ReactionSummary{}
+		}
+	}
+	msgIDs := make([]string, len(out))
+	for i := range out {
+		msgIDs[i] = out[i].ID
+	}
+	atts, aerr := d.ListAttachmentsByMessageIDs(userID, conversationID, msgIDs)
+	if aerr != nil {
+		return nil, aerr
+	}
+	for i := range out {
+		if list, ok := atts[out[i].ID]; ok {
+			out[i].Attachments = list
 		}
 	}
 	return out, nil
