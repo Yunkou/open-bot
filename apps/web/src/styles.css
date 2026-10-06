@@ -570,6 +570,23 @@ button {
   box-shadow: 0 0 0 2px var(--accent, #6ea8fe);
 }
 
+.bot-machine-select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated, #fff);
+  color: inherit;
+  font: inherit;
+}
+.bot-machine-select:focus {
+  outline: none;
+  border-color: var(--accent, #457b9d);
+}
+.new-chat-field .bot-machine-select {
+  margin-top: 4px;
+}
+
 .sidebar-foot {
   padding: 8px 4px 2px;
   flex-shrink: 0;

@@ -28,7 +28,9 @@ export type Agent = {
   avatar_shape?: string;
   /** Whitelisted 12-color palette (#rrggbb). */
   avatar_color?: string;
-  /** Host/runtime connected + heartbeat within BOT_ONLINE_THRESHOLD_SEC (server-computed). */
+  /** Bound host machine (user_machines.id). Empty/unset = unbound → online stays false. */
+  machine_id?: string;
+  /** Bound machine exec channel Connected + last_seen within BOT_ONLINE_THRESHOLD_SEC (server-computed). */
   online?: boolean;
   created_at?: string;
   updated_at?: string;
@@ -47,6 +49,8 @@ export type AgentInput = {
   computer_mode?: "team" | "private" | string;
   avatar_shape?: string;
   avatar_color?: string;
+  /** Bind to a registered host machine; "" clears on PATCH. */
+  machine_id?: string;
 };
 
 /** PATCH /v1/agents/{id}: omitted / empty fields keep current values. */

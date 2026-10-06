@@ -697,8 +697,13 @@ export default function App() {
   }, [seedOnlineFromAgents]);
 
   const saveAvatarSettings = useCallback(
-    async (id: string, patch: { avatar_shape: string; avatar_color: string }) => {
+    async (
+      id: string,
+      patch: { avatar_shape: string; avatar_color: string; machine_id?: string },
+    ) => {
       const updated = await updateAgent(id, patch);
+      const nextMachineId =
+        typeof updated.machine_id === "string" ? updated.machine_id : patch.machine_id;
       setAgents((prev) =>
         prev.map((a) =>
           a.id === id
@@ -706,12 +711,16 @@ export default function App() {
                 ...a,
                 avatar_shape: updated.avatar_shape || patch.avatar_shape,
                 avatar_color: updated.avatar_color || patch.avatar_color,
+                ...(nextMachineId !== undefined ? { machine_id: nextMachineId } : {}),
+                ...(typeof updated.online === "boolean" ? { online: updated.online } : {}),
               }
             : a,
         ),
       );
+      // Re-binding changes the bot's channel: take the server's fresh online bit.
+      if (typeof updated.online === "boolean") applyBotOnline(id, updated.online);
     },
-    [],
+    [applyBotOnline],
   );
 
   const openAvatarSettings = useCallback((a: Agent) => {
@@ -2731,6 +2740,7 @@ export default function App() {
       system_prompt: input.system_prompt,
       avatar_shape: input.avatar_shape,
       avatar_color: input.avatar_color,
+      ...(input.machine_id ? { machine_id: input.machine_id } : {}),
     });
     await refreshAgents();
     setShowNewChat(false);

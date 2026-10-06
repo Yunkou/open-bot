@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
-import type { Agent } from "../api";
+import type { Agent, Machine } from "../api";
+import { listMachines } from "../api";
 import { AgentAvatar } from "./AgentAvatar";
 import {
   AVATAR_COLOR_PALETTE,
@@ -14,6 +15,7 @@ export type CreateBotInput = {
   system_prompt: string;
   avatar_shape: string;
   avatar_color: string;
+  machine_id?: string;
 };
 
 export type NewChatPopoverProps = {
@@ -48,6 +50,8 @@ export function NewChatPopover({
   const [botPrompt, setBotPrompt] = useState("");
   const [botShape, setBotShape] = useState<AvatarShape>("cloud");
   const [botColor, setBotColor] = useState("#457b9d");
+  const [botMachineId, setBotMachineId] = useState("");
+  const [machines, setMachines] = useState<Machine[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [pos, setPos] = useState<{ top: number; left: number }>({ top: 24, left: 300 });
@@ -70,6 +74,7 @@ export function NewChatPopover({
     setBotName("");
     setBotDesc("");
     setBotPrompt("");
+    setBotMachineId("");
     {
       const used = agents
         .filter((a) => a.avatar_shape && a.avatar_color)
@@ -80,6 +85,14 @@ export function NewChatPopover({
     }
     setBusy(false);
     setError("");
+    let cancelled = false;
+    void listMachines()
+      .then((list) => {
+        if (!cancelled) setMachines(list);
+      })
+      .catch(() => {
+        if (!cancelled) setMachines([]);
+      });
     const place = () => {
       const el = anchorRef.current;
       if (!el) return;
@@ -92,6 +105,7 @@ export function NewChatPopover({
     const t = window.setTimeout(() => searchRef.current?.focus(), 30);
     window.addEventListener("resize", place);
     return () => {
+      cancelled = true;
       window.clearTimeout(t);
       window.removeEventListener("resize", place);
     };
@@ -165,6 +179,7 @@ export function NewChatPopover({
         system_prompt: botPrompt.trim(),
         avatar_shape: botShape,
         avatar_color: botColor,
+        machine_id: botMachineId || undefined,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -348,6 +363,31 @@ export function NewChatPopover({
                   />
                 ))}
               </div>
+              <label className="new-chat-field">
+                运行主机（可选）
+                <select
+                  className="bot-machine-select"
+                  value={botMachineId}
+                  onChange={(e) => setBotMachineId(e.target.value)}
+                  disabled={busy}
+                >
+                  <option value="">未绑定</option>
+                  {machines.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {(m.label || m.id) +
+                        " · " +
+                        (m.connected === true
+                          ? "已连接"
+                          : typeof m.status === "string" && m.status.trim()
+                            ? m.status
+                            : "未连接")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {machines.length === 0 ? (
+                <div className="muted small">暂无已注册电脑，请先在客户端连接主机</div>
+              ) : null}
             </div>
             {error ? <div className="new-chat-error">{error}</div> : null}
             <button

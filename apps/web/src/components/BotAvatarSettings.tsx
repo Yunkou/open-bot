@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
-import type { Agent } from "../api";
+import type { Agent, Machine } from "../api";
+import { listMachines } from "../api";
 import {
   AVATAR_COLOR_PALETTE,
   AVATAR_SHAPES,
@@ -14,7 +15,10 @@ type Props = {
   agent: Agent | null;
   open: boolean;
   onClose: () => void;
-  onSave: (agentId: string, patch: { avatar_shape: string; avatar_color: string }) => Promise<void>;
+  onSave: (
+    agentId: string,
+    patch: { avatar_shape: string; avatar_color: string; machine_id?: string },
+  ) => Promise<void>;
 };
 
 const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
@@ -24,9 +28,18 @@ const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
   { id: "error", label: "error" },
 ];
 
+function machineHint(m: Machine): string {
+  if (m.connected === true) return "已连接";
+  if (typeof m.status === "string" && m.status.trim()) return m.status;
+  return "未连接";
+}
+
 export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   const [shape, setShape] = useState<AvatarShape>("cloud");
   const [color, setColor] = useState("#457b9d");
+  const [machineId, setMachineId] = useState("");
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [machinesLoaded, setMachinesLoaded] = useState(false);
   const [previewStatus, setPreviewStatus] = useState<BotPresenceStatus>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -36,8 +49,29 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     const seed = agent.id || agent.name;
     setShape(resolveAvatarShape(seed, agent.avatar_shape));
     setColor(resolveAvatarColor(seed, agent.avatar_color));
+    setMachineId(agent.machine_id || "");
     setPreviewStatus("idle");
     setErr("");
+    setMachinesLoaded(false);
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await listMachines();
+        if (!cancelled) {
+          setMachines(list);
+          setMachinesLoaded(true);
+        }
+      } catch (ex) {
+        if (!cancelled) {
+          setMachines([]);
+          setMachinesLoaded(true);
+          setErr(ex instanceof Error ? ex.message : String(ex));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [agent, open]);
 
   if (!open || !agent) return null;
@@ -47,7 +81,11 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     setBusy(true);
     setErr("");
     try {
-      await onSave(agent.id, { avatar_shape: shape, avatar_color: color });
+      await onSave(agent.id, {
+        avatar_shape: shape,
+        avatar_color: color,
+        machine_id: machineId,
+      });
       onClose();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex));
@@ -120,6 +158,29 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
               />
             ))}
           </div>
+
+          <label className="bot-avatar-label" htmlFor="bot-machine-select">
+            运行主机
+          </label>
+          <select
+            id="bot-machine-select"
+            className="bot-machine-select"
+            value={machineId}
+            onChange={(e) => setMachineId(e.target.value)}
+            disabled={busy}
+          >
+            <option value="">未绑定</option>
+            {machines.map((m) => (
+              <option key={m.id} value={m.id}>
+                {(m.label || m.id) + " · " + machineHint(m)}
+              </option>
+            ))}
+          </select>
+          {machinesLoaded && machines.length === 0 ? (
+            <div className="muted small">暂无已注册电脑，请先在客户端连接主机</div>
+          ) : (
+            <div className="muted small">绑定后，主机在线且心跳≤90s 时绿点才会亮（由后端 online 决定）</div>
+          )}
 
           {err ? <div className="auth-error">{err}</div> : null}
           <div className="llm-actions">
