@@ -169,3 +169,46 @@ func (s *Server) handleAdminDeleteBot(w http.ResponseWriter, r *http.Request) {
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// POST /v1/admin/bots/{id}/clone — org admin copies a bot within the org; the copy keeps the
+// same owner (never moves across users/orgs). Same copy rules as the user「复制助手」.
+func (s *Server) handleAdminCloneBot(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	existing, err := s.db.GetAgentInOrg(id, admin.OrgID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "Bot 不存在"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var body cloneAgentBody
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+			return
+		}
+	}
+	body.FollowUp = "" // admins don't start work in a member's chat
+	out, code, err := s.cloneAgentFor(existing.UserID, id, body)
+	if err != nil {
+		writeJSON(w, code, map[string]string{"error": err.Error()})
+		return
+	}
+	if a, ok := out["agent"].(*db.Agent); ok && a != nil {
+		s.writeAudit(admin.OrgID, admin.ID, "bot.clone", "agent", a.ID, map[string]any{
+			"name":            a.Name,
+			"user_id":         a.UserID,
+			"source_agent_id": id,
+			"copy_memory":     body.CopyMemory,
+			"copy_routines":   body.CopyRoutines,
+		})
+		out["bot"] = agentAdminPublic(a, existing.OwnerUsername)
+	}
+	writeJSON(w, code, out)
+}

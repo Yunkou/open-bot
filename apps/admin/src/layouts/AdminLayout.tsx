@@ -7,6 +7,7 @@ import {
   LogoutOutlined,
   SettingOutlined,
   TeamOutlined,
+  ThunderboltOutlined,
   UserOutlined,
 } from "@ant-design/icons";
 import { ProLayout } from "@ant-design/pro-components";
@@ -33,9 +34,13 @@ const menuRoutes = {
       icon: <DeploymentUnitOutlined />,
       routes: [
         { path: "/bots", name: "Bot 管理" },
-        { path: "/skills", name: "Skills" },
         { path: "/memory", name: "记忆与压缩" },
       ],
+    },
+    {
+      path: "/skills",
+      name: "技能",
+      icon: <ThunderboltOutlined />,
     },
     {
       path: "/group/models",
@@ -72,6 +77,9 @@ export default function AdminLayout() {
     return user?.role || "";
   }, [user?.role]);
 
+  // Highlight「技能」for both /skills and /skills/:name
+  const pathname = location.pathname.startsWith("/skills") ? "/skills" : location.pathname;
+
   return (
     <div style={{ height: "100vh" }}>
       <ProLayout
@@ -80,7 +88,7 @@ export default function AdminLayout() {
         layout="mix"
         fixSiderbar
         fixedHeader
-        location={{ pathname: location.pathname }}
+        location={{ pathname }}
         route={menuRoutes}
         menuItemRender={(item, dom) => {
           const children = item.children || item.routes;

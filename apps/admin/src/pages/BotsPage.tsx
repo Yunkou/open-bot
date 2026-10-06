@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Popconfirm, Typography, message } from "antd";
+import { Link } from "react-router-dom";
+import { Button, Checkbox, Popconfirm, Space, Spin, Typography, message } from "antd";
 import {
   ModalForm,
   PageContainer,
@@ -11,21 +12,86 @@ import {
   type ProColumns,
 } from "@ant-design/pro-components";
 import {
+  adminCloneBot,
   adminCreateBot,
   adminDeleteBot,
+  adminListBotSkills,
   adminListBots,
   adminListUsers,
   adminPatchBot,
+  adminSetBotSkill,
   type AdminBot,
+  type AdminBotSkill,
   type AdminUser,
 } from "../api";
 
-const { Paragraph } = Typography;
+const { Paragraph, Text } = Typography;
 
 const MODE_OPTIONS = [
   { label: "团队模式", value: "team" },
   { label: "私人模式", value: "private" },
 ];
+
+
+function BotSkillsEditor({ botId }: { botId: string }) {
+  const [skills, setSkills] = useState<AdminBotSkill[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await adminListBotSkills(botId);
+      setSkills(data.skills || []);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, [botId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading) return <Spin size="small" tip="加载技能…" />;
+
+  const visible = skills.filter((s) => s.account_enabled !== false);
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <Text strong>启用的技能</Text>
+      <Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 12 }}>
+        仅勾选本 Bot 可用技能；正文请到「技能」页编辑。名称可点进编辑页。
+      </Paragraph>
+      {visible.length === 0 ? (
+        <Text type="secondary">暂无可用技能</Text>
+      ) : (
+        <Space direction="vertical" style={{ width: "100%" }} size={4}>
+          {visible.map((s) => (
+            <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Checkbox
+                checked={s.enabled}
+                onChange={async (e) => {
+                  const checked = e.target.checked;
+                  try {
+                    const updated = await adminSetBotSkill(botId, s.name, checked);
+                    setSkills((prev) => prev.map((x) => (x.name === s.name ? { ...x, ...updated } : x)));
+                  } catch (err) {
+                    message.error(err instanceof Error ? err.message : String(err));
+                  }
+                }}
+              />
+              <Link to={`/skills/${encodeURIComponent(s.name)}`}>{s.name}</Link>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {s.custom ? "自建" : "内置"}
+              </Text>
+            </div>
+          ))}
+        </Space>
+      )}
+    </div>
+  );
+}
 
 export default function BotsPage() {
   const actionRef = useRef<ActionType>(null);
@@ -84,7 +150,7 @@ export default function BotsPage() {
     {
       title: "操作",
       valueType: "option",
-      width: 140,
+      width: 180,
       render: (_, row) => [
         <a
           key="edit"
@@ -95,6 +161,23 @@ export default function BotsPage() {
         >
           编辑
         </a>,
+        <Popconfirm
+          key="clone"
+          title="复制该 Bot？"
+          description="复制人设、岗位描述、电脑模式与 Skills 开关，归属同一成员；聊天记录、记忆、例行任务、密钥不复制。"
+          okText="复制"
+          onConfirm={async () => {
+            try {
+              const res = await adminCloneBot(row.id);
+              message.success(`已复制为「${res.bot?.name ?? "副本"}」`);
+              reload();
+            } catch (err) {
+              message.error(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        >
+          <a>复制</a>
+        </Popconfirm>,
         row.is_builtin ? (
           <span key="del" style={{ color: "#999" }}>
             删除
@@ -125,7 +208,7 @@ export default function BotsPage() {
   return (
     <PageContainer title="Bot 管理">
       <Paragraph type="secondary">
-        管理本组织成员名下的助手（Bot）：创建、编辑系统提示与电脑模式、删除。
+        管理本组织成员名下的助手（Bot）：创建、编辑系统提示与电脑模式、复制、删除。技能正文在「技能」页维护；此处仅勾选启用。
       </Paragraph>
       <ProTable<AdminBot>
         headerTitle="Bot 列表"
@@ -197,7 +280,7 @@ export default function BotsPage() {
           setEditOpen(open);
           if (!open) setEditing(null);
         }}
-        modalProps={{ destroyOnClose: true }}
+        modalProps={{ destroyOnClose: true, width: 640 }}
         initialValues={{
           name: editing?.name,
           description: editing?.description || "",
@@ -226,6 +309,7 @@ export default function BotsPage() {
         <ProFormTextArea name="description" label="描述" fieldProps={{ rows: 2 }} />
         <ProFormTextArea name="system_prompt" label="系统提示" fieldProps={{ rows: 4 }} />
         <ProFormSelect name="computer_mode" label="电脑模式" options={MODE_OPTIONS} />
+        {editing ? <BotSkillsEditor botId={editing.id} /> : null}
       </ModalForm>
     </PageContainer>
   );

@@ -3,6 +3,11 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").rep
   "",
 );
 
+export const ADMIN_URL = (import.meta.env.VITE_ADMIN_URL || "http://127.0.0.1:5174").replace(
+  /\/$/,
+  "",
+);
+
 const TOKEN_KEY = "openbot_token";
 const USER_KEY = "openbot_user";
 
@@ -339,6 +344,49 @@ export async function deleteAgent(id: string): Promise<void> {
     headers: authHeaders(),
   });
   if (!res.ok && res.status !== 204) throw new Error(await readError(res));
+}
+
+export type CloneAgentInput = {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  system_prompt_append?: string;
+  computer_mode?: "team" | "private";
+  /** Copy bot-scope memories (default true in UI / clone_agent tool). */
+  copy_memory?: boolean;
+  /** Copy routines bound to this bot — created paused (default false). */
+  copy_routines?: boolean;
+  enable_skills?: string[];
+  disable_skills?: string[];
+  /** Task handed to the copy right after cloning (runs in its own thread). */
+  follow_up?: string;
+};
+
+export type CloneAgentResult = {
+  ok: boolean;
+  agent: Agent;
+  source_agent_id: string;
+  conversation_id?: string;
+  skills_copied: number;
+  skills_inherit_account: boolean;
+  memories_copied: number;
+  routines_copied: number;
+  routine_names?: string[];
+  enabled_skills?: string[];
+  follow_up_status?: string;
+  warning?: string;
+  skill_errors?: string[];
+};
+
+/** Duplicate a bot (persona + skills; memory/routines opt-in). */
+export async function cloneAgent(id: string, body: CloneAgentInput = {}): Promise<CloneAgentResult> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(id)}/clone`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
 }
 
 export async function listAgentSkills(agentId: string): Promise<AgentSkill[]> {

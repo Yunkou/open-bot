@@ -4004,6 +4004,45 @@ button.ghost {
   margin: 4px 2px;
 }
 
+.clone-agent-modal { width: min(460px, 100%); }
+.clone-agent-modal .clone-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+.clone-agent-modal .clone-section { margin-top: 12px; }
+.clone-agent-modal .clone-section-title {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.clone-agent-modal .clone-section ul { margin: 4px 0 6px; font-size: 13px; }
+.clone-agent-modal label.check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-top: 6px;
+}
+.conv-clone {
+  flex-shrink: 0;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+.conv-item:hover .conv-clone,
+.conv-item:focus-within .conv-clone { opacity: 1; }
+.conv-clone:hover { color: var(--text); background: var(--bg-soft); }
+
 /* ---- Diagram card (Mermaid, design bot-diagram-card-design-v1) ---- */
 .diagram-card {
   --diagram-bg: #f8fafc;

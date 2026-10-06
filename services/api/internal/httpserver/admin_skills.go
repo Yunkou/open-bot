@@ -12,24 +12,17 @@ import (
 )
 
 func (s *Server) handleAdminListSkills(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
 	includeDisabled := r.URL.Query().Get("all") == "1"
-	list, err := s.db.ListGlobalSkillsFromDB(includeDisabled)
+	list, err := s.db.ListGlobalSkillsDetailed(admin.OrgID, includeDisabled)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	// Omit full body in list responses.
-	out := make([]map[string]any, 0, len(list))
-	for _, sk := range list {
-		out = append(out, map[string]any{
-			"name":        sk.Name,
-			"description": sk.Description,
-			"enabled":     sk.Enabled,
-			"created_at":  sk.CreatedAt,
-			"updated_at":  sk.UpdatedAt,
-		})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"skills": out})
+	writeJSON(w, http.StatusOK, map[string]any{"skills": list})
 }
 
 func (s *Server) handleAdminGetSkill(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +36,26 @@ func (s *Server) handleAdminGetSkill(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, sk)
+	source := db.SkillSourceCustom
+	if disk, err := db.ListGlobalSkillsFromDisk(); err == nil {
+		for _, g := range disk {
+			if g.Name == sk.Name {
+				source = db.SkillSourceBuiltin
+				break
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":          sk.Name,
+		"description":   sk.Description,
+		"body_markdown": sk.BodyMarkdown,
+		"enabled":       sk.Enabled,
+		"files":         sk.Files,
+		"created_at":    sk.CreatedAt,
+		"updated_at":    sk.UpdatedAt,
+		"source":        source,
+		"read_only":     false,
+	})
 }
 
 func (s *Server) handleAdminUpsertSkillFile(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +331,97 @@ func (s *Server) handleAdminSetUserSkill(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.writeAudit(admin.OrgID, admin.ID, "user.skill_toggle", "user", userID, map[string]any{
+		"skill":   name,
+		"enabled": body.Enabled,
+	})
+	writeJSON(w, http.StatusOK, sk)
+}
+
+
+func (s *Server) handleAdminSaveSkillPackage(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	var body struct {
+		Files []db.SkillFileRecord `json:"files"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	sk, err := s.db.SaveGlobalSkillPackage(name, body.Files)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.writeAudit(admin.OrgID, admin.ID, "skill.package_save", "skill", sk.Name, map[string]any{
+		"files": len(sk.Files),
+	})
+	writeJSON(w, http.StatusOK, sk)
+}
+
+func (s *Server) handleAdminListBotSkills(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	botID := r.PathValue("id")
+	bot, err := s.db.GetAgentInOrg(botID, admin.OrgID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "bot not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	list, err := s.db.AdminListBotSkills(bot.UserID, bot.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"skills": list, "bot_id": bot.ID})
+}
+
+func (s *Server) handleAdminSetBotSkill(w http.ResponseWriter, r *http.Request) {
+	admin, ok := s.loadAuthUser(w, r)
+	if !ok {
+		return
+	}
+	botID := r.PathValue("id")
+	name := r.PathValue("name")
+	bot, err := s.db.GetAgentInOrg(botID, admin.OrgID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "bot not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	sk, err := s.db.AdminSetBotSkill(bot.UserID, bot.ID, name, body.Enabled)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	s.writeAudit(admin.OrgID, admin.ID, "bot.skill_toggle", "bot", bot.ID, map[string]any{
 		"skill":   name,
 		"enabled": body.Enabled,
 	})

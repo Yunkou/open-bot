@@ -2,6 +2,7 @@ import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useStat
 import { toast } from "sonner";
 import { useConfirm } from "./components/ConfirmProvider";
 import {
+  ADMIN_URL,
   Agent,
   API_BASE,
   Channel,
@@ -142,6 +143,7 @@ import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { SkillsSettings } from "./components/SkillsSettings";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
+import { CloneAgentModal } from "./components/CloneAgentModal";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
@@ -442,6 +444,7 @@ export default function App() {
   const [llmMsg, setLLMMsg] = useState("");
 
   const [agentBusy, setAgentBusy] = useState(false);
+  const [cloneTarget, setCloneTarget] = useState<Agent | null>(null);
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
@@ -476,10 +479,9 @@ export default function App() {
   const [trainAgent, setTrainAgent] = useState<Agent | null>(null);
   const [trainReload, setTrainReload] = useState(0);
   const [skills, setSkills] = useState<Skill[]>([]);
-  // Settings「技能」: editor dirty guard, wide dialog while editing, deep-link from「当前 Bot」.
+  // Settings「技能」: full editor moved to admin (entry link only). Dirty guard retained for tab UX.
   const skillsDirtyRef = useRef(false);
-  const [skillsEditing, setSkillsEditing] = useState(false);
-  const [skillOpenName, setSkillOpenName] = useState<string | null>(null);
+  const skillsEditing = false;
 
   const [compactCfg, setCompactCfg] = useState<CompactConfig | null>(null);
   const confirm = useConfirm();
@@ -904,6 +906,11 @@ export default function App() {
         if (data.type === "task_status" && data.conversation_id) {
           const active = data.status === "running" || data.status === "queued";
           noteTask(data.conversation_id, active, data.label);
+          void refreshAgents().catch(() => {});
+          return;
+        }
+        if (data.type === "agents_changed") {
+          // e.g. the bot cloned itself via clone_agent — show the new bot in the sidebar.
           void refreshAgents().catch(() => {});
           return;
         }
@@ -2920,10 +2927,6 @@ export default function App() {
     };
   }, [authed, user?.id, refreshAgents, refreshChannels, refreshLLMs]);
 
-  const onSkillsDirtyChange = useCallback((dirty: boolean) => {
-    skillsDirtyRef.current = dirty;
-  }, []);
-  const onSkillOpenNameConsumed = useCallback(() => setSkillOpenName(null), []);
 
   /** Leaving the「技能」editor with unsaved buffers → confirm first. */
   const confirmLeaveSkills = async (): Promise<boolean> => {
@@ -3317,6 +3320,22 @@ export default function App() {
                   </div>
                   <button
                     type="button"
+                    className="conv-clone"
+                    title="复制助手"
+                    aria-label="复制助手"
+                    disabled={agentBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCloneTarget(a);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                      <rect x="9" y="9" width="13" height="13" rx="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
                     className="conv-del"
                     title="删除助手"
                     disabled={agentBusy}
@@ -3653,7 +3672,7 @@ export default function App() {
       {showSettings && (
         <div className="modal-backdrop" onClick={() => void closeSettings()}>
           <div
-            className={`modal settings-dialog${settingsTab === "skills" && skillsEditing ? " settings-dialog--wide" : ""}`}
+            className="modal settings-dialog"
             onClick={(e) => e.stopPropagation()}
           >
             <nav className="settings-nav" aria-label="设置分类">
@@ -3789,9 +3808,9 @@ export default function App() {
             {settingsTab === "bot" && (
               <BotSettingsPanel
                 agent={activeAgent ?? null}
+                onClone={(a) => setCloneTarget(a)}
                 onOpenSkill={(name) => {
-                  setSkillOpenName(name);
-                  setSettingsTab("skills");
+                  window.open(`${ADMIN_URL}/skills/${encodeURIComponent(name)}`, "_blank", "noopener,noreferrer");
                 }}
                 onSaved={(a) => {
                   void refreshAgents().then(() => {
@@ -3956,15 +3975,7 @@ export default function App() {
               </SettingsPage>
             )}
 
-            {settingsTab === "skills" && (
-              <SkillsSettings
-                openName={skillOpenName}
-                onOpenNameConsumed={onSkillOpenNameConsumed}
-                onDirtyChange={onSkillsDirtyChange}
-                onEditingChange={setSkillsEditing}
-                onChanged={() => void refreshSkills().catch(() => {})}
-              />
-            )}
+            {settingsTab === "skills" && <SkillsSettings />}
 
             {settingsTab === "mcp" && (
               <SettingsPage>
@@ -5022,6 +5033,23 @@ export default function App() {
           </div>
         </div>
       )}
+      <CloneAgentModal
+        agent={cloneTarget}
+        onClose={() => setCloneTarget(null)}
+        onCloned={(res) => {
+          const created = res.agent;
+          void refreshAgents()
+            .then(() => {
+              setShowSettings(false);
+              void onSelectAgentRef.current(created.id);
+            })
+            .catch(() => {});
+          const extras: string[] = [];
+          if (res.memories_copied) extras.push(`${res.memories_copied} 条记忆`);
+          if (res.routines_copied) extras.push(`${res.routines_copied} 个例行任务（已暂停）`);
+          toast.success(`已复制为「${created.name}」${extras.length ? `，含 ${extras.join("、")}` : ""}`);
+        }}
+      />
       <SecretPromptModal
         request={secretPrompt}
         onClose={() => setSecretPrompt(null)}

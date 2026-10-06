@@ -533,6 +533,20 @@ export async function adminPatchBot(
   return res.json();
 }
 
+/** Copy a bot inside the org (same owner). Persona + skills; memory/routines opt-in, routines paused. */
+export async function adminCloneBot(
+  id: string,
+  body: { name?: string; copy_memory?: boolean; copy_routines?: boolean } = {},
+): Promise<{ bot: AdminBot; memories_copied?: number; routines_copied?: number }> {
+  const res = await fetch(`${API_BASE}/v1/admin/bots/${encodeURIComponent(id)}/clone`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function adminDeleteBot(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/v1/admin/bots/${id}`, {
     method: "DELETE",
@@ -773,14 +787,31 @@ export type AdminSkillFile = {
   content?: string;
 };
 
+export type AdminSkillBotRef = {
+  id: string;
+  name: string;
+};
+
 export type AdminSkill = {
   name: string;
   description: string;
   body_markdown?: string;
   enabled: boolean;
+  source?: "builtin" | "custom" | string;
+  read_only?: boolean;
+  bot_count?: number;
+  bots?: AdminSkillBotRef[];
   files?: AdminSkillFile[];
   created_at?: string;
   updated_at?: string;
+};
+
+export type AdminBotSkill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  custom?: boolean;
+  account_enabled?: boolean;
 };
 
 export type AdminUserSkill = {
@@ -903,6 +934,45 @@ export async function adminExportSkillZip(name: string): Promise<void> {
   a.remove();
   URL.revokeObjectURL(url);
 }
+
+export async function adminSaveSkillPackage(
+  name: string,
+  files: { path: string; content: string }[],
+): Promise<AdminSkill> {
+  const res = await fetch(`${API_BASE}/v1/admin/skills/${encodeURIComponent(name)}/package`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ files }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminListBotSkills(botId: string): Promise<{ skills: AdminBotSkill[]; bot_id: string }> {
+  const res = await fetch(`${API_BASE}/v1/admin/bots/${encodeURIComponent(botId)}/skills`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function adminSetBotSkill(
+  botId: string,
+  name: string,
+  enabled: boolean,
+): Promise<AdminBotSkill> {
+  const res = await fetch(
+    `${API_BASE}/v1/admin/bots/${encodeURIComponent(botId)}/skills/${encodeURIComponent(name)}`,
+    {
+      method: "PUT",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ enabled }),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 
 export async function adminListUserSkills(userId: string): Promise<{ skills: AdminUserSkill[] }> {
   const res = await fetch(`${API_BASE}/v1/admin/users/${encodeURIComponent(userId)}/skills`, {

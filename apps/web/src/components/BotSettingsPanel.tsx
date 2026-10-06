@@ -18,11 +18,13 @@ type Props = {
   agent: Agent | null;
   busy?: boolean;
   onSaved?: (agent: Agent) => void;
+  /** Open the「复制助手」dialog for this bot. */
+  onClone?: (agent: Agent) => void;
   /** Open settings「技能」editor for this skill (name link). */
   onOpenSkill?: (name: string) => void;
 };
 
-export function BotSettingsPanel({ agent, busy, onSaved, onOpenSkill }: Props) {
+export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -109,7 +111,7 @@ export function BotSettingsPanel({ agent, busy, onSaved, onOpenSkill }: Props) {
   return (
     <SettingsPage>
       <SettingsHint>
-        岗位描述会写入 Bot 资料；「启用的技能」为本 Bot 允许列表（与「技能」页账号级启用取交集，技能内容在「技能」页编辑）。电脑模式：team
+        岗位描述会写入 Bot 资料；「启用的技能」为本 Bot 允许列表。技能正文请在管理端「技能」页编辑。电脑模式：team
         共享账户工作区，private 为该 Bot 独立目录。
       </SettingsHint>
       <SettingsSection title={`Bot · ${agent.name}`}>
@@ -154,6 +156,17 @@ export function BotSettingsPanel({ agent, busy, onSaved, onOpenSkill }: Props) {
               <button type="submit" className="primary" disabled={locked}>
                 {saving ? "保存中…" : "保存"}
               </button>
+              {onClone ? (
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={locked}
+                  title="复制人设与技能为新助手；记忆、例行任务可选"
+                  onClick={() => onClone(agent)}
+                >
+                  复制助手
+                </button>
+              ) : null}
             </div>
           </form>
         </SettingsCard>
@@ -162,7 +175,7 @@ export function BotSettingsPanel({ agent, busy, onSaved, onOpenSkill }: Props) {
         <SettingsCard>
           <div className="llm-list">
             {visibleSkills.length === 0 ? (
-              <SettingsEmpty>暂无可用技能（或尚未加载）。请先在「技能」页启用账号级技能。</SettingsEmpty>
+              <SettingsEmpty>暂无可用技能（或尚未加载）。请先在管理端启用平台技能，并在账号侧保持可用。</SettingsEmpty>
             ) : (
               visibleSkills.map((s) => (
                 <div key={s.name} className="llm-item bot-skill-row">
