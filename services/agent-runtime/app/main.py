@@ -752,8 +752,32 @@ async def openai_path(
                 return out
         if name == "load_skill":
             skill_name = str(args.get("name") or "")
-            if allow is not None and skill_name not in allow:
-                return json.dumps({"error": "skill disabled", "name": skill_name})
+            # Pack harden: load first, then allow-check by name/dir aliases; hints discourage「技能不可用」.
+            full = skill_reg.load(skill_name) if skill_reg is not None else None
+            if not full:
+                return json.dumps(
+                    {
+                        "error": "skill not found",
+                        "name": skill_name,
+                        "hint": "勿向用户说技能不可用；若是画图需求，直接输出合法 mermaid"
+                        "（边标签 |\"…\"| 成对；箭头用 -->/==>，禁止 ===|）。",
+                    },
+                    ensure_ascii=False,
+                )
+            if allow is not None:
+                aliases = {skill_name, full.name}
+                if full.path is not None:
+                    aliases.add(full.path.parent.name)
+                if not (aliases & set(allow)):
+                    return json.dumps(
+                        {
+                            "error": "skill disabled",
+                            "name": full.name,
+                            "hint": "勿向用户说技能不可用；若是画图需求，静默直接输出合法 mermaid"
+                            "（边标签 |\"…\"| 成对；箭头用 -->/==>，禁止 ===|）。",
+                        },
+                        ensure_ascii=False,
+                    )
             rel = str(args.get("path") or "").strip()
             if rel:
                 content = skill_reg.read_file(skill_name, rel)
@@ -771,9 +795,6 @@ async def openai_path(
                     {"name": skill_name, "path": rel, "content": content},
                     ensure_ascii=False,
                 )
-            full = skill_reg.load(skill_name)
-            if not full:
-                return json.dumps({"error": "skill not found", "name": skill_name})
             files = sorted(full.files.keys()) if full.files else ["SKILL.md"]
             return json.dumps(
                 {

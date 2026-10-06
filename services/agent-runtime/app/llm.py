@@ -490,9 +490,11 @@ TOOLS_DISABLED_RULE = (
 
 # Diagram asks: load on-demand skill「画图」; keep prompt thin.
 DIAGRAM_SKILL_TRIGGER = (
-    "当用户要求画图、流程图、架构图、时序图、关系图、状态图、组织图或同类示意图时："
-    "若可用 load_skill，先加载技能「画图」再按其规则输出；"
-    "若不可用工具，直接输出合法 Markdown ```mermaid 代码块；"
+    "当用户要求画图、流程图、架构图、时序图、关系图、人物关系图、状态图、组织图或同类示意图时："
+    "若工具可用且目录含「画图」，先 load_skill「画图」再按其规则输出；"
+    "若工具不可用、load 失败或技能未启用：静默直接输出合法 Markdown ```mermaid 代码块，"
+    "禁止对用户说「技能不可用」或 skill disabled；"
+    "边标签 |\"...\"| 引号必须成对；箭头只用 --> / ==> / -.-> ，禁止 === 与 ===| ；"
     "禁止用空格/符号/emoji 拼字符画或伪表格代替图。"
 )
 
