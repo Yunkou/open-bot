@@ -55,6 +55,13 @@ func NormalizeAvatarColor(color string) string {
 	return ""
 }
 
+// AvatarAssignLockKey is a stable int64 for pg_advisory_xact_lock per user.
+func AvatarAssignLockKey(userID string) int64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte("avatar-assign:" + userID))
+	return int64(h.Sum64())
+}
+
 // AssignAvatarFromID picks shape+color from agent id hash.
 func AssignAvatarFromID(agentID string) (shape, color string) {
 	h := fnv.New32a()

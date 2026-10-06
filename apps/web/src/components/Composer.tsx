@@ -13,6 +13,8 @@ export type ComposerMentionItem = {
   label: string;
   subtitle?: string;
   agentId?: string;
+  avatarShape?: string;
+  avatarColor?: string;
 };
 
 export type ComposerSkillOption = {
@@ -361,7 +363,13 @@ export function Composer({
                       }}
                     >
                       {item.kind === "agent" || item.kind === "bot" ? (
-                        <AgentAvatar id={item.agentId || item.insert} name={item.label} size={24} />
+                        <AgentAvatar
+                          id={item.agentId || item.insert}
+                          name={item.label}
+                          size={24}
+                          shape={item.avatarShape}
+                          color={item.avatarColor}
+                        />
                       ) : (
                         <span className="mention-kind-badge">{item.kind}</span>
                       )}

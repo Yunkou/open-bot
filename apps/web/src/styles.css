@@ -3364,3 +3364,17 @@ button.ghost {
 }
 .danger-text { color: #b91c1c !important; }
 .msg-action-feedback { color: #b45309; }
+
+/* Group member avatar stack (channel list + group header) */
+.channel-member-stack {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+.channel-member-stack .agent-avatar-wrap {
+  margin-left: -6px;
+}
+.channel-member-stack .agent-avatar-wrap:first-child {
+  margin-left: 0;
+}

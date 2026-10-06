@@ -1102,6 +1102,23 @@ export default function App() {
   };
 
 
+  // Group member avatar: live agent state (reflects just-saved settings) first,
+  // then the channel's server-side member_profiles snapshot.
+  const channelMemberProfiles = useCallback(
+    (ch: Channel): { agent_id: string; name: string; avatar_shape?: string; avatar_color?: string }[] =>
+      (ch.members || []).map((id) => {
+        const a = agents.find((x) => x.id === id);
+        const p = ch.member_profiles?.find((x) => x.agent_id === id);
+        return {
+          agent_id: id,
+          name: a?.name || p?.name || agentNameById.get(id) || id,
+          avatar_shape: a?.avatar_shape || p?.avatar_shape,
+          avatar_color: a?.avatar_color || p?.avatar_color,
+        };
+      }),
+    [agents, agentNameById],
+  );
+
   const filteredChannels = useMemo(() => {
     const q = convSearch.trim().toLowerCase();
     if (!q) return channels;
@@ -1120,7 +1137,16 @@ export default function App() {
   const groupMentionMembers = useMemo(() => {
     if (!activeChannel?.members?.length) return undefined;
     return activeChannel.members
-      .map((id) => agents.find((a) => a.id === id))
+      .map((id): Agent | undefined => {
+        const a = agents.find((x) => x.id === id);
+        if (!a) return undefined;
+        const p = activeChannel.member_profiles?.find((x) => x.agent_id === id);
+        return {
+          ...a,
+          avatar_shape: a.avatar_shape || p?.avatar_shape,
+          avatar_color: a.avatar_color || p?.avatar_color,
+        };
+      })
       .filter((a): a is Agent => Boolean(a));
   }, [activeChannel, agents]);
 
@@ -1140,6 +1166,8 @@ export default function App() {
           label: a.name,
           subtitle: a.description || a.id,
           agentId: a.id,
+          avatarShape: a.avatar_shape,
+          avatarColor: a.avatar_color,
         });
       }
     } else {
@@ -1150,6 +1178,8 @@ export default function App() {
           label: a.name,
           subtitle: a.description || a.id,
           agentId: a.id,
+          avatarShape: a.avatar_shape,
+          avatarColor: a.avatar_color,
         });
       }
     }
@@ -3246,6 +3276,20 @@ export default function App() {
                     }
                   }}
                 >
+                  <div className="channel-member-stack" aria-hidden>
+                    {channelMemberProfiles(ch)
+                      .slice(0, 3)
+                      .map((p) => (
+                        <AgentAvatar
+                          key={p.agent_id}
+                          id={p.agent_id}
+                          name={p.name}
+                          size={22}
+                          shape={p.avatar_shape}
+                          color={p.avatar_color}
+                        />
+                      ))}
+                  </div>
                   <div className="conv-item-main">
                     <div className="agent-name">
                       {ch.name}
@@ -3310,6 +3354,19 @@ export default function App() {
           <div className="agent-pill">
             {activeChannel ? (
               <>
+                <span className="channel-member-stack" aria-hidden>
+                  {channelMemberProfiles(activeChannel).map((p) => (
+                    <AgentAvatar
+                      key={p.agent_id}
+                      id={p.agent_id}
+                      name={p.name}
+                      size={24}
+                      shape={p.avatar_shape}
+                      color={p.avatar_color}
+                      status={presenceByAgent[p.agent_id] || "idle"}
+                    />
+                  ))}
+                </span>
                 <span className="agent-pill-name">{activeChannel.name}</span>
                 <span className="muted small" style={{ marginLeft: 8 }}>
                   {(activeChannel.members || [])

@@ -255,7 +255,7 @@ export function NewChatPopover({
                     role="option"
                     onClick={() => void onSelectAgent(a)}
                   >
-                    <AgentAvatar id={a.id} name={a.name} size={36} />
+                    <AgentAvatar id={a.id} name={a.name} size={36} shape={a.avatar_shape} color={a.avatar_color} />
                     <div className="new-chat-row-main">
                       <div className="new-chat-row-name">{a.name}</div>
                       {a.description ? (
@@ -387,7 +387,7 @@ export function NewChatPopover({
                       checked={checked}
                       onChange={() => toggleMember(a.id)}
                     />
-                    <AgentAvatar id={a.id} name={a.name} size={28} />
+                    <AgentAvatar id={a.id} name={a.name} size={28} shape={a.avatar_shape} color={a.avatar_color} />
                     <span>{a.name}</span>
                   </label>
                 );

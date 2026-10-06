@@ -161,30 +161,69 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	used := map[string]struct{}{}
-	if existing, err := d.ListAgents(userID); err == nil {
-		for _, e := range existing {
-			if e.AvatarShape != "" && e.AvatarColor != "" {
-				used[e.AvatarShape+"|"+e.AvatarColor] = struct{}{}
-			}
+	tx, err := d.SQL.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Serialize auto-assignment per user so concurrent creates don't read the same
+	// "used" set and pick the same free pair (TOCTOU). Lock is released on commit/rollback.
+	if shape == "" || color == "" {
+		if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, AvatarAssignLockKey(userID)); err != nil {
+			return nil, err
 		}
+		used, err := usedAvatarPairsTx(tx, userID)
+		if err != nil {
+			return nil, err
+		}
+		s, c := AssignAvatarAvoiding(a.ID, used)
+		if shape != "" {
+			s = shape
+		}
+		if color != "" {
+			c = color
+		}
+		a.AvatarShape, a.AvatarColor = s, c
+	} else {
+		a.AvatarShape, a.AvatarColor = shape, color
 	}
-	a.AvatarShape, a.AvatarColor = AssignAvatarAvoiding(a.ID, used)
-	if shape != "" {
-		a.AvatarShape = shape
-	}
-	if color != "" {
-		a.AvatarColor = color
-	}
-	_, err := d.SQL.Exec(
+
+	if _, err := tx.Exec(
 		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, created_at, updated_at)
 		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10)`,
 		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.CreatedAt, a.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// usedAvatarPairsTx returns shape|color pairs of the user's live agents (inside tx).
+func usedAvatarPairsTx(tx *sql.Tx, userID string) (map[string]struct{}, error) {
+	rows, err := tx.Query(
+		`SELECT COALESCE(avatar_shape,''), COALESCE(avatar_color,'')
+		 FROM agents WHERE user_id = $1 AND deleted_at IS NULL`,
+		userID,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return a, nil
+	defer rows.Close()
+	used := map[string]struct{}{}
+	for rows.Next() {
+		var s, c string
+		if err := rows.Scan(&s, &c); err != nil {
+			return nil, err
+		}
+		if s != "" && c != "" {
+			used[s+"|"+c] = struct{}{}
+		}
+	}
+	return used, rows.Err()
 }
 
 func (d *DB) UpdateAgent(userID, id, name, description, systemPrompt string) (*Agent, error) {
