@@ -70,7 +70,7 @@ function ImageFullscreen({
   src,
   alt,
   name,
-  mime,
+  mime: _mime,
   onCopy,
   onDownload,
   downloading,

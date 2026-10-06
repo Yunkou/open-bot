@@ -3,6 +3,11 @@ export const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:1808
   "",
 );
 
+export const ADMIN_URL = (import.meta.env.VITE_ADMIN_URL || "http://127.0.0.1:5174").replace(
+  /\/$/,
+  "",
+);
+
 const TOKEN_KEY = "openbot_token";
 const USER_KEY = "openbot_user";
 
@@ -86,9 +91,16 @@ export type BotOnlineEvent = {
 export type AgentSkill = {
   name: string;
   description: string;
+  /** Effective for this Bot (account-level ∩ Bot allowlist). */
   enabled: boolean;
   custom?: boolean;
+  /** Account-level toggle from settings「技能」. */
+  account_enabled?: boolean;
 };
+
+export type SkillSource = "builtin" | "custom";
+
+export type SkillBotRef = { id: string; name: string };
 
 export type Skill = {
   name: string;
@@ -97,6 +109,26 @@ export type Skill = {
   custom?: boolean;
   file_count?: number;
   files?: { path: string; content?: string }[];
+  /** 内置 / 自建 (GET /v1/skills). */
+  source?: SkillSource;
+  read_only?: boolean;
+  updated_at?: string;
+  /** Bots of this account whose effective skill set includes this skill. */
+  bot_count?: number;
+  bots?: SkillBotRef[];
+};
+
+/** Editor payload: GET/PUT /v1/skills/{name}/package. */
+export type SkillPackage = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  custom: boolean;
+  source: SkillSource;
+  read_only: boolean;
+  updated_at?: string;
+  file_count: number;
+  files: SkillFile[];
 };
 
 export type SkillFile = {
@@ -133,16 +165,6 @@ export type ReactionUpdatedEvent = {
   action: "add" | "remove" | string;
 };
 
-export type AttachmentMeta = {
-  id: string;
-  name: string;
-  mime: string;
-  size: number;
-  path: string;
-  /** Relative auth GET path from upload / ListMessages, e.g. /v1/conversations/{id}/attachments/{id}. */
-  url?: string;
-};
-
 export type Message = {
   id: string;
   role: "user" | "assistant" | "handoff" | string;
@@ -159,8 +181,6 @@ export type Message = {
   /** Runtime run id for Bot replies (omitted on historical / non-run messages). */
   request_id?: string;
   handoff?: HandoffPayload;
-  /** Linked uploads from ListMessages / persist_only (image/* → diagram image card). */
-  attachments?: AttachmentMeta[];
 };
 
 export type Conversation = {
@@ -326,6 +346,49 @@ export async function deleteAgent(id: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(await readError(res));
 }
 
+export type CloneAgentInput = {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  system_prompt_append?: string;
+  computer_mode?: "team" | "private";
+  /** Copy bot-scope memories (default true in UI / clone_agent tool). */
+  copy_memory?: boolean;
+  /** Copy routines bound to this bot — created paused (default false). */
+  copy_routines?: boolean;
+  enable_skills?: string[];
+  disable_skills?: string[];
+  /** Task handed to the copy right after cloning (runs in its own thread). */
+  follow_up?: string;
+};
+
+export type CloneAgentResult = {
+  ok: boolean;
+  agent: Agent;
+  source_agent_id: string;
+  conversation_id?: string;
+  skills_copied: number;
+  skills_inherit_account: boolean;
+  memories_copied: number;
+  routines_copied: number;
+  routine_names?: string[];
+  enabled_skills?: string[];
+  follow_up_status?: string;
+  warning?: string;
+  skill_errors?: string[];
+};
+
+/** Duplicate a bot (persona + skills; memory/routines opt-in). */
+export async function cloneAgent(id: string, body: CloneAgentInput = {}): Promise<CloneAgentResult> {
+  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(id)}/clone`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export async function listAgentSkills(agentId: string): Promise<AgentSkill[]> {
   const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/skills`, {
     headers: authHeaders(),
@@ -472,12 +535,49 @@ export async function uploadSkillPackage(opts: {
   return res.json();
 }
 
-export async function getSkillPackage(name: string): Promise<Skill> {
+export async function getSkillPackage(name: string): Promise<SkillPackage> {
   const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/package`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await readError(res));
-  return res.json();
+  const data = (await res.json()) as SkillPackage;
+  return { ...data, files: data.files ?? [] };
+}
+
+/** Create an empty custom skill (server writes a SKILL.md template) or one from files. 409 if name taken. */
+export async function createSkill(body: {
+  name: string;
+  description?: string;
+  files?: SkillFile[];
+}): Promise<SkillPackage> {
+  const res = await fetch(`${API_BASE}/v1/skills`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as SkillPackage;
+  return { ...data, files: data.files ?? [] };
+}
+
+/** Whole-package write-back for a custom skill (editor save). */
+export async function saveSkillPackage(name: string, files: SkillFile[]): Promise<SkillPackage> {
+  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/package`, {
+    method: "PUT",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ files }),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const data = (await res.json()) as SkillPackage;
+  return { ...data, files: data.files ?? [] };
+}
+
+export async function exportSkillZip(name: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/export`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  triggerBrowserDownload(await res.blob(), `${name}.zip`);
 }
 
 export async function deleteSkill(name: string): Promise<void> {
@@ -657,7 +757,35 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   return bits.filter(Boolean).join(" ");
 }
 
-/** True when mime looks like an image the diagram image card can show. */
+export type AttachmentMeta = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  path: string;
+  /** Relative auth GET path from upload / ListMessages, e.g. /v1/conversations/{id}/attachments/{id}. */
+  url?: string;
+};
+
+export type StatusEvent = {
+  phase?: string;
+  label?: string;
+  tool?: string;
+  [key: string]: unknown;
+};
+
+export type StreamHandlers = {
+  onToken: (text: string) => void;
+  onMeta?: (data: Record<string, unknown>) => void;
+  onStatus?: (data: StatusEvent) => void;
+  onError?: (message: string) => void;
+  onDone?: () => void;
+  /** Group multi-agent: called when a new bot starts streaming. */
+  onAgentStart?: (info: { agent_id: string; agent_name?: string; index?: number; total?: number }) => void;
+  /** Conversation SSE `bot_online` (agent-global green dot; independent of bot_presence). */
+  onBotOnline?: (evt: BotOnlineEvent) => void;
+};
+
 export function isImageAttachmentMime(mime?: string | null): boolean {
   return Boolean(mime && /^image\//i.test(mime.trim()));
 }
@@ -747,25 +875,6 @@ export async function fetchAttachmentBlob(attOrUrl: { url?: string } | string): 
   if (!res.ok) throw new Error(await readError(res));
   return res.blob();
 }
-
-export type StatusEvent = {
-  phase?: string;
-  label?: string;
-  tool?: string;
-  [key: string]: unknown;
-};
-
-export type StreamHandlers = {
-  onToken: (text: string) => void;
-  onMeta?: (data: Record<string, unknown>) => void;
-  onStatus?: (data: StatusEvent) => void;
-  onError?: (message: string) => void;
-  onDone?: () => void;
-  /** Group multi-agent: called when a new bot starts streaming. */
-  onAgentStart?: (info: { agent_id: string; agent_name?: string; index?: number; total?: number }) => void;
-  /** Conversation SSE `bot_online` (agent-global green dot; independent of bot_presence). */
-  onBotOnline?: (evt: BotOnlineEvent) => void;
-};
 
 export async function uploadConversationAttachment(
   conversationId: string,
@@ -1531,7 +1640,6 @@ export async function runRoutine(
   return res.json();
 }
 
-export { API_BASE };
 
 export type Sandbox = {
   id: string;
