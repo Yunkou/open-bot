@@ -37,7 +37,29 @@ export const LEGACY_SHAPE_MAP: Record<string, AvatarShape> = {
   "soft-square": "petal",
 };
 
-export type BotPresenceStatus = "idle" | "working" | "awaiting_approval" | "error";
+export const BOT_PRESENCE_STATUSES = [
+  "idle",
+  "thinking",
+  "working",
+  "awaiting_approval",
+  "error",
+] as const;
+
+export type BotPresenceStatus = "idle" | "thinking" | "working" | "awaiting_approval" | "error";
+
+/**
+ * Normalize any wire/UI status to one of the five faces.
+ * Empty / missing → idle; known five pass through; anything else → working
+ * (product rule v2.1: unknown status shows as working, never throws).
+ */
+export function normalizePresenceStatus(status?: string | null): BotPresenceStatus {
+  const s = (status ?? "").trim().toLowerCase();
+  if (!s) return "idle";
+  return (BOT_PRESENCE_STATUSES as readonly string[]).includes(s)
+    ? (s as BotPresenceStatus)
+    : "working";
+}
+
 
 const AVATAR_COLORS = AVATAR_COLOR_PALETTE;
 

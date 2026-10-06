@@ -288,7 +288,7 @@ button {
   text-overflow: ellipsis;
 }
 
-/* —— Avatar v2: organic SVG face + four-state CSS —— */
+/* —— Avatar v2.1: organic SVG face + five-state CSS —— */
 .agent-avatar-wrap {
   position: relative;
   display: inline-flex;
@@ -333,7 +333,8 @@ button {
   transform-box: view-box;
 }
 
-.agent-avatar-spirals {
+.agent-avatar-spirals,
+.agent-avatar-spiral-dots {
   display: none;
 }
 
@@ -376,71 +377,115 @@ button {
   50% { transform: scale(1.02); }
 }
 
-/* —— working: squint + saccade + body wobble/brightness —— */
-.agent-avatar-face[data-status="working"] .agent-avatar-eye-l {
-  animation: agent-avatar-squint-l 1.6s ease-in-out infinite;
+/*
+ * —— thinking (v2.1): look-away ——
+ * Eyes: fine slit (ry×0.35), both shifted up-right (2px, -1.5px), slow ±1px horizontal scan.
+ * Head: tilt -4° (body + eyes share origin 16px 20px). 1.8s ease-in-out infinite.
+ * Must read differently from `working` at 24px: slit + off-axis + tilt vs half-open + centred + bounce.
+ */
+.agent-avatar-face[data-status="thinking"] .agent-avatar-eye-l {
   transform-origin: 12.2px 13.4px;
+  transform: rotate(-28deg) scaleY(0.35);
+}
+.agent-avatar-face[data-status="thinking"] .agent-avatar-eye-r {
+  transform-origin: 18.6px 12.6px;
+  transform: rotate(-28deg) scaleY(0.35);
+}
+.agent-avatar-face[data-status="thinking"] .agent-avatar-eyes {
+  transform-origin: 16px 20px;
+  transform: translate(2px, -1.5px) rotate(-4deg);
+  animation: agent-avatar-think-eyes 1.8s ease-in-out infinite;
+}
+.agent-avatar-face[data-status="thinking"] .agent-avatar-body {
+  transform-origin: 16px 20px;
+  transform: rotate(-4deg);
+  animation: agent-avatar-think-scan 1.8s ease-in-out infinite;
+}
+
+@keyframes agent-avatar-think-eyes {
+  0%, 100% { transform: translate(1px, -1.5px) rotate(-4deg); }
+  50% { transform: translate(3px, -1.5px) rotate(-4deg); }
+}
+@keyframes agent-avatar-think-scan {
+  0%, 100% { transform: rotate(-4deg) translateX(0); }
+  50% { transform: rotate(-4deg) translateX(1px); }
+}
+
+/*
+ * —— working (v2.1): focused / streaming ——
+ * Eyes: half-open (ry×0.7), slightly wider (rx×1.05), centred — NO look-away.
+ * Head: no tilt; steady 0.8px bounce 0.9s (eyes ride along with body).
+ */
+.agent-avatar-face[data-status="working"] .agent-avatar-eye-l {
+  transform-origin: 12.2px 13.4px;
+  transform: rotate(-28deg) scale(1.05, 0.7);
 }
 .agent-avatar-face[data-status="working"] .agent-avatar-eye-r {
-  animation: agent-avatar-squint-r 1.6s ease-in-out infinite;
   transform-origin: 18.6px 12.6px;
+  transform: rotate(-28deg) scale(1.05, 0.7);
 }
+.agent-avatar-face[data-status="working"] .agent-avatar-eyes,
 .agent-avatar-face[data-status="working"] .agent-avatar-body {
-  animation: agent-avatar-work-body 1.1s ease-in-out infinite;
+  animation: agent-avatar-work-bounce 0.9s ease-in-out infinite;
 }
 
-@keyframes agent-avatar-squint-l {
-  0%, 100% { transform: rotate(-28deg) scaleY(0.55) translate(-0.4px, -0.6px); }
-  50% { transform: rotate(-28deg) scaleY(0.55) translate(-1.2px, -1.2px); }
-}
-@keyframes agent-avatar-squint-r {
-  0%, 100% { transform: rotate(-28deg) scaleY(0.55) translate(0.4px, -0.6px); }
-  50% { transform: rotate(-28deg) scaleY(0.55) translate(1.2px, -1.2px); }
-}
-@keyframes agent-avatar-work-body {
-  0%, 100% { transform: rotate(-3deg); filter: brightness(1); }
-  50% { transform: rotate(3deg); filter: brightness(1.1); }
+@keyframes agent-avatar-work-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-0.8px); }
 }
 
-/* —— awaiting_approval: wide eyes + hop + gold stroke —— */
-.agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eyes {
-  animation: agent-avatar-wide 900ms cubic-bezier(0.34, 1.4, 0.64, 1) infinite;
-  transform-origin: 15.4px 13px;
+/* —— awaiting_approval: wide eyes (rx×1.15 ry×1.25) + hop -1.5px 900ms + gold stroke —— */
+.agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eye-l {
+  transform-origin: 12.2px 13.4px;
+  transform: rotate(-28deg) scale(1.15, 1.25);
 }
+.agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eye-r {
+  transform-origin: 18.6px 12.6px;
+  transform: rotate(-28deg) scale(1.15, 1.25);
+}
+.agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eyes,
 .agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-body {
   animation: agent-avatar-hop 900ms cubic-bezier(0.34, 1.4, 0.64, 1) infinite;
+}
+.agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-body {
   stroke: #c9a227;
   stroke-width: 0.6;
   stroke-opacity: 0.35;
   paint-order: stroke fill;
 }
 
-@keyframes agent-avatar-wide {
-  0%, 100% { transform: scale(1.2); }
-  50% { transform: scale(1.15); }
-}
 @keyframes agent-avatar-hop {
   0%, 100% { transform: translateY(0); }
   40% { transform: translateY(-1.5px); }
   70% { transform: translateY(0); }
 }
 
-/* —— error: spiral eyes + one-shot wobble then tilt —— */
+/* —— error: hollow ring+dot eyes + one-shot spin (720°/0.55s) + wobble then rest tilted —— */
 .agent-avatar-face[data-status="error"] .agent-avatar-eye {
   display: none;
 }
-.agent-avatar-face[data-status="error"] .agent-avatar-spirals {
+.agent-avatar-face[data-status="error"] .agent-avatar-spirals,
+.agent-avatar-face[data-status="error"] .agent-avatar-spiral-dots {
   display: block;
+}
+.agent-avatar-face[data-status="error"] .agent-avatar-spirals {
+  stroke: #fff;
+  stroke-width: 1.4; /* ≥1.3; distinct from working half-open at 24px */
 }
 .agent-avatar-face[data-status="error"] .agent-avatar-spiral-l {
   transform-origin: 12.2px 13.4px;
-  animation: agent-avatar-spiral-spin 0.9s linear 1;
+  transform-box: view-box;
+  animation: agent-avatar-spiral-spin 0.55s linear 1;
 }
 .agent-avatar-face[data-status="error"] .agent-avatar-spiral-r {
   transform-origin: 18.6px 12.6px;
-  animation: agent-avatar-spiral-spin 0.9s linear 1;
+  transform-box: view-box;
+  animation: agent-avatar-spiral-spin 0.55s linear 1;
 }
+.agent-avatar-face[data-status="error"] .agent-avatar-eyes,
 .agent-avatar-face[data-status="error"] .agent-avatar-body {
+  transform-origin: 16px 16px;
+  transform: rotate(-2deg);
   animation: agent-avatar-error-wobble 0.55s ease-out 1 forwards;
 }
 
@@ -459,7 +504,7 @@ button {
 /* Legacy ring classes kept inert (no status outer ring in v2). */
 .agent-avatar-ring { display: none !important; }
 
-/* Settings: four-state preview toggles */
+/* Settings: five-state preview toggles */
 .bot-avatar-status-toggles {
   display: flex;
   flex-wrap: wrap;
@@ -483,39 +528,39 @@ button {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #6ea8fe) 40%, transparent);
 }
 
+/*
+ * Reduced motion: kill every avatar animation; each status keeps one static keyframe.
+ * Per-eye shapes (thinking slit / working half-open / awaiting wide) are plain declarations
+ * above, so they persist; only group/body poses need restating here.
+ */
 @media (prefers-reduced-motion: reduce) {
-  .agent-avatar-face[data-status] .agent-avatar-eyes,
-  .agent-avatar-face[data-status] .agent-avatar-eye-l,
-  .agent-avatar-face[data-status] .agent-avatar-eye-r,
-  .agent-avatar-face[data-status] .agent-avatar-body,
-  .agent-avatar-face[data-status] .agent-avatar-spiral-l,
-  .agent-avatar-face[data-status] .agent-avatar-spiral-r {
+  .agent-avatar-face,
+  .agent-avatar-face * {
     animation: none !important;
   }
-  /* Static keyframes only */
-  .agent-avatar-face[data-status="idle"] .agent-avatar-eyes {
-    transform: none;
-  }
+  .agent-avatar-face[data-status="idle"] .agent-avatar-eyes,
   .agent-avatar-face[data-status="idle"] .agent-avatar-body {
     transform: none;
   }
-  .agent-avatar-face[data-status="working"] .agent-avatar-eye-l {
-    transform: rotate(-28deg) scaleY(0.55);
+  .agent-avatar-face[data-status="thinking"] .agent-avatar-eyes {
+    transform-origin: 16px 20px;
+    transform: translate(2px, -1.5px) rotate(-4deg);
   }
-  .agent-avatar-face[data-status="working"] .agent-avatar-eye-r {
-    transform: rotate(-28deg) scaleY(0.55);
+  .agent-avatar-face[data-status="thinking"] .agent-avatar-body {
+    transform-origin: 16px 20px;
+    transform: rotate(-4deg);
   }
+  .agent-avatar-face[data-status="working"] .agent-avatar-eyes,
   .agent-avatar-face[data-status="working"] .agent-avatar-body {
     transform: none;
-    filter: none;
   }
-  .agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eyes {
-    transform: scale(1.2);
-  }
+  .agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-eyes,
   .agent-avatar-face[data-status="awaiting_approval"] .agent-avatar-body {
     transform: none;
   }
+  .agent-avatar-face[data-status="error"] .agent-avatar-eyes,
   .agent-avatar-face[data-status="error"] .agent-avatar-body {
+    transform-origin: 16px 16px;
     transform: rotate(-2deg);
   }
 }

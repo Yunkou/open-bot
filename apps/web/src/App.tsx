@@ -138,7 +138,7 @@ import { AgentAvatar } from "./components/AgentAvatar";
 import { FeedbackModal, type FeedbackTarget } from "./components/FeedbackModal";
 import { TrainPanel } from "./components/TrainPanel";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
-import { resolveAvatarColor } from "./components/avatarColor";
+import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
@@ -440,7 +440,7 @@ export default function App() {
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
-  // bot_presence per agent (idle|working|awaiting_approval|error), pushed by server.
+  // bot_presence per agent (idle|thinking|working|awaiting_approval|error), pushed by server.
   const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
   // bot_online overrides pushed by server (green dot); independent of presence face.
   // Agent-global (not reset on conversation switch). Seeded from ListAgents `online`,
@@ -921,7 +921,8 @@ export default function App() {
         if (data.type === "bot_presence") {
           const evt = data as unknown as BotPresenceEvent;
           if (evt.agent_id) {
-            const st = (evt.status || "idle") as BotPresenceStatus;
+            // Five-state whitelist; empty → idle, unknown → working (v2.1 product rule).
+            const st: BotPresenceStatus = normalizePresenceStatus(evt.status);
             setPresenceByAgent((prev) => ({ ...prev, [evt.agent_id]: st }));
           }
           return;

@@ -57,7 +57,7 @@ export type AgentInput = {
 export type AgentPatch = Partial<AgentInput>;
 
 /** bot_presence frame (conversation SSE + chat WS). */
-export type BotPresenceStatus = "idle" | "working" | "awaiting_approval" | "error";
+export type BotPresenceStatus = "idle" | "thinking" | "working" | "awaiting_approval" | "error";
 export type BotPresenceEvent = {
   type?: "bot_presence" | string;
   conversation_id: string;

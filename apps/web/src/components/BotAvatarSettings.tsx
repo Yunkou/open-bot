@@ -22,10 +22,11 @@ type Props = {
 };
 
 const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
-  { id: "idle", label: "idle" },
-  { id: "working", label: "working" },
-  { id: "awaiting_approval", label: "awaiting" },
-  { id: "error", label: "error" },
+  { id: "idle", label: "空闲" },
+  { id: "thinking", label: "思考" },
+  { id: "working", label: "执行" },
+  { id: "awaiting_approval", label: "待审批" },
+  { id: "error", label: "出错" },
 ];
 
 function machineHint(m: Machine): string {
@@ -125,7 +126,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                 </button>
               ))}
             </div>
-            <div className="muted small">预览四态（仅本地试看，不改真实 presence）</div>
+            <div className="muted small">预览五态（仅本地试看，不改真实 presence）</div>
           </div>
 
           <label className="bot-avatar-label">形状</label>

@@ -1,10 +1,11 @@
 import {
   hashString,
+  normalizePresenceStatus,
   resolveAvatarColor,
   resolveAvatarShape,
   type BotPresenceStatus,
 } from "./avatarColor";
-import { AVATAR_BODY_PATHS, AVATAR_EYE, AVATAR_SPIRAL_PATHS } from "./avatarShapes";
+import { AVATAR_BODY_PATHS, AVATAR_EYE } from "./avatarShapes";
 
 type Props = {
   id?: string;
@@ -20,16 +21,9 @@ type Props = {
   title?: string;
 };
 
-const PRESENCE: ReadonlySet<string> = new Set([
-  "idle",
-  "working",
-  "awaiting_approval",
-  "error",
-]);
-
+/** Unknown status → working (v2.1 product rule); empty → idle. */
 function normalizeStatus(status?: string | null): BotPresenceStatus {
-  const s = (status || "idle").trim();
-  return (PRESENCE.has(s) ? s : "idle") as BotPresenceStatus;
+  return normalizePresenceStatus(status);
 }
 
 export function AgentAvatar({
@@ -93,15 +87,13 @@ export function AgentAvatar({
               ry={AVATAR_EYE.right.ry}
               transform={`rotate(${AVATAR_EYE.right.rotate} ${AVATAR_EYE.right.cx} ${AVATAR_EYE.right.cy})`}
             />
-            <g
-              className="agent-avatar-spirals"
-              fill="none"
-              stroke="#fff"
-              strokeWidth="0.7"
-              strokeLinecap="round"
-            >
-              <path className="agent-avatar-spiral agent-avatar-spiral-l" d={AVATAR_SPIRAL_PATHS.left} />
-              <path className="agent-avatar-spiral agent-avatar-spiral-r" d={AVATAR_SPIRAL_PATHS.right} />
+            <g className="agent-avatar-spirals" fill="none" stroke="#fff" strokeWidth="1.4">
+              <circle className="agent-avatar-spiral agent-avatar-spiral-l" cx="12.2" cy="13.4" r="2.45" />
+              <circle className="agent-avatar-spiral agent-avatar-spiral-r" cx="18.6" cy="12.6" r="2.45" />
+            </g>
+            <g className="agent-avatar-spiral-dots" fill="#fff">
+              <circle cx="12.2" cy="13.4" r="0.75" />
+              <circle cx="18.6" cy="12.6" r="0.75" />
             </g>
           </g>
         </g>
