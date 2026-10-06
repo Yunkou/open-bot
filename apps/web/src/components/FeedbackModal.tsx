@@ -80,7 +80,7 @@ export function FeedbackModal({ target, onClose, onSubmit }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop feedback-backdrop" onClick={onClose}>
       <div className="modal feedback-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>给 {target.agentName} 的反馈</h3>

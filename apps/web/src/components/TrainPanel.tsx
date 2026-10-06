@@ -117,12 +117,12 @@ export function TrainPanel({ agent, open, onClose, reloadToken = 0 }: Props) {
         : "还没有已忽略的经验。";
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop train-backdrop" onClick={onClose}>
       <div className="modal train-panel-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>训练 · {agent.name}</h3>
-          <button type="button" className="ghost" onClick={onClose}>
-            关闭
+          <button type="button" className="ghost train-back-btn" onClick={onClose}>
+            返回
           </button>
         </div>
 

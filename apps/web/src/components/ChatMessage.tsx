@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
 import { NEGATIVE_REACTION_EMOJIS } from "../api";
 import { MessageReactions } from "./MessageReactions";
@@ -5,6 +6,9 @@ import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
 import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
 import { HandoffCard } from "./HandoffCard";
+import { MessageActionSheet } from "./MessageActionSheet";
+import { MessageHoverBar } from "./MessageHoverBar";
+import { useIsTouchUi } from "./useIsTouchUi";
 
 export type ChatMessageData = {
   id: string;
@@ -17,6 +21,8 @@ export type ChatMessageData = {
   created_at?: string;
   reply_to_id?: string;
   thread_root_id?: string;
+  /** Upstream run/request id when available (More → 复制请求 ID). */
+  agent_message_id?: string;
   reactions?: ReactionSummary[];
   handoff?: HandoffPayload;
 };
@@ -43,6 +49,8 @@ type Props = {
 };
 
 const NEGATIVE_REACTION_SET = new Set<string>(NEGATIVE_REACTION_EMOJIS as readonly string[]);
+const LONG_PRESS_MS = 400;
+const MOVE_CANCEL_PX = 10;
 
 export function formatMessageTime(iso?: string): string {
   if (!iso) return "";
@@ -111,6 +119,17 @@ export function ChatMessage({
   ) : null;
   const speakerId = message.agent_id || agentId;
   const canReply = Boolean(onReply) && (message.role === "user" || message.role === "assistant") && !message.streaming;
+  const touchUi = useIsTouchUi();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const timerRef = useRef<number | null>(null);
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+  const clearTimer = () => {
+    if (timerRef.current != null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+  useEffect(() => () => clearTimer(), []);
 
   if (message.role === "host_confirm") {
     const item = parseHostConfirm(message.content);
@@ -151,48 +170,11 @@ export function ChatMessage({
 
   const canFeedback =
     Boolean(onFeedback) && message.role === "assistant" && canReact(message);
-  const feedbackBtn = canFeedback ? (
-    <button
-      type="button"
-      className="msg-action-btn msg-action-feedback"
-      title="反馈（提交后生成待确认经验）"
-      onClick={() => onFeedback?.(message)}
-    >
-      👎 反馈
-    </button>
-  ) : null;
+  const isBot = message.role === "assistant";
 
-  const actions = canReply || canFeedback ? (
-    <div className="msg-actions">
-      {canReply ? (
-        <button type="button" className="msg-action-btn" title="回复" onClick={() => onReply?.(message)}>
-          回复
-        </button>
-      ) : null}
-      {feedbackBtn}
-      {replyCount > 0 && onOpenThread ? (
-        <button
-          type="button"
-          className="msg-action-btn msg-action-thread"
-          title="查看线程"
-          onClick={() => onOpenThread(message.thread_root_id || message.id)}
-        >
-          {replyCount} 条回复
-        </button>
-      ) : null}
-      {message.reply_to_id && onJumpToParent ? (
-        <button
-          type="button"
-          className="msg-action-btn"
-          title="跳到原消息"
-          onClick={() => onJumpToParent(message.reply_to_id!)}
-        >
-          原消息
-        </button>
-      ) : null}
-    </div>
-  ) : replyCount > 0 && onOpenThread ? (
-    <div className="msg-actions">
+  // Reply / feedback live in the hover bar (desktop) or long-press action sheet (narrow).
+  const threadBtn =
+    replyCount > 0 && onOpenThread ? (
       <button
         type="button"
         className="msg-action-btn msg-action-thread"
@@ -201,6 +183,22 @@ export function ChatMessage({
       >
         {replyCount} 条回复
       </button>
+    ) : null;
+  const parentBtn =
+    message.reply_to_id && onJumpToParent ? (
+      <button
+        type="button"
+        className="msg-action-btn"
+        title="跳到原消息"
+        onClick={() => onJumpToParent(message.reply_to_id!)}
+      >
+        原消息
+      </button>
+    ) : null;
+  const actions = threadBtn || parentBtn ? (
+    <div className="msg-actions">
+      {threadBtn}
+      {parentBtn}
     </div>
   ) : null;
 
@@ -217,47 +215,121 @@ export function ChatMessage({
   ) : null;
 
   const interactive = canReact(message) && Boolean(onToggleReaction);
+  const handleToggle = async (emoji: string) => {
+    const alreadyMine = Boolean(
+      message.reactions?.some((r) => r.emoji === emoji && r.me),
+    );
+    await onToggleReaction?.(message.id, emoji);
+    // Only follow up when *adding* 👎/❌ on a bot reply, never on removal.
+    if (!alreadyMine && isBot && NEGATIVE_REACTION_SET.has(emoji)) {
+      onNegativeReaction?.(message, emoji);
+    }
+  };
   const reactionsBar = (
     <MessageReactions
       reactions={message.reactions}
       interactive={interactive}
-      onToggle={
-        interactive
-          ? async (emoji) => {
-              const alreadyMine = Boolean(
-                message.reactions?.some((r) => r.emoji === emoji && r.me),
-              );
-              await onToggleReaction?.(message.id, emoji);
-              // Only follow up when *adding* 👎/❌ on a bot reply, never on removal.
-              if (!alreadyMine && message.role === "assistant" && NEGATIVE_REACTION_SET.has(emoji)) {
-                onNegativeReaction?.(message, emoji);
-              }
-            }
-          : undefined
-      }
+      onToggle={interactive ? (emoji) => handleToggle(emoji) : undefined}
     />
   );
 
+  const hasActions = interactive || canReply || canFeedback;
+  const requestId = message.agent_message_id || message.id;
+  const replyFn = canReply ? () => onReply?.(message) : undefined;
+  const feedbackFn = canFeedback ? () => onFeedback?.(message) : undefined;
+
+  const onPointerDown = (e: ReactPointerEvent) => {
+    if (!hasActions || !touchUi) return;
+    if (e.pointerType === "mouse") return;
+    startRef.current = { x: e.clientX, y: e.clientY };
+    clearTimer();
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      const sel = typeof window.getSelection === "function" ? window.getSelection() : null;
+      if (sel && sel.toString().length > 0) return;
+      setSheetOpen(true);
+      try {
+        navigator.vibrate?.(10);
+      } catch {
+        /* ignore */
+      }
+    }, LONG_PRESS_MS);
+  };
+  const onPointerMove = (e: ReactPointerEvent) => {
+    if (!startRef.current || timerRef.current == null) return;
+    const dx = Math.abs(e.clientX - startRef.current.x);
+    const dy = Math.abs(e.clientY - startRef.current.y);
+    if (dx + dy > MOVE_CANCEL_PX) clearTimer();
+  };
+  const onPointerEnd = () => {
+    clearTimer();
+    startRef.current = null;
+  };
+  const touchHandlers =
+    touchUi && hasActions
+      ? {
+          onPointerDown,
+          onPointerMove,
+          onPointerUp: onPointerEnd,
+          onPointerCancel: onPointerEnd,
+          onContextMenu: (e: ReactMouseEvent) => {
+            if (sheetOpen) e.preventDefault();
+          },
+        }
+      : {};
+
+  // Desktop / wide: Grok-style side hover bar. Narrow (<768): bottom action sheet only.
+  const desktopBar =
+    hasActions && !touchUi ? (
+      <MessageHoverBar
+        isBot={isBot}
+        messageId={message.id}
+        content={visible}
+        requestId={requestId}
+        onToggleReaction={interactive ? (emoji) => handleToggle(emoji) : undefined}
+        onReply={replyFn}
+        onFeedback={feedbackFn}
+      />
+    ) : null;
+  const sheet =
+    hasActions && touchUi ? (
+      <MessageActionSheet
+        open={sheetOpen}
+        isBot={isBot}
+        messageId={message.id}
+        content={visible}
+        requestId={requestId}
+        onClose={() => setSheetOpen(false)}
+        onToggleReaction={interactive ? (emoji) => handleToggle(emoji) : undefined}
+        onReply={replyFn}
+        onFeedback={feedbackFn}
+      />
+    ) : null;
+
   if (isUser) {
     return (
-      <div className={`chat-row chat-row-user${dense ? " chat-row-dense" : ""}`} data-msg-id={message.id}>
-        <div className="bubble bubble-user">
-          {quoteEl}
-          {message.attachments && message.attachments.length > 0 ? (
-            <div className="msg-attach-chips">
-              {message.attachments.map((a) => (
-                <span key={a.id || a.name} className="msg-attach-chip">
-                  {a.name}
-                  {a.size ? <span className="msg-attach-size">{formatSize(a.size)}</span> : null}
-                </span>
-              ))}
-            </div>
-          ) : null}
-          {visible ? <div className="bubble-text">{visible}</div> : null}
+      <div className={`chat-row chat-row-user${dense ? " chat-row-dense" : ""}`} data-msg-id={message.id} {...touchHandlers}>
+        <div className="bubble-stack bubble-stack-user">
+          <div className="bubble bubble-user">
+            {quoteEl}
+            {message.attachments && message.attachments.length > 0 ? (
+              <div className="msg-attach-chips">
+                {message.attachments.map((a) => (
+                  <span key={a.id || a.name} className="msg-attach-chip">
+                    {a.name}
+                    {a.size ? <span className="msg-attach-size">{formatSize(a.size)}</span> : null}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            {visible ? <div className="bubble-text">{visible}</div> : null}
+          </div>
+          {desktopBar}
         </div>
         {reactionsBar}
         {actions}
         {timeEl}
+        {sheet}
       </div>
     );
   }
@@ -266,19 +338,24 @@ export function ChatMessage({
     <div
       className={`chat-row chat-row-assistant${isSummary ? " chat-row-summary" : ""}${dense ? " chat-row-dense" : ""}`}
       data-msg-id={message.id}
+      {...touchHandlers}
     >
-      <div className="bubble bubble-assistant">
-        {quoteEl}
-        {isSummary ? <div className="msg-role">摘要</div> : null}
-        <ResultOrientedMessage
-          content={visible}
-          streaming={message.streaming}
-          agentId={speakerId}
-        />
+      <div className="bubble-stack bubble-stack-assistant">
+        <div className="bubble bubble-assistant">
+          {quoteEl}
+          {isSummary ? <div className="msg-role">摘要</div> : null}
+          <ResultOrientedMessage
+            content={visible}
+            streaming={message.streaming}
+            agentId={speakerId}
+          />
+        </div>
+        {desktopBar}
       </div>
       {reactionsBar}
       {actions}
       {timeEl}
+      {sheet}
     </div>
   );
 }
