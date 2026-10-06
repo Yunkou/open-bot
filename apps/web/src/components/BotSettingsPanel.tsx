@@ -18,9 +18,11 @@ type Props = {
   agent: Agent | null;
   busy?: boolean;
   onSaved?: (agent: Agent) => void;
+  /** Open settings「技能」editor for this skill (name link). */
+  onOpenSkill?: (name: string) => void;
 };
 
-export function BotSettingsPanel({ agent, busy, onSaved }: Props) {
+export function BotSettingsPanel({ agent, busy, onSaved, onOpenSkill }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -58,7 +60,7 @@ export function BotSettingsPanel({ agent, busy, onSaved }: Props) {
   if (!agent) {
     return (
       <SettingsPage>
-        <SettingsHint>从左侧选择一位助手后，可在此编辑岗位描述、电脑模式与本 Bot 启用的 Skills。</SettingsHint>
+        <SettingsHint>从左侧选择一位助手后，可在此编辑岗位描述、电脑模式与本 Bot 启用的技能。</SettingsHint>
         <SettingsCard>
           <SettingsEmpty>未选择 Bot</SettingsEmpty>
         </SettingsCard>
@@ -100,11 +102,14 @@ export function BotSettingsPanel({ agent, busy, onSaved }: Props) {
   };
 
   const locked = Boolean(busy || saving);
+  // Account-level ∩ Bot: only account-enabled skills are selectable here (older API: field absent → show).
+  const visibleSkills = skills.filter((s) => s.account_enabled !== false);
+  const hiddenCount = skills.length - visibleSkills.length;
 
   return (
     <SettingsPage>
       <SettingsHint>
-        岗位描述会写入 Bot 资料；Skills 为本 Bot 允许列表（与账号级启用取交集）。电脑模式：team
+        岗位描述会写入 Bot 资料；「启用的技能」为本 Bot 允许列表（与「技能」页账号级启用取交集，技能内容在「技能」页编辑）。电脑模式：team
         共享账户工作区，private 为该 Bot 独立目录。
       </SettingsHint>
       <SettingsSection title={`Bot · ${agent.name}`}>
@@ -153,37 +158,44 @@ export function BotSettingsPanel({ agent, busy, onSaved }: Props) {
           </form>
         </SettingsCard>
       </SettingsSection>
-      <SettingsSection title="本 Bot 启用的 Skills">
+      <SettingsSection title="启用的技能">
         <SettingsCard>
           <div className="llm-list">
-            {skills.length === 0 ? (
-              <SettingsEmpty>暂无技能（或尚未加载）。请先在「Skills」页安装/启用账号级技能。</SettingsEmpty>
+            {visibleSkills.length === 0 ? (
+              <SettingsEmpty>暂无可用技能（或尚未加载）。请先在「技能」页启用账号级技能。</SettingsEmpty>
             ) : (
-              skills.map((s) => (
-                <div key={s.name} className="llm-item">
-                  <div>
+              visibleSkills.map((s) => (
+                <div key={s.name} className="llm-item bot-skill-row">
+                  <label className="check skill-toggle">
+                    <input
+                      type="checkbox"
+                      checked={s.enabled}
+                      disabled={locked}
+                      aria-label={`本 Bot 启用 ${s.name}`}
+                      onChange={(e) => void toggleSkill(s, e.target.checked)}
+                    />
+                  </label>
+                  <div className="bot-skill-main">
                     <div className="agent-name">
-                      {s.name}
-                      {s.custom ? <span className="pill">自定义</span> : null}
+                      {onOpenSkill ? (
+                        <button type="button" className="skills-name-link" onClick={() => onOpenSkill(s.name)}>
+                          {s.name}
+                        </button>
+                      ) : (
+                        s.name
+                      )}
+                      <span className="bot-skill-source">{s.custom ? "自建" : "内置"}</span>
                     </div>
                     <div className="agent-desc">{s.description}</div>
-                  </div>
-                  <div className="llm-actions">
-                    <label className="check skill-toggle">
-                      <input
-                        type="checkbox"
-                        checked={s.enabled}
-                        disabled={locked}
-                        onChange={(e) => void toggleSkill(s, e.target.checked)}
-                      />
-                      {s.enabled ? "本 Bot 启用" : "本 Bot 关闭"}
-                    </label>
                   </div>
                 </div>
               ))
             )}
           </div>
         </SettingsCard>
+        {hiddenCount > 0 ? (
+          <div className="settings-status">另有 {hiddenCount} 个技能已在「技能」页账号级关闭，不可勾选。</div>
+        ) : null}
         {msg ? <div className="settings-status">{msg}</div> : null}
       </SettingsSection>
     </SettingsPage>

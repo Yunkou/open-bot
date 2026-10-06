@@ -363,6 +363,8 @@ type AgentSkill struct {
 	Description string `json:"description"`
 	Enabled     bool   `json:"enabled"`
 	Custom      bool   `json:"custom"`
+	// AccountEnabled is the account-level toggle (settings「技能」); Enabled is already the intersection.
+	AccountEnabled bool `json:"account_enabled"`
 }
 
 func (d *DB) ListAgentSkills(userID, agentID string) ([]AgentSkill, error) {
@@ -406,10 +408,11 @@ func (d *DB) ListAgentSkills(userID, agentID string) ([]AgentSkill, error) {
 			}
 		}
 		out = append(out, AgentSkill{
-			Name:        u.Name,
-			Description: u.Description,
-			Enabled:     en,
-			Custom:      u.Custom,
+			Name:           u.Name,
+			Description:    u.Description,
+			Enabled:        en,
+			Custom:         u.Custom,
+			AccountEnabled: u.Enabled,
 		})
 	}
 	return out, nil
@@ -462,10 +465,11 @@ func (d *DB) SetAgentSkillEnabled(userID, agentID, name string, enabled bool) (*
 		return nil, err
 	}
 	return &AgentSkill{
-		Name:        name,
-		Description: meta.Description,
-		Enabled:     enabled && meta.Enabled,
-		Custom:      meta.Custom,
+		Name:           name,
+		Description:    meta.Description,
+		Enabled:        enabled && meta.Enabled,
+		Custom:         meta.Custom,
+		AccountEnabled: meta.Enabled,
 	}, nil
 }
 
@@ -757,9 +761,15 @@ func ValidSkillRelPath(p string) bool {
 	return true
 }
 
+// SkillFolderKeepFile marks an empty folder inside a skill package (settings editor).
+const SkillFolderKeepFile = ".keep"
+
 func skillFileSkip(name string) bool {
 	lower := strings.ToLower(name)
 	switch {
+	case name == SkillFolderKeepFile:
+		// Placeholder that keeps an otherwise empty folder in the editor tree.
+		return false
 	case strings.HasPrefix(name, "."):
 		return true
 	case strings.HasSuffix(lower, ".png"), strings.HasSuffix(lower, ".jpg"),
