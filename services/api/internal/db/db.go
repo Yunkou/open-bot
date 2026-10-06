@@ -513,6 +513,10 @@ CREATE INDEX IF NOT EXISTS idx_bot_lessons_agent ON bot_lessons(user_id, agent_i
 	if err := d.migrateClearAssistantAutoReplyTo(); err != nil {
 		return err
 	}
+	// One-time: clear shallow auto thread_root from old ResolveThreadRoot-on-reply_to.
+	if err := d.migrateClearAutoThreadRoot(); err != nil {
+		return err
+	}
 	return d.migrateVector()
 }
 

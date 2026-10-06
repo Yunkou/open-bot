@@ -1190,10 +1190,15 @@ type sendBody struct {
 	Attachments     []AttachmentRef `json:"attachments"`
 	AgentIDs        []string        `json:"agent_ids"` // group @targets; empty = first member / conv agent
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
-	// ReplyToID is set only when the user explicitly clicks「回复」(quote).
+	// ReplyToID is set only when the user explicitly clicks「回复」(quote / mainline).
 	// Normal sends leave it empty. Bot assistant saves must never copy this onto reply_to_id;
 	// turn linkage uses request_id (runtime run_id) instead.
+	// reply_to_id alone must NOT invent thread_root_id (Grok-style mainline quote).
 	ReplyToID string `json:"reply_to_id"`
+	// ThreadRootID is set only when the client posts inside an existing sidebar thread
+	// (opened via「N 条回复」etc.). Empty for mainline sends including explicit「回复」.
+	// Never derived from ReplyToID / ResolveThreadRoot on this path.
+	ThreadRootID string `json:"thread_root_id"`
 	// PersistOnly stores the user message and returns JSON without running an agent.
 	PersistOnly bool `json:"persist_only"`
 	// HandoffContext is injected into runtime history (not stored) when @-handing off from another bot thread.
@@ -1251,7 +1256,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var replyParent *db.Message
 	replyQuote := "" // parent text for runtime reply_to_content (model-only)
 	replyToID := strings.TrimSpace(body.ReplyToID)
-	threadRootID := ""
+	// Product: thread membership is explicit only. Mainline「回复」(reply_to_id alone)
+	// stays on the main timeline — do NOT call ResolveThreadRoot(parent).
+	threadRootID := resolvePersistedThreadRootID(body.ThreadRootID, replyToID)
 	if replyToID != "" {
 		parent, perr := s.db.GetMessage(uid, conv.ID, replyToID)
 		if perr != nil {
@@ -1270,8 +1277,23 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		replyParent = parent
-		threadRootID = db.ResolveThreadRoot(parent)
 		replyQuote, _ = resolveReplyQuote([]db.Message{{ID: parent.ID, Content: stripThinkTags(parent.Content)}}, parent.ID)
+	}
+	if threadRootID != "" {
+		// Sidebar-thread post: root must already exist in this conversation.
+		root, rerr := s.db.GetMessage(uid, conv.ID, threadRootID)
+		if rerr != nil {
+			if errors.Is(rerr, db.ErrNotFound) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread_root_id not in conversation"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": rerr.Error()})
+			return
+		}
+		if root.ConversationID != conv.ID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread_root_id not in conversation"})
+			return
+		}
 	}
 
 	userMsg, err := s.db.AddMessageWithOpts(conv.ID, "user", storedContent, db.AddMessageOpts{

@@ -269,6 +269,9 @@ func (d *DB) GetMessage(userID, conversationID, messageID string) (*Message, err
 
 // ResolveThreadRoot returns the thread_root_id for a new reply to parent.
 // If parent is already in a thread, inherit; otherwise parent becomes the root.
+// Deprecated for chat send: handleSendMessage no longer auto-assigns thread_root
+// from reply_to. Prefer explicit client thread_root_id for sidebar-thread posts.
+// Kept for any remaining call sites / tools that still need the old Slack semantics.
 func ResolveThreadRoot(parent *Message) string {
 	if parent == nil {
 		return ""
