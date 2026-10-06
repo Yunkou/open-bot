@@ -1074,8 +1074,27 @@ export async function decideHostConfirm(
   return (await res.json()) as Message;
 }
 
-/** Fold a server message into the local list. Same id updates in place; a local bubble with the same text takes the server id. */
-export function mergeIncomingMessage<T extends Message & { streaming?: boolean }>(
+/** Content the client / server uses to mark an interrupted Bot turn (「（已停止）」 and variants). */
+export const STOP_MARKER_TEXT = "（已停止）";
+export function isStopMarkerContent(content: string | undefined | null): boolean {
+  const t = (content ?? "").trim();
+  return /^[（(]?\s*已停止\s*[）)]?$/u.test(t);
+}
+
+type MergeableMessage = Message & { streaming?: boolean; stopped?: boolean };
+
+/**
+ * Fold a server message into the local list.
+ * - Same id updates in place.
+ * - A server stop marker (「已停止」) adopts the earliest still-local sealed stop bubble
+ *   (the one stopCurrentRun stamped), never the next turn's empty streaming placeholder.
+ * - Otherwise a local bubble with the same / prefix text takes the server id.
+ * - Empty *streaming* assistant placeholders never fuzzy-match incoming messages: they belong to
+ *   the run that is streaming into them, and only that run's `message_saved` (stampSavedMessage)
+ *   gives them a server id. Letting them absorb arbitrary messages made an interrupted turn's
+ *   stop marker land on the next turn's placeholder → two 「已停止」 in the UI, one in the DB.
+ */
+export function mergeIncomingMessage<T extends MergeableMessage>(
   prev: T[],
   msg: Message,
 ): T[] {
@@ -1083,26 +1102,54 @@ export function mergeIncomingMessage<T extends Message & { streaming?: boolean }
   if (prev.some((m) => m.id === msg.id)) {
     return prev.map((m) => (m.id === msg.id ? ({ ...m, ...msg, streaming: false } as T) : m));
   }
-  if (msg.role === "host_confirm") {
+  // Insert point that keeps trailing streaming assistant placeholders last.
+  const beforeTrailingStreaming = () => {
     let at = prev.length;
     while (at > 0 && prev[at - 1].streaming && prev[at - 1].role === "assistant") at -= 1;
+    return at;
+  };
+  if (msg.role === "host_confirm") {
+    const at = beforeTrailingStreaming();
     const next = prev.slice();
     next.splice(at, 0, { ...msg, streaming: false } as T);
     return next;
   }
+  const adopt = (i: number) =>
+    prev.map((item, j) =>
+      j === i ? ({ ...item, ...msg, streaming: false } as T) : item,
+    );
+  const incomingStop = msg.role === "assistant" && isStopMarkerContent(msg.content);
+  if (incomingStop) {
+    // Earliest first: with several interrupted turns, server stop rows arrive in order.
+    const i = prev.findIndex(
+      (m) =>
+        m.role === "assistant" &&
+        !m.streaming &&
+        m.id.startsWith("local-") &&
+        (m.stopped || isStopMarkerContent(m.content)),
+    );
+    if (i >= 0) return adopt(i);
+  }
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
     if (m.role !== msg.role) continue;
+    // Rule: an empty streaming placeholder is never a fuzzy-match target; look past it.
+    if (m.streaming && m.role === "assistant" && !(m.content ?? "").trim()) continue;
     const local = Boolean(m.streaming) || m.id.startsWith("local-");
     if (!local) break;
     const same =
       m.content === msg.content ||
-      m.content === "" ||
+      (m.content === "" && !m.streaming) ||
       (m.content !== "" && msg.content.startsWith(m.content));
     if (!same) break;
-    return prev.map((item, j) =>
-      j === i ? ({ ...item, ...msg, streaming: false } as T) : item,
-    );
+    return adopt(i);
+  }
+  if (incomingStop) {
+    // No local stop bubble (e.g. stopped from another tab): keep it above the live placeholder.
+    const at = beforeTrailingStreaming();
+    const next = prev.slice();
+    next.splice(at, 0, { ...msg, streaming: false } as T);
+    return next;
   }
   return [...prev, { ...msg, streaming: false } as T];
 }

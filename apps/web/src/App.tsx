@@ -58,6 +58,7 @@ import {
   cancelConversationRun,
   chatEventsWebSocketUrl,
   mergeIncomingMessage,
+  STOP_MARKER_TEXT,
   createHostConfirm,
   decideHostConfirm,
   uploadConversationAttachment,
@@ -155,7 +156,7 @@ import {
   type OnboardingOption,
 } from "./components/BotOnboardingCard";
 
-type UiMessage = Message & { streaming?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
+type UiMessage = Message & { streaming?: boolean; /** Local stop stamp set when an interrupted empty bubble is sealed as 「（已停止）」. */ stopped?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
 type SettingsTab =
   | "general"
   | "bot"
@@ -1515,7 +1516,26 @@ export default function App() {
     const localId = run?.assistantId;
     const rid = (requestId || "").trim();
     patchConvMessages(convId, (prev) => {
-      if (prev.some((m) => m.id === messageId)) {
+      const existing = prev.find((m) => m.id === messageId);
+      if (existing) {
+        const local = localId && localId !== messageId ? prev.find((m) => m.id === localId) : undefined;
+        if (local && local.role === "assistant" && existing.role === "assistant") {
+          // The saved row already arrived via WS / pullOpen as its own bubble (placeholders never
+          // fuzzy-absorb). Fold: the run's placeholder takes the server id, drop the duplicate.
+          return prev
+            .filter((m) => m.id !== messageId)
+            .map((m) =>
+              m.id === localId
+                ? {
+                    ...existing,
+                    ...m,
+                    id: messageId,
+                    content: m.content || existing.content,
+                    ...(rid || existing.request_id ? { request_id: rid || existing.request_id } : {}),
+                  }
+                : m,
+            );
+        }
         if (!rid) return prev;
         return prev.map((m) => (m.id === messageId && !m.request_id ? { ...m, request_id: rid } : m));
       }
@@ -1587,13 +1607,13 @@ export default function App() {
     patchConvMessages(convId, (prev) =>
       prev.map((m) => {
         if (!m.streaming) return m;
-        const content =
-          m.content && m.content.trim()
-            ? m.content
-            : markStopped
-              ? "（已停止）"
-              : m.content;
-        return { ...m, streaming: false, content };
+        const empty = !(m.content && m.content.trim());
+        if (empty && markStopped) {
+          // Local stop stamp: the server's single stop row adopts THIS bubble (mergeIncomingMessage),
+          // not the next turn's empty streaming placeholder.
+          return { ...m, streaming: false, content: STOP_MARKER_TEXT, stopped: true };
+        }
+        return { ...m, streaming: false };
       }),
     );
     const run = runsRef.current.get(convId);
