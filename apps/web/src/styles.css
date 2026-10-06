@@ -4003,3 +4003,377 @@ button.ghost {
   background: #e5e7eb;
   margin: 4px 2px;
 }
+
+/* ---- Diagram card (Mermaid, design bot-diagram-card-design-v1) ---- */
+.diagram-card {
+  --diagram-bg: #f8fafc;
+  --diagram-border: var(--border);
+  --diagram-pill-bg: rgba(15, 23, 42, 0.06);
+  --diagram-hover: rgba(15, 23, 42, 0.06);
+  --diagram-muted: var(--muted);
+  --diagram-hit: 32px;
+  --diagram-max-h: 360px;
+  position: relative;
+  margin: 8px 0;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--diagram-border);
+  border-radius: 12px;
+  background: var(--diagram-bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.diagram-card + .diagram-card {
+  margin-top: 12px;
+}
+[data-theme="dark"] .diagram-card {
+  --diagram-bg: #1f1f1f;
+  --diagram-border: rgba(255, 255, 255, 0.1);
+  --diagram-pill-bg: rgba(255, 255, 255, 0.08);
+  --diagram-hover: rgba(255, 255, 255, 0.08);
+  --diagram-muted: #a1a1aa;
+  color: #e5e5e5;
+}
+
+/* Bubbles holding a diagram use their full max width so graphs stay readable. */
+.bubble-stack-assistant:has(.diagram-card) {
+  width: 100%;
+}
+.bubble-assistant:has(.diagram-card) {
+  width: 100%;
+}
+
+.diagram-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--diagram-hit);
+  padding: 0 2px 0 8px;
+  border-bottom: 1px solid var(--diagram-border);
+  border-radius: 11px 11px 0 0;
+}
+.diagram-pill {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--diagram-pill-bg);
+  color: var(--diagram-muted);
+  font-size: 11px;
+  line-height: 18px;
+  font-weight: 500;
+  user-select: none;
+}
+.diagram-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+.diagram-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: var(--diagram-hit);
+  min-width: var(--diagram-hit);
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--diagram-muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.diagram-btn-text {
+  padding: 0 8px;
+}
+.diagram-btn-icon svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.diagram-btn-download svg + svg {
+  width: 8px;
+  height: 8px;
+}
+.diagram-btn:hover:not(:disabled),
+.diagram-btn:focus-visible {
+  background: var(--diagram-hover);
+  color: var(--text);
+  outline: none;
+}
+[data-theme="dark"] .diagram-btn:hover:not(:disabled),
+[data-theme="dark"] .diagram-btn:focus-visible {
+  color: #f5f5f5;
+}
+.diagram-btn[aria-pressed="true"] {
+  color: var(--text);
+}
+.diagram-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.diagram-menu-wrap {
+  position: relative;
+}
+.diagram-menu {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  z-index: 30;
+  min-width: 96px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+}
+[data-theme="dark"] .diagram-menu {
+  background: #262626;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.diagram-menu-item {
+  display: block;
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.diagram-menu-item:hover,
+.diagram-menu-item:focus-visible {
+  background: var(--diagram-hover, rgba(15, 23, 42, 0.06));
+  outline: none;
+}
+
+.diagram-zoom-badge {
+  margin: 0;
+  padding: 1px 6px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--diagram-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.diagram-zoom-badge:hover {
+  background: var(--diagram-hover);
+}
+
+.diagram-body {
+  max-height: var(--diagram-max-h);
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 0 0 11px 11px;
+  scrollbar-width: thin;
+}
+.diagram-body-render {
+  cursor: default;
+}
+.diagram-canvas {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  box-sizing: border-box;
+  width: max-content; /* 图宽 max(100%, 内容) → wide graphs scroll horizontally */
+  min-width: 100%;
+  padding: 12px;
+}
+.diagram-canvas svg {
+  display: block;
+  max-width: none;
+  flex-shrink: 0;
+}
+.diagram-canvas.is-enter {
+  animation: diagram-enter 180ms ease-out;
+}
+@keyframes diagram-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.diagram-source {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: "SF Mono", "Menlo", "Consolas", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 2;
+  color: inherit;
+  background: transparent;
+}
+
+.diagram-body-pending {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.diagram-pending-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 0;
+  color: var(--diagram-muted);
+  font-size: 12px;
+}
+.diagram-pending-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: diagram-pulse 1.2s ease-in-out infinite;
+}
+@keyframes diagram-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.diagram-source-tail {
+  max-height: 160px;
+  overflow: auto;
+  color: var(--diagram-muted);
+  scrollbar-width: thin;
+}
+
+.diagram-warning {
+  margin: 10px 12px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(234, 179, 8, 0.14);
+  color: #a16207;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+[data-theme="dark"] .diagram-warning {
+  background: rgba(234, 179, 8, 0.16);
+  color: #facc15;
+}
+
+/* Fullscreen modal: desktop 90vw × 85vh, mobile full screen */
+.diagram-fs-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 23, 42, 0.55);
+}
+.diagram-fs {
+  --diagram-bg: #f8fafc;
+  --diagram-border: var(--border);
+  --diagram-pill-bg: rgba(15, 23, 42, 0.06);
+  --diagram-hover: rgba(15, 23, 42, 0.06);
+  --diagram-muted: var(--muted);
+  --diagram-hit: 36px;
+  display: flex;
+  flex-direction: column;
+  width: 90vw;
+  height: 85vh;
+  border: 1px solid var(--diagram-border);
+  border-radius: 12px;
+  background: var(--diagram-bg);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+[data-theme="dark"] .diagram-fs {
+  --diagram-bg: #1f1f1f;
+  --diagram-border: rgba(255, 255, 255, 0.1);
+  --diagram-pill-bg: rgba(255, 255, 255, 0.08);
+  --diagram-hover: rgba(255, 255, 255, 0.08);
+  --diagram-muted: #a1a1aa;
+  color: #e5e5e5;
+}
+.diagram-fs-toolbar {
+  flex-shrink: 0;
+  border-radius: 0;
+  padding: 0 4px 0 12px;
+}
+.diagram-zoom {
+  display: flex;
+  align-items: center;
+  margin-left: 8px;
+}
+.diagram-zoom-value {
+  min-width: 52px;
+  font-variant-numeric: tabular-nums;
+}
+.diagram-fs-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y; /* pinch handled in JS */
+}
+.diagram-fs-body .diagram-canvas {
+  min-height: 100%;
+  align-items: center;
+  padding: 16px;
+}
+.diagram-fs-body.is-source .diagram-source {
+  padding: 14px 16px;
+}
+
+@media (max-width: 767px) {
+  .diagram-card,
+  .diagram-fs {
+    --diagram-hit: 40px;
+  }
+  .diagram-card {
+    --diagram-max-h: 240px;
+  }
+  .diagram-source-tail {
+    max-height: 120px;
+  }
+  .diagram-menu-item {
+    height: 40px;
+  }
+  .diagram-fs {
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    border: none;
+    border-radius: 0;
+  }
+  .diagram-fs-toolbar {
+    padding: 0 2px 0 8px;
+    padding-top: env(safe-area-inset-top, 0px);
+    height: calc(var(--diagram-hit) + env(safe-area-inset-top, 0px));
+  }
+  .diagram-zoom {
+    margin-left: 2px;
+  }
+  .diagram-zoom-step,
+  .diagram-zoom-fit {
+    display: none;
+  }
+  .diagram-btn-text {
+    padding: 0 6px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diagram-canvas.is-enter,
+  .diagram-pending-dot {
+    animation: none;
+  }
+}

@@ -1,7 +1,17 @@
-import { isValidElement, useCallback, useState, type ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import {
+  createContext,
+  isValidElement,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { downloadSandboxFile, downloadTextFile, readSandboxFile } from "../api";
+import { isMermaidLang, isMermaidPending, type SourcePosition } from "../lib/mermaidFence";
+import { DiagramCard } from "./DiagramCard";
 import {
   HtmlPreviewModal,
   friendlyFileError,
@@ -99,6 +109,23 @@ function CodeBlock({
   );
 }
 
+/**
+ * Current markdown text + streaming flag for block renderers. Passed by context (not closure) so
+ * the `components` map stays referentially stable across stream ticks — otherwise every token
+ * would give react-markdown new component types and remount every block (diagram flicker).
+ */
+const MdRenderContext = createContext<{ markdown: string; streaming: boolean }>({
+  markdown: "",
+  streaming: false,
+});
+
+/** ```mermaid fence → DiagramCard. Pending (no renderer) until the fence closes or the stream ends. */
+function MermaidBlock({ code, position }: { code: string; position: SourcePosition }) {
+  const { markdown, streaming } = useContext(MdRenderContext);
+  const pending = isMermaidPending(markdown, position, streaming);
+  return <DiagramCard kind="mermaid" source={code} pending={pending} />;
+}
+
 export function MarkdownMessage({ content, streaming, agentId }: Props) {
   const text = content || (streaming ? "…" : "");
   const [preview, setPreview] = useState<PreviewState>(PREVIEW_CLOSED);
@@ -185,60 +212,72 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
     }
   }, [agentId]);
 
+  const components = useMemo<Components>(
+    () => ({
+      a: ({ href, children }) => {
+        const sandboxPath = parseSandboxHref(href);
+        if (sandboxPath) {
+          const labelText = extractText(children).trim();
+          const friendly =
+            !labelText ||
+            /(?:^sandbox:)|\/workspace\//i.test(labelText) ||
+            labelText === sandboxPath
+              ? previewTitleFromPath(sandboxPath)
+              : children;
+          return (
+            <a
+              href={href}
+              className="md-sandbox-link"
+              onClick={(e) => {
+                e.preventDefault();
+                void openSandboxLink(sandboxPath);
+              }}
+            >
+              {friendly}
+            </a>
+          );
+        }
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener">
+            {children}
+          </a>
+        );
+      },
+      // Flatten <pre> so our code handler owns the block chrome.
+      pre: ({ children }) => <>{children}</>,
+      code: ({ className, children, node }) => {
+        const raw = extractText(children);
+        const isBlock =
+          Boolean(className && /language-/.test(className)) || raw.includes("\n");
+        if (!isBlock) {
+          return <code className="md-inline-code">{children}</code>;
+        }
+        const lang = /language-([\w-]+)/.exec(className || "")?.[1];
+        if (isMermaidLang(lang)) {
+          return <MermaidBlock code={raw.replace(/\n$/, "")} position={node?.position} />;
+        }
+        return (
+          <CodeBlock className={className} onPreview={openHtmlPreview}>
+            {children}
+          </CodeBlock>
+        );
+      },
+    }),
+    [openHtmlPreview, openSandboxLink],
+  );
+  const renderCtx = useMemo(() => ({ markdown: text, streaming: Boolean(streaming) }), [text, streaming]);
+
   return (
     <div className={`md-body${streaming ? " streaming" : ""}`}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        urlTransform={urlTransform}
-        components={{
-          a: ({ href, children }) => {
-            const sandboxPath = parseSandboxHref(href);
-            if (sandboxPath) {
-              const labelText = extractText(children).trim();
-              const friendly =
-                !labelText ||
-                /(?:^sandbox:)|\/workspace\//i.test(labelText) ||
-                labelText === sandboxPath
-                  ? previewTitleFromPath(sandboxPath)
-                  : children;
-              return (
-                <a
-                  href={href}
-                  className="md-sandbox-link"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void openSandboxLink(sandboxPath);
-                  }}
-                >
-                  {friendly}
-                </a>
-              );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer noopener">
-                {children}
-              </a>
-            );
-          },
-          // Flatten <pre> so our code handler owns the block chrome.
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children }) => {
-            const raw = extractText(children);
-            const isBlock =
-              Boolean(className && /language-/.test(className)) || raw.includes("\n");
-            if (!isBlock) {
-              return <code className="md-inline-code">{children}</code>;
-            }
-            return (
-              <CodeBlock className={className} onPreview={openHtmlPreview}>
-                {children}
-              </CodeBlock>
-            );
-          },
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+      <MdRenderContext.Provider value={renderCtx}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          urlTransform={urlTransform}
+          components={components}
+        >
+          {text}
+        </ReactMarkdown>
+      </MdRenderContext.Provider>
       {streaming ? <span className="caret" /> : null}
       <HtmlPreviewModal
         open={preview.open}
