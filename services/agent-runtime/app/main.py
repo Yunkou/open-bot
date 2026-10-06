@@ -50,6 +50,7 @@ from .client_env import ClientContext
 from .skills import SkillRegistry, registry_for_user
 from . import langfuse_trace as lf
 from .presence import PresencePublisher
+from .reply_quote import apply_reply_quote
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
@@ -96,6 +97,9 @@ class RunRequest(BaseModel):
     max_tool_rounds: int | None = None
     # Slack/Grok-style thread (Go injects reply context into content/messages).
     reply_to_id: str | None = None
+    # Explicit user「回复」parent text (API resolves, same-conversation only).
+    # Injected into the model turn only; never persisted.
+    reply_to_content: str | None = None
     thread_root_id: str | None = None
     # Augmented recall query: replied snippet + recent thread turns + user text.
     reply_context: str | None = None
@@ -431,6 +435,14 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             if m["role"] == "user":
                 user_text = m["content"]
                 break
+    # Explicit reply: inject quoted parent text into the current user turn
+    # (content + last user message) before compaction / prompt build.
+    # Memory recall / trace input keep the raw user_text above.
+    if body.reply_to_content and body.reply_to_content.strip():
+        quoted_content, history = apply_reply_quote(
+            body.content, history, body.reply_to_content
+        )
+        body = body.model_copy(update={"content": quoted_content})
 
     # Throw-safe enter/exit: helpers yield once, but avoid relying on `with`
     # across async generator yields (GeneratorExit + cleanup raise).

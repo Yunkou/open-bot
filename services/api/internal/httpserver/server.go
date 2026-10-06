@@ -1252,20 +1252,29 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var replyParent *db.Message
+	replyQuote := "" // parent text for runtime reply_to_content (model-only)
 	replyToID := strings.TrimSpace(body.ReplyToID)
 	threadRootID := ""
 	if replyToID != "" {
 		parent, perr := s.db.GetMessage(uid, conv.ID, replyToID)
 		if perr != nil {
 			if errors.Is(perr, db.ErrNotFound) {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reply_to_id not found"})
+				// Same-conversation guard: GetMessage is scoped to conv.ID, so a
+				// parent from another conversation never resolves. Reject before
+				// AddMessage (no orphan user row, no cross-conv text to the model).
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reply_to_id not in conversation"})
 				return
 			}
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": perr.Error()})
 			return
 		}
+		if parent.ConversationID != conv.ID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "reply_to_id not in conversation"})
+			return
+		}
 		replyParent = parent
 		threadRootID = db.ResolveThreadRoot(parent)
+		replyQuote, _ = resolveReplyQuote([]db.Message{{ID: parent.ID, Content: stripThinkTags(parent.Content)}}, parent.ID)
 	}
 
 	userMsg, err := s.db.AddMessageWithOpts(conv.ID, "user", storedContent, db.AddMessageOpts{
@@ -1406,17 +1415,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		var history []runtimeMsg
 		runtimeContent := storedContent
 		if threadRootID != "" {
+			// Quote injection is model-only and done by the runtime from
+			// reply_to_content (apply_reply_quote); do not also prefix here or
+			// the model would see the quote twice. Stored content stays raw.
 			history = historyForThreadRuntime(msgs, threadRootID)
-			parentName := ""
-			if replyParent != nil && replyParent.Role == "assistant" {
-				if ag, aerr := s.db.GetAgent(uid, replyParent.AgentID); aerr == nil {
-					parentName = ag.Name
-				} else {
-					parentName = replyParent.AgentID
-				}
-			}
-			prefix := formatReplyContextPrefix(replyParent, parentName)
-			runtimeContent, history = injectReplyIntoUserContent(runtimeContent, history, prefix)
 		} else {
 			history = historyForRuntime(msgs)
 		}
@@ -1439,6 +1441,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		if replyToID != "" {
 			payloadMap["reply_to_id"] = replyToID
+		}
+		// Explicit reply: parent already validated same-conversation above.
+		// Runtime injects the quote into the model turn only.
+		if replyQuote != "" {
+			payloadMap["reply_to_content"] = replyQuote
 		}
 		if threadRootID != "" {
 			payloadMap["thread_root_id"] = threadRootID
