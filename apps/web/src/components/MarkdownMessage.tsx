@@ -9,7 +9,12 @@ import {
 } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { downloadSandboxFile, downloadTextFile, readSandboxFile } from "../api";
+import {
+  downloadSandboxFile,
+  downloadTextFile,
+  isAttachmentAuthUrl,
+  readSandboxFile,
+} from "../api";
 import {
   isFencePending,
   isHtmlDiagramLang,
@@ -17,6 +22,7 @@ import {
   type SourcePosition,
 } from "../lib/mermaidFence";
 import { DiagramCard } from "./DiagramCard";
+import { ImageDiagramCard } from "./ImageDiagramCard";
 import {
   HtmlPreviewModal,
   friendlyFileError,
@@ -43,10 +49,11 @@ function extractText(node: ReactNode): string {
   return "";
 }
 
-/** Keep sandbox: links; defaultUrlTransform strips non-http(s)/mailto/irc. */
+/** Keep sandbox: links + auth attachment paths; defaultUrlTransform strips non-http(s)/mailto/irc. */
 function urlTransform(url: string): string {
   const trimmed = (url || "").trim();
   if (/^sandbox:/i.test(trimmed)) return trimmed;
+  if (isAttachmentAuthUrl(trimmed)) return trimmed;
   return defaultUrlTransform(url);
 }
 
@@ -227,6 +234,23 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
 
   const components = useMemo<Components>(
     () => ({
+      img: ({ src, alt }) => {
+        const url = (src || "").trim();
+        // Auth attachment / relative attachment GET → same image diagram card (with token).
+        if (url && isAttachmentAuthUrl(url)) {
+          return <ImageDiagramCard src={url} alt={alt || undefined} name={alt || undefined} />;
+        }
+        // External / data / other: keep native img so we do not break ordinary markdown images.
+        if (!url) return null;
+        return (
+          <img
+            className="md-inline-img"
+            src={url}
+            alt={alt || ""}
+            loading="lazy"
+          />
+        );
+      },
       a: ({ href, children }) => {
         const sandboxPath = parseSandboxHref(href);
         if (sandboxPath) {

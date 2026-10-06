@@ -1,9 +1,4 @@
-const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
-  /\/$/,
-  "",
-);
-
-export const ADMIN_URL = (import.meta.env.VITE_ADMIN_URL || "http://127.0.0.1:5174").replace(
+export const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
   /\/$/,
   "",
 );
@@ -91,16 +86,9 @@ export type BotOnlineEvent = {
 export type AgentSkill = {
   name: string;
   description: string;
-  /** Effective for this Bot (account-level ∩ Bot allowlist). */
   enabled: boolean;
   custom?: boolean;
-  /** Account-level toggle from settings「技能」. */
-  account_enabled?: boolean;
 };
-
-export type SkillSource = "builtin" | "custom";
-
-export type SkillBotRef = { id: string; name: string };
 
 export type Skill = {
   name: string;
@@ -109,26 +97,6 @@ export type Skill = {
   custom?: boolean;
   file_count?: number;
   files?: { path: string; content?: string }[];
-  /** 内置 / 自建 (GET /v1/skills). */
-  source?: SkillSource;
-  read_only?: boolean;
-  updated_at?: string;
-  /** Bots of this account whose effective skill set includes this skill. */
-  bot_count?: number;
-  bots?: SkillBotRef[];
-};
-
-/** Editor payload: GET/PUT /v1/skills/{name}/package. */
-export type SkillPackage = {
-  name: string;
-  description: string;
-  enabled: boolean;
-  custom: boolean;
-  source: SkillSource;
-  read_only: boolean;
-  updated_at?: string;
-  file_count: number;
-  files: SkillFile[];
 };
 
 export type SkillFile = {
@@ -165,6 +133,16 @@ export type ReactionUpdatedEvent = {
   action: "add" | "remove" | string;
 };
 
+export type AttachmentMeta = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  path: string;
+  /** Relative auth GET path from upload / ListMessages, e.g. /v1/conversations/{id}/attachments/{id}. */
+  url?: string;
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant" | "handoff" | string;
@@ -181,6 +159,8 @@ export type Message = {
   /** Runtime run id for Bot replies (omitted on historical / non-run messages). */
   request_id?: string;
   handoff?: HandoffPayload;
+  /** Linked uploads from ListMessages / persist_only (image/* → diagram image card). */
+  attachments?: AttachmentMeta[];
 };
 
 export type Conversation = {
@@ -346,49 +326,6 @@ export async function deleteAgent(id: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(await readError(res));
 }
 
-export type CloneAgentInput = {
-  name?: string;
-  description?: string;
-  system_prompt?: string;
-  system_prompt_append?: string;
-  computer_mode?: "team" | "private";
-  /** Copy bot-scope memories (default true in UI / clone_agent tool). */
-  copy_memory?: boolean;
-  /** Copy routines bound to this bot — created paused (default false). */
-  copy_routines?: boolean;
-  enable_skills?: string[];
-  disable_skills?: string[];
-  /** Task handed to the copy right after cloning (runs in its own thread). */
-  follow_up?: string;
-};
-
-export type CloneAgentResult = {
-  ok: boolean;
-  agent: Agent;
-  source_agent_id: string;
-  conversation_id?: string;
-  skills_copied: number;
-  skills_inherit_account: boolean;
-  memories_copied: number;
-  routines_copied: number;
-  routine_names?: string[];
-  enabled_skills?: string[];
-  follow_up_status?: string;
-  warning?: string;
-  skill_errors?: string[];
-};
-
-/** Duplicate a bot (persona + skills; memory/routines opt-in). */
-export async function cloneAgent(id: string, body: CloneAgentInput = {}): Promise<CloneAgentResult> {
-  const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(id)}/clone`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
-}
-
 export async function listAgentSkills(agentId: string): Promise<AgentSkill[]> {
   const res = await fetch(`${API_BASE}/v1/agents/${encodeURIComponent(agentId)}/skills`, {
     headers: authHeaders(),
@@ -535,49 +472,12 @@ export async function uploadSkillPackage(opts: {
   return res.json();
 }
 
-export async function getSkillPackage(name: string): Promise<SkillPackage> {
+export async function getSkillPackage(name: string): Promise<Skill> {
   const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/package`, {
     headers: authHeaders(),
   });
   if (!res.ok) throw new Error(await readError(res));
-  const data = (await res.json()) as SkillPackage;
-  return { ...data, files: data.files ?? [] };
-}
-
-/** Create an empty custom skill (server writes a SKILL.md template) or one from files. 409 if name taken. */
-export async function createSkill(body: {
-  name: string;
-  description?: string;
-  files?: SkillFile[];
-}): Promise<SkillPackage> {
-  const res = await fetch(`${API_BASE}/v1/skills`, {
-    method: "POST",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  const data = (await res.json()) as SkillPackage;
-  return { ...data, files: data.files ?? [] };
-}
-
-/** Whole-package write-back for a custom skill (editor save). */
-export async function saveSkillPackage(name: string, files: SkillFile[]): Promise<SkillPackage> {
-  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/package`, {
-    method: "PUT",
-    headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ files }),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  const data = (await res.json()) as SkillPackage;
-  return { ...data, files: data.files ?? [] };
-}
-
-export async function exportSkillZip(name: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/v1/skills/${encodeURIComponent(name)}/export`, {
-    headers: authHeaders(),
-  });
-  if (!res.ok) throw new Error(await readError(res));
-  triggerBrowserDownload(await res.blob(), `${name}.zip`);
+  return res.json();
 }
 
 export async function deleteSkill(name: string): Promise<void> {
@@ -757,13 +657,96 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   return bits.filter(Boolean).join(" ");
 }
 
-export type AttachmentMeta = {
-  id: string;
-  name: string;
-  mime: string;
-  size: number;
-  path: string;
-};
+/** True when mime looks like an image the diagram image card can show. */
+export function isImageAttachmentMime(mime?: string | null): boolean {
+  return Boolean(mime && /^image\//i.test(mime.trim()));
+}
+
+/** Absolute API URL (no token). Relative paths are joined to API_BASE. */
+export function absolutizeApiUrl(url: string): string {
+  const u = (url || "").trim();
+  if (!u) return "";
+  if (/^(https?:|blob:|data:)/i.test(u)) return u;
+  if (u.startsWith("//")) return `${typeof location !== "undefined" ? location.protocol : "https:"}${u}`;
+  if (u.startsWith("/")) return `${API_BASE}${u}`;
+  return `${API_BASE}/${u}`;
+}
+
+/**
+ * Build an <img>-safe URL for an attachment (or markdown auth path).
+ * - blob:/data: returned as-is (optimistic local preview)
+ * - relative/absolute attachment GET gets ?access_token= from getToken()
+ * Does not log the token.
+ */
+export function attachmentDisplayUrl(attOrUrl: { url?: string } | string | null | undefined): string | null {
+  const raw = typeof attOrUrl === "string" ? attOrUrl : attOrUrl?.url;
+  if (!raw || !raw.trim()) return null;
+  const trimmed = raw.trim();
+  if (/^(blob:|data:)/i.test(trimmed)) return trimmed;
+  const abs = absolutizeApiUrl(trimmed);
+  if (!abs) return null;
+  if (/[?&]access_token=/.test(abs) || /[?&]token=/.test(abs)) return abs;
+  const token = getToken();
+  if (!token) return abs;
+  const sep = abs.includes("?") ? "&" : "?";
+  return `${abs}${sep}access_token=${encodeURIComponent(token)}`;
+}
+
+/** Path without secrets — safe to copy / show in UI. */
+export function attachmentCopyUrl(attOrUrl: { url?: string } | string | null | undefined): string | null {
+  const raw = typeof attOrUrl === "string" ? attOrUrl : attOrUrl?.url;
+  if (!raw || !raw.trim()) return null;
+  const trimmed = raw.trim();
+  if (/^(blob:|data:)/i.test(trimmed)) return trimmed;
+  return absolutizeApiUrl(trimmed.split(/[?#]/)[0] || trimmed);
+}
+
+/** Relative path looks like authenticated attachment GET. */
+export function isAttachmentAuthUrl(url: string): boolean {
+  return /\/v1\/conversations\/[^/]+\/attachments\/[^/?#]+/i.test(url || "");
+}
+
+function extFromNameOrMime(name?: string, mime?: string): string {
+  const fromName = (name || "").match(/\.([a-z0-9]{1,8})$/i)?.[1];
+  if (fromName) return fromName.toLowerCase();
+  const map: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+    "image/bmp": "bmp",
+  };
+  return map[(mime || "").toLowerCase()] || "png";
+}
+
+/** `image-YYYYMMDD-HHmmss` + original extension (design v2 §2.2). */
+export function imageDownloadFilename(name?: string, mime?: string, date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const stamp =
+    `image-${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}` +
+    `-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+  return `${stamp}.${extFromNameOrMime(name, mime)}`;
+}
+
+/** Fetch attachment bytes with Bearer (preferred for download) or fall back to display URL. */
+export async function fetchAttachmentBlob(attOrUrl: { url?: string } | string): Promise<Blob> {
+  const raw = typeof attOrUrl === "string" ? attOrUrl : attOrUrl.url;
+  if (!raw) throw new Error("no attachment url");
+  if (/^(blob:|data:)/i.test(raw)) {
+    const res = await fetch(raw);
+    if (!res.ok) throw new Error(`blob fetch ${res.status}`);
+    return res.blob();
+  }
+  const abs = absolutizeApiUrl(raw.split(/[?#]/)[0] || raw);
+  const token = getToken();
+  const res = await fetch(abs, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.blob();
+}
 
 export type StatusEvent = {
   phase?: string;

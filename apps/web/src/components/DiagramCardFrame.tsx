@@ -8,7 +8,7 @@ export type DiagramKind = "mermaid" | "html" | "image";
 export const KIND_LABEL: Record<DiagramKind, string> = {
   mermaid: "Mermaid",
   html: "HTML",
-  image: "图片", // reserved until attachment GET
+  image: "图片",
 };
 
 export function DiagramCardFrame({

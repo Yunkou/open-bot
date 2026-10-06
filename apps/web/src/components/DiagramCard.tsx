@@ -1,8 +1,8 @@
 /**
  * DiagramCard — in-bubble diagram card (design: bot-diagram-card-design-v1 / v2).
  *
- * Shared shell (`DiagramCardFrame`) + Mermaid card. HTML → `HtmlDiagramCard`; image kind is
- * reserved (stub) until authenticated attachment GET exists — see NOTES.
+ * Shared shell (`DiagramCardFrame`) + Mermaid card. HTML → `HtmlDiagramCard`;
+ * image → `ImageDiagramCard` (auth attachment URL).
  *
  * States: pending (stream, fence unclosed) → rendering → ok | error. The renderer is only
  * called once the fence is closed (or the stream ended); see lib/mermaidFence.ts.
@@ -22,7 +22,8 @@ import { diagramFilename } from "../lib/mermaidFence";
 import { peekDiagram, renderDiagram, type DiagramRenderResult, type DiagramTheme } from "../lib/mermaidRender";
 import { copyText, downloadPng, downloadSvg } from "../lib/diagramExport";
 import { useAppTheme } from "./useAppTheme";
-import { HtmlDiagramCard, ImageDiagramCardStub } from "./HtmlDiagramCard";
+import { HtmlDiagramCard } from "./HtmlDiagramCard";
+import { ImageDiagramCard } from "./ImageDiagramCard";
 import { DiagramCardFrame, type DiagramKind } from "./DiagramCardFrame";
 
 export type { DiagramKind } from "./DiagramCardFrame";
@@ -458,21 +459,30 @@ function usePrefersReducedMotion(): boolean {
 }
 
 export function DiagramCard({
-  source,
+  source = "",
   pending = false,
   kind = "mermaid",
+  src,
+  alt,
+  name,
+  mime,
 }: {
-  /** Fence body (mermaid / html source). Image kind ignores source until attachment GET exists. */
-  source: string;
+  /** Fence body (mermaid / html source). For image kind, prefer `src`. */
+  source?: string;
   /** Streaming and the fence is not closed yet → source preview only, renderer / iframe not loaded. */
   pending?: boolean;
   kind?: DiagramKind;
+  /** Image kind: attachment relative path, absolute URL, or blob:/data:. */
+  src?: string;
+  alt?: string;
+  name?: string;
+  mime?: string;
 }) {
   if (kind === "html") {
     return <HtmlDiagramCard source={source} pending={pending} />;
   }
   if (kind === "image") {
-    return <ImageDiagramCardStub />;
+    return <ImageDiagramCard src={src || source} alt={alt} name={name} mime={mime} />;
   }
   return <MermaidDiagramCard source={source} pending={pending} />;
 }

@@ -355,30 +355,3 @@ export function HtmlDiagramCard({ source, pending = false }: { source: string; p
     </>
   );
 }
-
-/**
- * Image kind reserved (design v2 §2). Blocked until authenticated attachment GET exists.
- * Do not invent / fake generated images.
- */
-export function ImageDiagramCardStub({
-  note = "图片卡待附件鉴权下载接口",
-}: {
-  note?: string;
-}) {
-  return (
-    <DiagramCardFrame
-      kind="image"
-      actions={
-        <button type="button" className="diagram-btn diagram-btn-text" disabled title={note}>
-          暂不可用
-        </button>
-      }
-    >
-      <div className="diagram-body diagram-body-source">
-        <div className="diagram-warning" role="status">
-          {note}
-        </div>
-      </div>
-    </DiagramCardFrame>
-  );
-}

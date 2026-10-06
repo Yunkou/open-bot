@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
-import { NEGATIVE_REACTION_EMOJIS } from "../api";
+import {
+  NEGATIVE_REACTION_EMOJIS,
+  attachmentDisplayUrl,
+  isImageAttachmentMime,
+} from "../api";
+import { ImageDiagramCard } from "./ImageDiagramCard";
 import { MessageReactions } from "./MessageReactions";
 import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
@@ -329,16 +334,60 @@ export function ChatMessage({
         <div className="bubble-stack bubble-stack-user">
           <div className="bubble bubble-user">
             {quoteEl}
-            {message.attachments && message.attachments.length > 0 ? (
-              <div className="msg-attach-chips">
-                {message.attachments.map((a) => (
-                  <span key={a.id || a.name} className="msg-attach-chip">
-                    {a.name}
-                    {a.size ? <span className="msg-attach-size">{formatSize(a.size)}</span> : null}
-                  </span>
-                ))}
-              </div>
-            ) : null}
+            {(() => {
+              const atts = message.attachments || [];
+              if (!atts.length) return null;
+              const images: AttachmentMeta[] = [];
+              const others: AttachmentMeta[] = [];
+              for (const a of atts) {
+                if (isImageAttachmentMime(a.mime) && attachmentDisplayUrl(a)) {
+                  images.push(a);
+                } else {
+                  others.push(a);
+                }
+              }
+              return (
+                <>
+                  {images.map((a) => (
+                    <ImageDiagramCard
+                      key={a.id || a.name}
+                      src={a.url!}
+                      alt={a.name}
+                      name={a.name}
+                      mime={a.mime}
+                    />
+                  ))}
+                  {others.length > 0 ? (
+                    <div className="msg-attach-chips">
+                      {others.map((a) => {
+                        const thumb = isImageAttachmentMime(a.mime)
+                          ? attachmentDisplayUrl(a)
+                          : null;
+                        return (
+                          <span
+                            key={a.id || a.name}
+                            className={`msg-attach-chip${thumb ? " is-image" : ""}`}
+                          >
+                            {thumb ? (
+                              <img
+                                className="msg-attach-thumb"
+                                src={thumb}
+                                alt=""
+                                loading="lazy"
+                              />
+                            ) : null}
+                            <span className="msg-attach-name">{a.name}</span>
+                            {a.size ? (
+                              <span className="msg-attach-size">{formatSize(a.size)}</span>
+                            ) : null}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
             {visible ? <div className="bubble-text">{visible}</div> : null}
           </div>
           {desktopBar}
