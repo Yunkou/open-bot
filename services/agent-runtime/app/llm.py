@@ -488,6 +488,14 @@ TOOLS_DISABLED_RULE = (
     "用已有知识直接完整回答；若缺实时信息请如实说明无法获取。"
 )
 
+# Diagram asks: load on-demand skill「画图」; keep prompt thin.
+DIAGRAM_SKILL_TRIGGER = (
+    "当用户要求画图、流程图、架构图、时序图、关系图、状态图、组织图或同类示意图时："
+    "若可用 load_skill，先加载技能「画图」再按其规则输出；"
+    "若不可用工具，直接输出合法 Markdown ```mermaid 代码块；"
+    "禁止用空格/符号/emoji 拼字符画或伪表格代替图。"
+)
+
 TOOL_DEFS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -1042,6 +1050,7 @@ def build_system_prompt(
 ) -> str:
     parts = [
         SYSTEM_PERSONA_BASE,
+        DIAGRAM_SKILL_TRIGGER,
         f"当前 agent_id: {agent_id or 'open-bot'}。",
         format_environment_block(client, machines),
     ]
