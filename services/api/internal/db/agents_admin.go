@@ -110,11 +110,23 @@ func (d *DB) CreateAgentFull(userID, name, description, systemPrompt, computerMo
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	_, err := d.SQL.Exec(`
-INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8)
-`, a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.CreatedAt, a.UpdatedAt)
+	tx, err := d.SQL.Begin()
 	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	shape, color, err := assignAvatarUnderLock(tx, userID, a.ID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	a.AvatarShape, a.AvatarColor = shape, color
+	if _, err := tx.Exec(`
+INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10)
+`, a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.CreatedAt, a.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return a, nil

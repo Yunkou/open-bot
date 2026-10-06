@@ -167,27 +167,11 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Serialize auto-assignment per user so concurrent creates don't read the same
-	// "used" set and pick the same free pair (TOCTOU). Lock is released on commit/rollback.
-	if shape == "" || color == "" {
-		if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, AvatarAssignLockKey(userID)); err != nil {
-			return nil, err
-		}
-		used, err := usedAvatarPairsTx(tx, userID)
-		if err != nil {
-			return nil, err
-		}
-		s, c := AssignAvatarAvoiding(a.ID, used)
-		if shape != "" {
-			s = shape
-		}
-		if color != "" {
-			c = color
-		}
-		a.AvatarShape, a.AvatarColor = s, c
-	} else {
-		a.AvatarShape, a.AvatarColor = shape, color
+	s, c, err := assignAvatarUnderLock(tx, userID, a.ID, shape, color)
+	if err != nil {
+		return nil, err
 	}
+	a.AvatarShape, a.AvatarColor = s, c
 
 	if _, err := tx.Exec(
 		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, created_at, updated_at)
@@ -200,6 +184,32 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 		return nil, err
 	}
 	return a, nil
+}
+
+// assignAvatarUnderLock serializes auto-assignment per user (pg_advisory_xact_lock)
+// so Create / Clone / admin create share one lock and never pick the same free pair.
+// When both shape and color are non-empty, no lock is taken.
+func assignAvatarUnderLock(tx *sql.Tx, userID, agentID, shape, color string) (string, string, error) {
+	shape = strings.TrimSpace(shape)
+	color = strings.TrimSpace(color)
+	if shape != "" && color != "" {
+		return shape, color, nil
+	}
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, AvatarAssignLockKey(userID)); err != nil {
+		return "", "", err
+	}
+	used, err := usedAvatarPairsTx(tx, userID)
+	if err != nil {
+		return "", "", err
+	}
+	s, c := AssignAvatarAvoiding(agentID, used)
+	if shape != "" {
+		s = shape
+	}
+	if color != "" {
+		c = color
+	}
+	return s, c, nil
 }
 
 // usedAvatarPairsTx returns shape|color pairs of the user's live agents (inside tx).
