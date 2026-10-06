@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -56,6 +57,26 @@ func (s *Server) stampAgentOnline(userID string, a *db.Agent) {
 		return
 	}
 	a.Online = s.agentHostOnline(userID, a)
+	s.seedBotOnlineCache(a.ID, a.Online)
+}
+
+// seedBotOnlineCache records the bit a client was just served (ListAgents /
+// create / patch / clone) when the agent has no cache entry yet, so a later
+// flip (e.g. stale heartbeat) is published even after an API restart.
+// Never overwrites an existing entry (that would hide a pending flip from SSE-only clients).
+func (s *Server) seedBotOnlineCache(agentID string, online bool) {
+	agentID = strings.TrimSpace(agentID)
+	if s == nil || agentID == "" {
+		return
+	}
+	cache := s.ensureBotOnlineCache()
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, ok := cache.seen[agentID]; ok {
+		return
+	}
+	cache.seen[agentID] = struct{}{}
+	cache.last[agentID] = online
 }
 
 func (s *Server) stampMemberProfilesOnline(userID string, profiles []db.ChannelMemberProfile) {
@@ -161,6 +182,8 @@ func (s *Server) publishBotOnline(userID, agentID string, online bool) {
 	}
 }
 
+var botOnlineInitMu sync.Mutex
+
 // botOnlineCache remembers the last published online bit per agent_id so connect /
 // disconnect / heartbeat only emit when that agent's boolean flips.
 type botOnlineCache struct {
@@ -170,6 +193,8 @@ type botOnlineCache struct {
 }
 
 func (s *Server) ensureBotOnlineCache() *botOnlineCache {
+	botOnlineInitMu.Lock()
+	defer botOnlineInitMu.Unlock()
 	if s.botOnline == nil {
 		s.botOnline = &botOnlineCache{
 			last: make(map[string]bool),
@@ -181,6 +206,14 @@ func (s *Server) ensureBotOnlineCache() *botOnlineCache {
 
 // publishAgentOnlineIfChanged recomputes one agent's host online and emits on flip.
 func (s *Server) publishAgentOnlineIfChanged(userID string, a *db.Agent) {
+	s.publishAgentOnlineFlip(userID, a, false)
+}
+
+// publishAgentOnlineFlip emits bot_online when the agent's bit differs from the
+// cache. staleSweep=true (periodic scan of Connected sockets) also emits offline
+// for an unseen agent: its socket is Connected, so a client may have rendered
+// it online before the heartbeat went stale.
+func (s *Server) publishAgentOnlineFlip(userID string, a *db.Agent, staleSweep bool) {
 	if s == nil || a == nil {
 		return
 	}
@@ -199,7 +232,7 @@ func (s *Server) publishAgentOnlineIfChanged(userID string, a *db.Agent) {
 		return
 	}
 	// First observation while offline: seed cache, skip fan-out (avoid spam).
-	if !seen && !online {
+	if !seen && !online && !staleSweep {
 		cache.seen[agentID] = struct{}{}
 		cache.last[agentID] = false
 		cache.mu.Unlock()
@@ -225,5 +258,51 @@ func (s *Server) publishAgentsOnlineForMachine(userID, machineID string) {
 	}
 	for _, a := range agents {
 		s.publishAgentOnlineIfChanged(userID, a)
+	}
+}
+
+// botOnlineSweepInterval: how often Connected host sockets are re-checked
+// against last_seen. A frozen host keeps its WS open (pings are answered by the
+// OS/runtime) but stops HTTP heartbeats; once last_seen > db.MachineOfflineAfter
+// (90s) its bound bots must go dark without a ListAgents refresh. Worst-case
+// push latency ≈ 90s + interval.
+const botOnlineSweepInterval = 15 * time.Second
+
+// StartBotOnlineSweeper runs sweepBotOnline every botOnlineSweepInterval until ctx is done.
+func (s *Server) StartBotOnlineSweeper(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	go func() {
+		t := time.NewTicker(botOnlineSweepInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.sweepBotOnline()
+			}
+		}
+	}()
+}
+
+// sweepBotOnline re-evaluates bots bound to every Connected host socket and
+// publishes bot_online on flip: Connected ∧ last_seen stale → offline;
+// heartbeat resumed while still Connected → online. Disconnects are already
+// pushed by hostHub.onChange; machines without a socket are offline regardless
+// of last_seen and need no sweep.
+func (s *Server) sweepBotOnline() {
+	if s == nil || s.db == nil || s.hosts == nil {
+		return
+	}
+	for _, k := range s.hosts.connectedKeys() {
+		agents, err := s.db.ListAgentsByMachineID(k.userID, k.machineID)
+		if err != nil {
+			continue
+		}
+		for _, a := range agents {
+			s.publishAgentOnlineFlip(k.userID, a, true)
+		}
 	}
 }

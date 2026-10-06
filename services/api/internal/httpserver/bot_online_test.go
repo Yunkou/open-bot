@@ -317,3 +317,197 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sse-"+uid[:8], org.ID, db.RoleMember,
 		t.Fatal("no bot_online on disconnect")
 	}
 }
+
+// Acceptance: host socket still Connected but heartbeat stops → after
+// MachineOfflineAfter the sweep pushes bot_online offline without any
+// ListAgents refresh; heartbeat resume while Connected → online again.
+func TestBotOnlineStaleHeartbeatSweepPublishes(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-stale-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+
+	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
+	aStale, err := d.CreateAgentWithAvatar(uid, "StaleBot", "", "", "drop", "#9b5de5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aFresh, err := d.CreateAgentWithAvatar(uid, "FreshBot", "", "", "cloud", "#118ab2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mStale, err := d.RegisterMachine(uid, db.MachineRegisterInput{MachineKey: "stale-" + uid[:8], Label: "Frozen Mac", Platform: "macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mFresh, err := d.RegisterMachine(uid, db.MachineRegisterInput{MachineKey: "fresh-" + uid[:8], Label: "Live Mac", Platform: "macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetAgentMachineID(uid, aStale.ID, mStale.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetAgentMachineID(uid, aFresh.ID, mFresh.ID); err != nil {
+		t.Fatal(err)
+	}
+	convStale, err := d.GetOrCreatePrimaryConversation(uid, aStale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	convFresh, err := d.GetOrCreatePrimaryConversation(uid, aFresh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Both sockets Connected; no onChange hook (simulates an API restart where
+	// the client only learned "online" from ListAgents).
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, mStale.ID)] = &hostSession{userID: uid, machineID: mStale.ID}
+	s.hosts.sessions[hostKey(uid, mFresh.ID)] = &hostSession{userID: uid, machineID: mFresh.ID}
+	s.hosts.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/agents", nil)
+	req = req.WithContext(context.WithValue(req.Context(), userIDKey, uid))
+	rec := httptest.NewRecorder()
+	s.handleListAgents(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list code=%d", rec.Code)
+	}
+
+	chStale := s.convEvents.subscribe(convStale.ID)
+	defer s.convEvents.unsubscribe(convStale.ID, chStale)
+	chFresh := s.convEvents.subscribe(convFresh.ID)
+	defer s.convEvents.unsubscribe(convFresh.ID, chFresh)
+
+	expect := func(ch chan []byte, want bool, label string) {
+		t.Helper()
+		select {
+		case raw := <-ch:
+			var evt map[string]any
+			_ = json.Unmarshal(raw, &evt)
+			if evt["type"] != "bot_online" || evt["agent_id"] != aStale.ID || evt["online"] != want {
+				t.Fatalf("%s: evt=%v", label, evt)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: no bot_online", label)
+		}
+	}
+	expectNone := func(ch chan []byte, label string) {
+		t.Helper()
+		select {
+		case raw := <-ch:
+			t.Fatalf("%s: unexpected %s", label, raw)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+
+	// Fresh sweep: nothing flipped.
+	s.sweepBotOnline()
+	expectNone(chStale, "fresh sweep stale-bot")
+	expectNone(chFresh, "fresh sweep fresh-bot")
+
+	// Heartbeat stops: last_seen ages past 90s; socket still Connected.
+	old := db.Now().Add(-(db.MachineOfflineAfter + 30*time.Second))
+	if _, err := d.SQL.Exec(`UPDATE user_machines SET last_seen=$1 WHERE id=$2`, old, mStale.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !s.hosts.Connected(uid, mStale.ID) {
+		t.Fatal("precondition: socket still connected")
+	}
+	s.sweepBotOnline()
+	expect(chStale, false, "stale → offline push")
+	expectNone(chFresh, "other machine's bot untouched")
+
+	// Second sweep: no duplicate.
+	s.sweepBotOnline()
+	expectNone(chStale, "no duplicate offline")
+
+	// Heartbeat resumes while still Connected → online push.
+	if _, err := d.HeartbeatMachine(uid, mStale.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.sweepBotOnline()
+	expect(chStale, true, "heartbeat resume → online push")
+}
+
+// Unseen agent (never served/published) on a Connected-but-stale socket still
+// gets an offline push from the sweep.
+func TestBotOnlineStaleSweepUnseenAgent(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-unseen-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
+	a, err := d.CreateAgentWithAvatar(uid, "UnseenBot", "", "", "drop", "#9b5de5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := d.RegisterMachine(uid, db.MachineRegisterInput{MachineKey: "unseen-" + uid[:8], Label: "Mac", Platform: "macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetAgentMachineID(uid, a.ID, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	conv, err := d.GetOrCreatePrimaryConversation(uid, a.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE user_machines SET last_seen=$1 WHERE id=$2`,
+		db.Now().Add(-(db.MachineOfflineAfter + time.Minute)), m.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, m.ID)] = &hostSession{userID: uid, machineID: m.ID}
+	s.hosts.mu.Unlock()
+	ch := s.convEvents.subscribe(conv.ID)
+	defer s.convEvents.unsubscribe(conv.ID, ch)
+
+	s.sweepBotOnline()
+	select {
+	case raw := <-ch:
+		var evt map[string]any
+		_ = json.Unmarshal(raw, &evt)
+		if evt["agent_id"] != a.ID || evt["online"] != false {
+			t.Fatalf("evt=%v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no offline push for unseen stale agent")
+	}
+	s.sweepBotOnline()
+	select {
+	case raw := <-ch:
+		t.Fatalf("duplicate %s", raw)
+	case <-time.After(150 * time.Millisecond):
+	}
+}

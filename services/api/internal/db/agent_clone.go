@@ -126,8 +126,11 @@ func (d *DB) CloneAgent(userID, sourceID string, opts CloneAgentOptions) (*Clone
 		IsBuiltin:    false,
 		ComputerMode: mode,
 		MachineID:    strings.TrimSpace(src.MachineID),
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		// Copy source as-is (user/migrate/''): a clone of an auto-backfilled bind
+		// stays correctable; a clone of a user pick stays protected.
+		MachineIDSource: cloneMachineIDSource(src.MachineID, src.MachineIDSource),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 	res := &CloneAgentResult{Agent: a, SourceID: src.ID}
 
@@ -144,9 +147,9 @@ func (d *DB) CloneAgent(userID, sourceID string, opts CloneAgentOptions) (*Clone
 	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = shape, color, false
 
 	if _, err := tx.Exec(
-		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,FALSE,$9,$10,$11)`,
-		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.MachineID, a.CreatedAt, a.UpdatedAt,
+		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, machine_id_source, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,FALSE,$9,$10,$11,$12)`,
+		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.MachineID, a.MachineIDSource, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}

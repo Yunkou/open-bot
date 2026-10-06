@@ -283,6 +283,8 @@ ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS checkpoint_path TEXT NOT NULL DEF
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS computer_mode TEXT NOT NULL DEFAULT 'team';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS machine_id TEXT NOT NULL DEFAULT '';
+-- machine_id_source: '' (unbound / legacy unknown) | 'migrate' (written by backfill) | 'user' (CREATE/PATCH)
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS machine_id_source TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_agents_machine ON agents(user_id, machine_id);
 
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'user';

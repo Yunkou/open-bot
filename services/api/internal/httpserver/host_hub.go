@@ -71,6 +71,22 @@ func (h *hostHub) Connected(userID, machineID string) bool {
 	return ok
 }
 
+type hostConnKey struct{ userID, machineID string }
+
+// connectedKeys snapshots (userID, machineID) for every live exec socket.
+func (h *hostHub) connectedKeys() []hostConnKey {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]hostConnKey, 0, len(h.sessions))
+	for _, sess := range h.sessions {
+		if sess == nil {
+			continue
+		}
+		out = append(out, hostConnKey{userID: sess.userID, machineID: sess.machineID})
+	}
+	return out
+}
+
 func (h *hostHub) register(s *hostSession) {
 	key := hostKey(s.userID, s.machineID)
 	h.mu.Lock()

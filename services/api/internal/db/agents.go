@@ -22,10 +22,14 @@ type Agent struct {
 	AvatarUserSet bool   `json:"avatar_user_set"`
 	// MachineID binds this Bot to a user_machines.id (host/runtime exec channel).
 	// Empty = unbound = offline for green-dot online.
-	MachineID string     `json:"machine_id,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	DeletedAt *time.Time `json:"deleted_at,omitempty"`
+	MachineID string `json:"machine_id,omitempty"`
+	// MachineIDSource records who wrote MachineID: "" (unbound or legacy unknown),
+	// "migrate" (one-time backfill), "user" (CREATE/PATCH). Server-side only —
+	// clients never send it. Corrective migrations may only clear "migrate".
+	MachineIDSource string     `json:"machine_id_source,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	DeletedAt       *time.Time `json:"deleted_at,omitempty"`
 	// Online is computed by the API (bound machine Connected + MachineOfflineAfter); not stored.
 	Online bool `json:"online"`
 }
@@ -67,7 +71,7 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
 		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
-		        COALESCE(machine_id,''), created_at, updated_at
+		        COALESCE(machine_id,''), COALESCE(machine_id_source,''), created_at, updated_at
 		 FROM agents
 		 WHERE user_id = $1 AND deleted_at IS NULL
 		 ORDER BY created_at ASC`,
@@ -81,7 +85,7 @@ func (d *DB) ListAgents(userID string) ([]*Agent, error) {
 	for rows.Next() {
 		var a Agent
 		var uid string
-		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.MachineIDSource, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.UserID = uid
@@ -98,13 +102,13 @@ func (d *DB) GetAgent(userID, id string) (*Agent, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
 		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
-		        COALESCE(machine_id,''), created_at, updated_at
+		        COALESCE(machine_id,''), COALESCE(machine_id_source,''), created_at, updated_at
 		 FROM agents WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
 		id, userID,
 	)
 	var a Agent
 	var uid string
-	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.MachineIDSource, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -167,9 +171,9 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = s, c, userSet
 
 	if _, err := tx.Exec(
-		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10,$11,$12)`,
-		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.AvatarUserSet, a.MachineID, a.CreatedAt, a.UpdatedAt,
+		`INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, machine_id, machine_id_source, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.AvatarUserSet, a.MachineID, a.MachineIDSource, a.CreatedAt, a.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -322,6 +326,8 @@ func (d *DB) UpdateAgentAvatar(userID, id, shape, color string) (*Agent, error) 
 
 // SetAgentMachineID binds (or clears) the Bot's host/runtime exec channel.
 // machineID empty clears the binding. Non-empty must be a user_machines.id owned by userID.
+// This is the user path (CREATE/PATCH): it stamps machine_id_source='user' when
+// set, ” when cleared. Only migrate writes 'migrate'; clients never send source.
 func (d *DB) SetAgentMachineID(userID, id, machineID string) (*Agent, error) {
 	userID = strings.TrimSpace(userID)
 	id = strings.TrimSpace(id)
@@ -338,11 +344,16 @@ func (d *DB) SetAgentMachineID(userID, id, machineID string) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	src := MachineIDSourceUser
+	if machineID == "" {
+		src = MachineIDSourceNone
+	}
 	a.MachineID = machineID
+	a.MachineIDSource = src
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(
-		`UPDATE agents SET machine_id=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND deleted_at IS NULL`,
-		machineID, a.UpdatedAt, id, userID,
+		`UPDATE agents SET machine_id=$1, machine_id_source=$2, updated_at=$3 WHERE id=$4 AND user_id=$5 AND deleted_at IS NULL`,
+		machineID, src, a.UpdatedAt, id, userID,
 	)
 	if err != nil {
 		return nil, err
@@ -360,7 +371,7 @@ func (d *DB) ListAgentsByMachineID(userID, machineID string) ([]*Agent, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, COALESCE(user_id,''), name, description, system_prompt, is_builtin, COALESCE(computer_mode,'team'),
 		        COALESCE(avatar_shape,''), COALESCE(avatar_color,''), COALESCE(avatar_user_set,FALSE),
-		        COALESCE(machine_id,''), created_at, updated_at
+		        COALESCE(machine_id,''), COALESCE(machine_id_source,''), created_at, updated_at
 		 FROM agents
 		 WHERE user_id = $1 AND deleted_at IS NULL AND machine_id = $2
 		 ORDER BY created_at ASC`,
@@ -374,7 +385,7 @@ func (d *DB) ListAgentsByMachineID(userID, machineID string) ([]*Agent, error) {
 	for rows.Next() {
 		var a Agent
 		var uid string
-		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &uid, &a.Name, &a.Description, &a.SystemPrompt, &a.IsBuiltin, &a.ComputerMode, &a.AvatarShape, &a.AvatarColor, &a.AvatarUserSet, &a.MachineID, &a.MachineIDSource, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		a.UserID = uid
@@ -394,7 +405,7 @@ func (d *DB) ClearAgentMachineIDForMachine(userID, machineID string) error {
 		return nil
 	}
 	_, err := d.SQL.Exec(
-		`UPDATE agents SET machine_id='', updated_at=$3
+		`UPDATE agents SET machine_id='', machine_id_source='', updated_at=$3
 		 WHERE user_id=$1 AND machine_id=$2 AND deleted_at IS NULL`,
 		userID, machineID, Now(),
 	)

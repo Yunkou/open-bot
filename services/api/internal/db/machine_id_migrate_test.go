@@ -34,292 +34,267 @@ func TestResolveUniqueBackfillMachineID(t *testing.T) {
 	}
 }
 
-func TestBackfillAgentMachineID_IdempotentAndConservative(t *testing.T) {
+// midHarness creates isolated users/machines/agents. All migrate helpers are
+// called scoped to these users so the shared develop DB is never mutated.
+type midHarness struct {
+	t     *testing.T
+	d     *DB
+	org   string
+	users []string
+}
+
+func newMidHarness(t *testing.T) *midHarness {
 	d, err := Open("")
 	if err != nil {
 		t.Skip(err)
 	}
-	defer d.Close()
-
+	t.Cleanup(func() { _ = d.Close() })
 	org, err := d.EnsureDefaultOrg()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return &midHarness{t: t, d: d, org: org.ID}
+}
 
-	newUser := func(prefix string) string {
-		uid := uuid.NewString()
-		if _, err := d.SQL.Exec(
-			`INSERT INTO users (id, username, password_hash, org_id, role) VALUES ($1, $2, 'x', $3, 'member')`,
-			uid, prefix+"-"+uid[:8], org.ID,
-		); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id = $1`, uid)
-			_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id = $1`, uid)
-			_, _ = d.SQL.Exec(`DELETE FROM users WHERE id = $1`, uid)
-		})
-		return uid
+func (h *midHarness) user(prefix string) string {
+	uid := uuid.NewString()
+	if _, err := h.d.SQL.Exec(
+		`INSERT INTO users (id, username, password_hash, org_id, role) VALUES ($1, $2, 'x', $3, 'member')`,
+		uid, prefix+"-"+uid[:8], h.org,
+	); err != nil {
+		h.t.Fatal(err)
 	}
+	h.users = append(h.users, uid)
+	h.t.Cleanup(func() {
+		_, _ = h.d.SQL.Exec(`DELETE FROM agents WHERE user_id = $1`, uid)
+		_, _ = h.d.SQL.Exec(`DELETE FROM user_machines WHERE user_id = $1`, uid)
+		_, _ = h.d.SQL.Exec(`DELETE FROM users WHERE id = $1`, uid)
+	})
+	return uid
+}
 
-	reg := func(uid, key, label string) *Machine {
-		m, err := d.RegisterMachine(uid, MachineRegisterInput{
-			MachineKey: key,
-			Label:      label,
-			Platform:   "macos",
-			App:        "desktop",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return m
-	}
-
-	machineIDOf := func(agentID string) string {
-		var mid string
-		if err := d.SQL.QueryRow(`SELECT COALESCE(machine_id,'') FROM agents WHERE id=$1`, agentID).Scan(&mid); err != nil {
-			t.Fatal(err)
-		}
-		return mid
-	}
-
-	// --- user A: exactly one machine → all unbound agents bind to it
-	ua := newUser("mid-one")
-	ma := reg(ua, "key-a", "Mac A")
-	a1, err := d.CreateAgent(ua, "bot-a1", "", "")
+func (h *midHarness) machine(uid, key string) *Machine {
+	m, err := h.d.RegisterMachine(uid, MachineRegisterInput{MachineKey: key, Label: key, Platform: "macos", App: "desktop"})
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
-	a2, err := d.CreateAgent(ua, "bot-a2", "", "")
+	return m
+}
+
+func (h *midHarness) agent(uid, name string) *Agent {
+	a, err := h.d.CreateAgent(uid, name, "", "")
 	if err != nil {
-		t.Fatal(err)
+		h.t.Fatal(err)
 	}
-	if machineIDOf(a1.ID) != "" || machineIDOf(a2.ID) != "" {
-		t.Fatal("new agents should start unbound")
-	}
+	return a
+}
 
-	// --- user B: two machines, unique usual via file_op_count → must stay empty
-	ub := newUser("mid-usual")
-	mb1 := reg(ub, "key-b1", "Mac B1")
-	mb2 := reg(ub, "key-b2", "Mac B2")
-	if _, err := d.IncrementMachineFileOps(ub, mb2.ID); err != nil {
-		t.Fatal(err)
+func (h *midHarness) get(agentID string) (mid, src string) {
+	if err := h.d.SQL.QueryRow(
+		`SELECT COALESCE(machine_id,''), COALESCE(machine_id_source,'') FROM agents WHERE id=$1`, agentID,
+	).Scan(&mid, &src); err != nil {
+		h.t.Fatal(err)
 	}
-	if _, err := d.IncrementMachineFileOps(ub, mb2.ID); err != nil {
-		t.Fatal(err)
-	}
-	b1, err := d.CreateAgent(ub, "bot-b1", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = mb1
+	return
+}
 
-	// --- user C: two machines, no ops → stay empty
-	uc := newUser("mid-ambig")
-	_ = reg(uc, "key-c1", "Mac C1")
-	_ = reg(uc, "key-c2", "Mac C2")
-	c1, err := d.CreateAgent(uc, "bot-c1", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// --- user D: two machines, tied ops → stay empty; pre-bound agent untouched
-	ud := newUser("mid-tie")
-	md1 := reg(ud, "key-d1", "Mac D1")
-	md2 := reg(ud, "key-d2", "Mac D2")
-	if _, err := d.IncrementMachineFileOps(ud, md1.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.IncrementMachineFileOps(ud, md2.ID); err != nil {
-		t.Fatal(err)
-	}
-	dBound, err := d.CreateAgent(ud, "bot-d-bound", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.SetAgentMachineID(ud, dBound.ID, md1.ID); err != nil {
-		t.Fatal(err)
-	}
-	dEmpty, err := d.CreateAgent(ud, "bot-d-empty", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Force re-run of v2 backfill (Open may already have applied the marker).
-	if _, err := d.SQL.Exec(`DELETE FROM app_migrations WHERE name=$1`, agentMachineIDBackfillV2Marker); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.migrateAgentMachineID(); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := machineIDOf(a1.ID); got != ma.ID {
-		t.Fatalf("user A bot1: got %q want %q", got, ma.ID)
-	}
-	if got := machineIDOf(a2.ID); got != ma.ID {
-		t.Fatalf("user A bot2: got %q want %q", got, ma.ID)
-	}
-	if got := machineIDOf(b1.ID); got != "" {
-		t.Fatalf("user B multi-machine must stay empty (file_op usual ignored), got %q", got)
-	}
-	if got := machineIDOf(c1.ID); got != "" {
-		t.Fatalf("user C ambiguous must stay empty, got %q", got)
-	}
-	if got := machineIDOf(dBound.ID); got != md1.ID {
-		t.Fatalf("pre-bound must stay %q, got %q", md1.ID, got)
-	}
-	if got := machineIDOf(dEmpty.ID); got != "" {
-		t.Fatalf("tie/multi must stay empty, got %q", got)
-	}
-
-	// Idempotent: second migrate is no-op (v2 marker present); clearing one agent stays empty.
-	if _, err := d.SQL.Exec(`UPDATE agents SET machine_id='' WHERE id=$1`, a1.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.migrateAgentMachineID(); err != nil {
-		t.Fatal(err)
-	}
-	if got := machineIDOf(a1.ID); got != "" {
-		t.Fatalf("after v2 marker applied, must not re-bind intentionally empty; got %q", got)
+// raw writes machine_id/source bypassing SetAgentMachineID (simulates migrate or legacy rows).
+func (h *midHarness) raw(agentID, mid, src string) {
+	if _, err := h.d.SQL.Exec(`UPDATE agents SET machine_id=$1, machine_id_source=$2 WHERE id=$3`, mid, src, agentID); err != nil {
+		h.t.Fatal(err)
 	}
 }
 
-func TestClearMultiMachineBulkBackfill(t *testing.T) {
-	d, err := Open("")
-	if err != nil {
-		t.Skip(err)
+func (h *midHarness) want(label, agentID, wantMid, wantSrc string) {
+	h.t.Helper()
+	mid, src := h.get(agentID)
+	if mid != wantMid || src != wantSrc {
+		h.t.Fatalf("%s: got (%q,%q) want (%q,%q)", label, mid, src, wantMid, wantSrc)
 	}
-	defer d.Close()
+}
 
-	org, err := d.EnsureDefaultOrg()
+func TestBackfillAgentMachineID_StampsMigrateSource(t *testing.T) {
+	h := newMidHarness(t)
+	d := h.d
+
+	// A: exactly one machine → unbound agents bind, source=migrate.
+	ua := h.user("mid-one")
+	ma := h.machine(ua, "key-a")
+	a1 := h.agent(ua, "bot-a1")
+	a2 := h.agent(ua, "bot-a2")
+	h.want("new agent", a1.ID, "", "")
+
+	// B: two machines, unique file_op usual → stay empty.
+	ub := h.user("mid-usual")
+	_ = h.machine(ub, "key-b1")
+	mb2 := h.machine(ub, "key-b2")
+	if _, err := d.IncrementMachineFileOps(ub, mb2.ID); err != nil {
+		t.Fatal(err)
+	}
+	b1 := h.agent(ub, "bot-b1")
+
+	// D: two machines; user-bound agent untouched (source stays user).
+	ud := h.user("mid-userbound")
+	md1 := h.machine(ud, "key-d1")
+	_ = h.machine(ud, "key-d2")
+	dBound := h.agent(ud, "bot-d-bound")
+	if _, err := d.SetAgentMachineID(ud, dBound.ID, md1.ID); err != nil {
+		t.Fatal(err)
+	}
+	dEmpty := h.agent(ud, "bot-d-empty")
+
+	// E: one machine, one agent already user-bound → kept as user; sibling gets migrate.
+	ue := h.user("mid-one-mixed")
+	me := h.machine(ue, "key-e")
+	eUser := h.agent(ue, "bot-e-user")
+	if _, err := d.SetAgentMachineID(ue, eUser.ID, me.ID); err != nil {
+		t.Fatal(err)
+	}
+	eEmpty := h.agent(ue, "bot-e-empty")
+
+	if err := d.backfillAgentMachineID(h.users); err != nil {
+		t.Fatal(err)
+	}
+	h.want("A bot1", a1.ID, ma.ID, MachineIDSourceMigrate)
+	h.want("A bot2", a2.ID, ma.ID, MachineIDSourceMigrate)
+	h.want("B multi", b1.ID, "", "")
+	h.want("D user-bound", dBound.ID, md1.ID, MachineIDSourceUser)
+	h.want("D empty", dEmpty.ID, "", "")
+	h.want("E user", eUser.ID, me.ID, MachineIDSourceUser)
+	h.want("E filled", eEmpty.ID, me.ID, MachineIDSourceMigrate)
+
+	// Markers present after Open → migrate is a no-op; user unbind stays empty.
+	if _, err := d.SetAgentMachineID(ua, a1.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.migrateAgentMachineID(); err != nil {
+		t.Fatal(err)
+	}
+	h.want("A bot1 after unbind + migrate", a1.ID, "", "")
+	h.want("A bot2 after migrate", a2.ID, ma.ID, MachineIDSourceMigrate)
+}
+
+func TestSetAgentMachineID_StampsUserSource(t *testing.T) {
+	h := newMidHarness(t)
+	d := h.d
+	u := h.user("mid-set")
+	m1 := h.machine(u, "key-s1")
+	a := h.agent(u, "bot-s")
+	h.raw(a.ID, m1.ID, MachineIDSourceMigrate)
+
+	got, err := d.SetAgentMachineID(u, a.ID, m1.ID) // same id, user re-picks
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	newUser := func(prefix string) string {
-		uid := uuid.NewString()
-		if _, err := d.SQL.Exec(
-			`INSERT INTO users (id, username, password_hash, org_id, role) VALUES ($1, $2, 'x', $3, 'member')`,
-			uid, prefix+"-"+uid[:8], org.ID,
-		); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() {
-			_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id = $1`, uid)
-			_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id = $1`, uid)
-			_, _ = d.SQL.Exec(`DELETE FROM users WHERE id = $1`, uid)
-		})
-		return uid
+	if got.MachineIDSource != MachineIDSourceUser {
+		t.Fatalf("returned source %q", got.MachineIDSource)
+	}
+	h.want("set", a.ID, m1.ID, MachineIDSourceUser)
+	if g, _ := d.GetAgent(u, a.ID); g == nil || g.MachineIDSource != MachineIDSourceUser {
+		t.Fatalf("GetAgent source not scanned: %+v", g)
 	}
 
-	reg := func(uid, key, label string) *Machine {
-		m, err := d.RegisterMachine(uid, MachineRegisterInput{
-			MachineKey: key,
-			Label:      label,
-			Platform:   "macos",
-			App:        "desktop",
-		})
+	if _, err := d.SetAgentMachineID(u, a.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.want("clear", a.ID, "", "")
+
+	// Delete machine clears binding + source.
+	if _, err := d.SetAgentMachineID(u, a.ID, m1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClearAgentMachineIDForMachine(u, m1.ID); err != nil {
+		t.Fatal(err)
+	}
+	h.want("machine delete", a.ID, "", "")
+}
+
+func TestCloneAgent_CopiesMachineIDSource(t *testing.T) {
+	h := newMidHarness(t)
+	d := h.d
+	u := h.user("mid-clone")
+	m := h.machine(u, "key-c")
+	for _, src := range []string{MachineIDSourceUser, MachineIDSourceMigrate, MachineIDSourceNone} {
+		a := h.agent(u, "bot-src-"+src)
+		h.raw(a.ID, m.ID, src)
+		res, err := d.CloneAgent(u, a.ID, CloneAgentOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return m
+		h.want("clone of "+src, res.Agent.ID, m.ID, src)
 	}
+	unbound := h.agent(u, "bot-unbound")
+	res, err := d.CloneAgent(u, unbound.ID, CloneAgentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.want("clone of unbound", res.Agent.ID, "", "")
+}
 
-	machineIDOf := func(agentID string) string {
-		var mid string
-		if err := d.SQL.QueryRow(`SELECT COALESCE(machine_id,'') FROM agents WHERE id=$1`, agentID).Scan(&mid); err != nil {
+func TestClearMigrateSourcedMultiMachine(t *testing.T) {
+	h := newMidHarness(t)
+	d := h.d
+
+	// U: >1 machines, user intentionally binds ALL bots to one machine → keep.
+	uu := h.user("mid-user-all-one")
+	mu := h.machine(uu, "key-u1")
+	_ = h.machine(uu, "key-u2")
+	u1 := h.agent(uu, "bot-u1")
+	u2 := h.agent(uu, "bot-u2")
+	for _, a := range []*Agent{u1, u2} {
+		if _, err := d.SetAgentMachineID(uu, a.ID, mu.ID); err != nil {
 			t.Fatal(err)
 		}
-		return mid
 	}
 
-	setMid := func(agentID, mid string) {
-		if _, err := d.SQL.Exec(`UPDATE agents SET machine_id=$1 WHERE id=$2`, mid, agentID); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// M: >1 machines, migrate-sourced binds → clear (mid + source).
+	um := h.user("mid-migrate-multi")
+	mm := h.machine(um, "key-m1")
+	_ = h.machine(um, "key-m2")
+	m1 := h.agent(um, "bot-m1")
+	m2 := h.agent(um, "bot-m2")
+	h.raw(m1.ID, mm.ID, MachineIDSourceMigrate)
+	h.raw(m2.ID, mm.ID, MachineIDSourceUser) // same user, user pick → keep
 
-	// Simulate v1 already applied so corrective path runs.
-	if _, err := d.SQL.Exec(
-		`INSERT INTO app_migrations (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`,
-		agentMachineIDBackfillV1Marker,
-	); err != nil {
-		t.Fatal(err)
-	}
-	// Reset clear_multi + v2 so migrate re-runs both.
-	if _, err := d.SQL.Exec(
-		`DELETE FROM app_migrations WHERE name IN ($1, $2)`,
-		agentMachineIDClearMultiMarker, agentMachineIDBackfillV2Marker,
-	); err != nil {
-		t.Fatal(err)
-	}
+	// L: >1 machines, legacy unmarked rows all same mid (v1 bulk OR user) → keep; no heuristic.
+	ul := h.user("mid-legacy")
+	ml := h.machine(ul, "key-l1")
+	_ = h.machine(ul, "key-l2")
+	l1 := h.agent(ul, "bot-l1")
+	l2 := h.agent(ul, "bot-l2")
+	h.raw(l1.ID, ml.ID, "")
+	h.raw(l2.ID, ml.ID, "")
 
-	// --- user E: >1 machines, all agents same non-empty mid (v1 bulk signature) → clear
-	ue := newUser("mid-clear")
-	me1 := reg(ue, "key-e1", "Mac E1")
-	_ = reg(ue, "key-e2", "Mac E2")
-	e1, err := d.CreateAgent(ue, "bot-e1", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	e2, err := d.CreateAgent(ue, "bot-e2", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	setMid(e1.ID, me1.ID)
-	setMid(e2.ID, me1.ID)
+	// S: single machine, migrate-sourced → keep (correct backfill).
+	us := h.user("mid-single")
+	ms := h.machine(us, "key-s")
+	s1 := h.agent(us, "bot-s1")
+	h.raw(s1.ID, ms.ID, MachineIDSourceMigrate)
 
-	// --- user F: >1 machines, mixed machine_ids → leave alone
-	uf := newUser("mid-mixed")
-	mf1 := reg(uf, "key-f1", "Mac F1")
-	mf2 := reg(uf, "key-f2", "Mac F2")
-	f1, err := d.CreateAgent(uf, "bot-f1", "", "")
-	if err != nil {
+	if err := d.clearMigrateSourcedMultiMachine(h.users); err != nil {
 		t.Fatal(err)
 	}
-	f2, err := d.CreateAgent(uf, "bot-f2", "", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	setMid(f1.ID, mf1.ID)
-	setMid(f2.ID, mf2.ID)
+	h.want("U user all-one bot1", u1.ID, mu.ID, MachineIDSourceUser)
+	h.want("U user all-one bot2", u2.ID, mu.ID, MachineIDSourceUser)
+	h.want("M migrate cleared", m1.ID, "", "")
+	h.want("M user kept", m2.ID, mm.ID, MachineIDSourceUser)
+	h.want("L legacy kept", l1.ID, ml.ID, "")
+	h.want("L legacy kept 2", l2.ID, ml.ID, "")
+	h.want("S single kept", s1.ID, ms.ID, MachineIDSourceMigrate)
 
-	// --- user G: exactly one machine, all same mid → do NOT clear (correct single-machine bind)
-	ug := newUser("mid-keep-one")
-	mg := reg(ug, "key-g", "Mac G")
-	g1, err := d.CreateAgent(ug, "bot-g1", "", "")
-	if err != nil {
+	// Scoped call with empty scope is a no-op.
+	h.raw(m1.ID, mm.ID, MachineIDSourceMigrate)
+	if err := d.clearMigrateSourcedMultiMachine([]string{}); err != nil {
 		t.Fatal(err)
 	}
-	setMid(g1.ID, mg.ID)
+	h.want("empty scope noop", m1.ID, mm.ID, MachineIDSourceMigrate)
 
+	// v3 marker present after Open → global migrate does not re-clear; retired
+	// clear_multi never runs even with v1 marker history present.
 	if err := d.migrateAgentMachineID(); err != nil {
 		t.Fatal(err)
 	}
-
-	if got := machineIDOf(e1.ID); got != "" {
-		t.Fatalf("user E bulk signature must clear, got %q", got)
-	}
-	if got := machineIDOf(e2.ID); got != "" {
-		t.Fatalf("user E bot2 must clear, got %q", got)
-	}
-	if got := machineIDOf(f1.ID); got != mf1.ID {
-		t.Fatalf("user F mixed must keep %q, got %q", mf1.ID, got)
-	}
-	if got := machineIDOf(f2.ID); got != mf2.ID {
-		t.Fatalf("user F mixed must keep %q, got %q", mf2.ID, got)
-	}
-	if got := machineIDOf(g1.ID); got != mg.ID {
-		t.Fatalf("user G single-machine must keep %q, got %q", mg.ID, got)
-	}
-
-	// Idempotent clear marker: re-bind E to same mid, second migrate must not clear again.
-	setMid(e1.ID, me1.ID)
-	setMid(e2.ID, me1.ID)
-	if err := d.migrateAgentMachineID(); err != nil {
-		t.Fatal(err)
-	}
-	if got := machineIDOf(e1.ID); got != me1.ID {
-		t.Fatalf("after clear_multi marker, must not re-clear; got %q", got)
-	}
+	h.want("v3 idempotent", m1.ID, mm.ID, MachineIDSourceMigrate)
+	h.want("U still kept", u1.ID, mu.ID, MachineIDSourceUser)
+	h.want("L still kept", l1.ID, ml.ID, "")
 }

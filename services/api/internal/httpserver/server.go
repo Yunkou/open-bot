@@ -68,6 +68,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 		s.StartRoutineScheduler(context.Background())
 	}
 	s.StartConversationTaskRunner(context.Background())
+	// Stale-heartbeat push: Connected socket but last_seen > 90s → bot_online offline.
+	s.StartBotOnlineSweeper(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -694,10 +696,12 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"avatar_color":    a.AvatarColor,
 			"avatar_user_set": a.AvatarUserSet,
 			"machine_id":      a.MachineID,
-			"online":          a.Online,
-			"user_id":         a.UserID,
-			"created_at":      a.CreatedAt.UTC().Format(time.RFC3339Nano),
-			"updated_at":      a.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			// read-only: '' | migrate | user (server-stamped; clients never send it)
+			"machine_id_source": a.MachineIDSource,
+			"online":            a.Online,
+			"user_id":           a.UserID,
+			"created_at":        a.CreatedAt.UTC().Format(time.RFC3339Nano),
+			"updated_at":        a.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		}
 		if prev, perr := s.db.GetAgentThreadPreview(uid, a.ID); perr == nil && prev != nil && prev.ConversationID != "" {
 			item["conversation_id"] = prev.ConversationID
@@ -746,6 +750,9 @@ type agentBody struct {
 	AvatarShape  string  `json:"avatar_shape"`
 	AvatarColor  string  `json:"avatar_color"`
 	MachineID    *string `json:"machine_id"` // optional; "" clears binding
+	// No machine_id_source field on purpose: server stamps 'user' on any
+	// CREATE/PATCH that sets machine_id ('' when cleared). A client-sent
+	// machine_id_source is ignored by the decoder.
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
