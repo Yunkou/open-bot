@@ -402,7 +402,14 @@ export default function App() {
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const replyTargetRef = useRef<ComposerReplyTarget | null>(null);
   /** Open thread panel root id (null = main timeline). */
-  const [openThreadRootId, setOpenThreadRootId] = useState<string | null>(null);
+  const [openThreadRootId, setOpenThreadRootIdState] = useState<string | null>(null);
+  /** Sync mirror of openThreadRootId so async send / stamp see the latest panel state. */
+  const openThreadRootIdRef = useRef<string | null>(null);
+  const setOpenThreadRootId = useCallback((id: string | null) => {
+    const next = (id || "").trim() || null;
+    openThreadRootIdRef.current = next;
+    setOpenThreadRootIdState(next);
+  }, []);
   const localUserIdRef = useRef<string | null>(null);
 
   const [input, setInput] = useState("");
@@ -1137,9 +1144,9 @@ export default function App() {
     const target = { id: m.id, who, text: text || "（无正文）" };
     replyTargetRef.current = target;
     setReplyTarget(target);
-    // Opening reply from a thread keeps the panel open; from main opens thread on that root.
-    const root = (m.thread_root_id || "").trim() || m.id;
-    setOpenThreadRootId(root);
+    // PM: 「回复」 stays on the main timeline (Grok-style quote bar only).
+    // Do NOT open/select the sidebar thread panel from this action.
+    // Existing topic threads remain reachable via "N 条回复" / onOpenThread.
   };
 
   const jumpToMessage = (id: string) => {
@@ -1525,10 +1532,11 @@ export default function App() {
   const stampUserSavedMessage = (
     convId: string,
     messageId: string,
-    extra?: { reply_to_id?: string; thread_root_id?: string },
+    extra?: { reply_to_id?: string; thread_root_id?: string; adoptThreadRoot?: boolean },
   ) => {
     if (!messageId) return;
     const localId = localUserIdRef.current;
+    const serverRoot = (extra?.thread_root_id || "").trim();
     patchConvMessages(convId, (prev) => {
       if (prev.some((m) => m.id === messageId)) return prev;
       const idx = localId
@@ -1536,17 +1544,33 @@ export default function App() {
         : [...prev].reverse().findIndex((m) => m.role === "user" && m.id.startsWith("local-user-"));
       const realIdx = localId ? idx : idx >= 0 ? prev.length - 1 - idx : -1;
       if (realIdx < 0) return prev;
-      return prev.map((m, i) =>
-        i === realIdx
-          ? {
-              ...m,
-              id: messageId,
-              reply_to_id: extra?.reply_to_id || m.reply_to_id,
-              thread_root_id: extra?.thread_root_id || m.thread_root_id,
-            }
-          : m,
-      );
+      const oldId = prev[realIdx].id;
+      return prev.map((m, i) => {
+        if (i === realIdx) {
+          // thread_root policy:
+          // - Sidebar-thread send (optimistic had thread_root_id, or caller says we POSTed one):
+          //   keep it, preferring the server's echoed value when present.
+          // - Mainline (incl. 「回复」 quote): never adopt a server thread_root (would hide from timeline).
+          const optimisticRoot = (m.thread_root_id || "").trim();
+          const root =
+            (optimisticRoot || extra?.adoptThreadRoot) ? serverRoot || optimisticRoot : "";
+          const next: UiMessage = {
+            ...m,
+            id: messageId,
+            reply_to_id: extra?.reply_to_id || m.reply_to_id,
+          };
+          if (root) next.thread_root_id = root;
+          else delete next.thread_root_id;
+          return next;
+        }
+        // Rare: thread opened on a still-local root — follow the id swap.
+        if (oldId.startsWith("local-") && m.thread_root_id === oldId) {
+          return { ...m, thread_root_id: messageId };
+        }
+        return m;
+      });
     });
+    if (localId && openThreadRootIdRef.current === localId) setOpenThreadRootId(messageId);
     if (localUserIdRef.current === localId) localUserIdRef.current = messageId;
     if (replyTargetRef.current?.id && replyTargetRef.current.id.startsWith("local-")) {
       // keep reply target pointing at server id when we replied to a just-sent msg (rare)
@@ -1928,6 +1952,10 @@ export default function App() {
   const sendUserText = async (rawContent: string, filesToSend: PendingFile[] = []) => {
     const content = rawContent.trim();
     if ((!content && filesToSend.length === 0) || !authed) return;
+    // Sidebar thread panel (opened via 「N 条回复」) shares this Composer. Capture it now,
+    // before any await, so the send goes where the user was looking when they hit Enter.
+    const threadRootAtSend = (openThreadRootIdRef.current || "").trim();
+    const threadConvAtSend = conversationRef.current?.id;
     // keep-partial-next-turn: only interrupt the *current* conversation's run.
     const viewedId = conversationRef.current?.id;
     if (viewedId && runsRef.current.has(viewedId)) {
@@ -2020,21 +2048,22 @@ export default function App() {
       path: "",
     }));
     const activeReply = replyTargetRef.current;
-    const inheritedRoot = (() => {
-      if (!activeReply?.id) return undefined;
-      const parent =
-        messagesLiveRef.current.find((m) => m.id === activeReply.id) ||
-        messagesByConvRef.current.get(conversationRef.current?.id || "")?.find((m) => m.id === activeReply.id);
-      const existing = (parent?.thread_root_id || "").trim();
-      return existing || activeReply.id;
-    })();
+    // thread_root_id is set ONLY when the sidebar thread panel is open (「N 条回复」) and we are
+    // still in that conversation (not a DM @handoff into another Bot).
+    // PM: explicit 「回复」 on the mainline is quote only — reply_to_id, no thread_root_id.
+    // Diverting into thread_root would hide the send (and Bot answer) from the main timeline.
+    const sendThreadRootId =
+      threadRootAtSend && !handoffConv && conversationRef.current?.id === threadConvAtSend
+        ? threadRootAtSend
+        : "";
+    const threadStamp = sendThreadRootId ? { thread_root_id: sendThreadRootId } : {};
     const userMsg: UiMessage = {
       id: `local-user-${Date.now()}`,
       role: "user",
       content: sendContent || (filesToSend.length ? `（${filesToSend.length} 个附件）` : ""),
       attachments: localAttachments.length ? localAttachments : undefined,
-      reply_to_id: activeReply?.id,
-      thread_root_id: inheritedRoot,
+      ...(activeReply?.id ? { reply_to_id: activeReply.id } : {}),
+      ...threadStamp,
     };
     localUserIdRef.current = userMsg.id;
     // Clear reply bar after capturing (composer already cleared input above).
@@ -2052,7 +2081,8 @@ export default function App() {
         content: "",
         streaming: true,
         // No reply_to_id: Bot answers are not quotes (only explicit「回复」).
-        thread_root_id: userMsg.thread_root_id,
+        // thread_root_id only for sidebar-thread sends (stays in panel); mainline stays unset.
+        ...threadStamp,
       },
     ];
     const optTargetId = handoffConv?.id || conversationRef.current?.id || viewedId;
@@ -2181,7 +2211,9 @@ export default function App() {
                   streaming: true,
                   agent_id: info.agent_id,
                   agent_name: name,
-                  thread_root_id: userMsg.thread_root_id,
+                  // Sidebar-thread send: follow-on agent bubbles stay in the panel.
+                  // Mainline (incl. 「回复」): no thread_root_id.
+                  ...threadStamp,
                 },
               ];
             });
@@ -2207,6 +2239,8 @@ export default function App() {
               stampUserSavedMessage(streamConvId!, meta.message_id, {
                 reply_to_id: typeof meta.reply_to_id === "string" ? meta.reply_to_id : undefined,
                 thread_root_id: typeof meta.thread_root_id === "string" ? meta.thread_root_id : undefined,
+                // Adopt server thread_root only when we intentionally POSTed one.
+                adoptThreadRoot: Boolean(sendThreadRootId),
               });
             }
             if (meta.phase === "message_saved" && typeof meta.message_id === "string") {
@@ -2283,6 +2317,7 @@ export default function App() {
         })(),
         handoffContext,
         activeReply?.id,
+        sendThreadRootId || undefined,
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -3559,10 +3594,15 @@ export default function App() {
               onReply={beginReplyTo}
               onOpenThread={(rootId) => setOpenThreadRootId(rootId)}
               onJumpToParent={(pid) => {
+                // Only open the thread panel when the parent already lives in a topic thread.
+                // Mainline quote jumps just scroll + highlight (design: 跳到原消息并高亮).
                 const parent = messageById.get(pid);
-                if (parent?.thread_root_id) setOpenThreadRootId(parent.thread_root_id);
-                else if (parent) setOpenThreadRootId(parent.id);
-                window.setTimeout(() => jumpToMessage(pid), 50);
+                if (parent?.thread_root_id) {
+                  setOpenThreadRootId(parent.thread_root_id);
+                  window.setTimeout(() => jumpToMessage(pid), 50);
+                } else {
+                  jumpToMessage(pid);
+                }
               }}
               onToggleReaction={onToggleReaction}
               onFeedback={(msg) => openFeedbackForMessage(msg, "feedback_menu")}

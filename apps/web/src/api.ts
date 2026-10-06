@@ -779,6 +779,8 @@ export async function sendMessageStream(
   client?: import("./lib/clientEnv").ClientContext,
   handoffContext?: HandoffContextMsg[],
   replyToId?: string,
+  /** Sidebar thread post only (thread panel open). Mainline 「回复」 must omit this. */
+  threadRootId?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (attachments && attachments.length > 0) {
@@ -795,6 +797,9 @@ export async function sendMessageStream(
   }
   if (replyToId) {
     body.reply_to_id = replyToId;
+  }
+  if (threadRootId) {
+    body.thread_root_id = threadRootId;
   }
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
     method: "POST",
