@@ -122,7 +122,6 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/admin/bots", s.requireOrgAdmin(s.handleAdminCreateBot))
 	mux.HandleFunc("PATCH /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminPatchBot))
 	mux.HandleFunc("DELETE /v1/admin/bots/{id}", s.requireOrgAdmin(s.handleAdminDeleteBot))
-	mux.HandleFunc("POST /v1/admin/bots/{id}/clone", s.requireOrgAdmin(s.handleAdminCloneBot))
 
 	mux.HandleFunc("GET /v1/admin/skills", s.requireOrgAdmin(s.handleAdminListSkills))
 	mux.HandleFunc("GET /v1/admin/skills/{name}", s.requireOrgAdmin(s.handleAdminGetSkill))
@@ -163,7 +162,6 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/agents", s.requireAuth(s.handleCreateAgent))
 	mux.HandleFunc("PATCH /v1/agents/{id}", s.requireAuth(s.handlePatchAgent))
 	mux.HandleFunc("DELETE /v1/agents/{id}", s.requireAuth(s.handleDeleteAgent))
-	mux.HandleFunc("POST /v1/agents/{id}/clone", s.requireAuth(s.handleCloneAgent))
 	mux.HandleFunc("GET /v1/agents/{id}/skills", s.requireAuth(s.handleListAgentSkills))
 	mux.HandleFunc("PUT /v1/agents/{id}/skills", s.requireAuth(s.handleReplaceAgentSkills))
 	mux.HandleFunc("PUT /v1/agents/{id}/skills/{name}", s.requireAuth(s.handleSetAgentSkill))
@@ -272,7 +270,6 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/routines/create", s.requireInternal(s.handleInternalCreateRoutine))
 	mux.HandleFunc("POST /internal/routines/update", s.requireInternal(s.handleInternalUpdateRoutine))
 	mux.HandleFunc("POST /internal/routines/delete", s.requireInternal(s.handleInternalDeleteRoutine))
-	mux.HandleFunc("POST /internal/agents/clone", s.requireInternal(s.handleInternalCloneAgent))
 
 	// Registered host machines (ListMachines-like)
 	mux.HandleFunc("GET /v1/machines", s.requireAuth(s.handleListMachines))
