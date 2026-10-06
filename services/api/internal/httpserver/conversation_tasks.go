@@ -328,10 +328,26 @@ func (s *Server) abortUserTasks(userID string) {
 	}
 }
 
+// botAssistantMessageOpts builds persist opts for Bot-generated assistant rows.
+// ReplyToID is always empty (product: only explicit user「回复」quotes).
+// RequestID links the row to the triggering runtime turn when known.
+func botAssistantMessageOpts(agentID, threadRootID, requestID string) db.AddMessageOpts {
+	return db.AddMessageOpts{
+		AgentID:      agentID,
+		ThreadRootID: strings.TrimSpace(threadRootID),
+		RequestID:    strings.TrimSpace(requestID),
+	}
+}
+
 func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emit func(event string, data any)) *db.Message {
 	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", "", emit)
 }
 
+// saveAssistantThreaded persists an assistant row.
+// replyToID must stay empty for normal Bot turns and stop markers — the UI treats
+// reply_to_id as a user quote/引用. Only the user send path (explicit「回复」) writes
+// reply_to_id. Use requestID (runtime run_id) to associate with the triggering turn;
+// threadRootID is independent (Slack-style thread membership when the user replied).
 func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID, requestID string, emit func(event string, data any)) *db.Message {
 	if strings.TrimSpace(text) == "" {
 		return nil

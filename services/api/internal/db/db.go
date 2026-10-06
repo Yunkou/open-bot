@@ -508,6 +508,11 @@ CREATE INDEX IF NOT EXISTS idx_bot_lessons_agent ON bot_lessons(user_id, agent_i
 	if err := d.migrateAgentMachineID(); err != nil {
 		return err
 	}
+	// One-time: clear Bot auto-quotes (assistant.reply_to → user, empty thread_root).
+	// See reply_to_migrate.go (marker clear_assistant_auto_reply_to_v1).
+	if err := d.migrateClearAssistantAutoReplyTo(); err != nil {
+		return err
+	}
 	return d.migrateVector()
 }
 

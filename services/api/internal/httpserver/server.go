@@ -1193,7 +1193,9 @@ type sendBody struct {
 	Attachments     []AttachmentRef `json:"attachments"`
 	AgentIDs        []string        `json:"agent_ids"` // group @targets; empty = first member / conv agent
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
-	// ReplyToID starts or continues a Slack/Grok-style conversation thread.
+	// ReplyToID is set only when the user explicitly clicks「回复」(quote).
+	// Normal sends leave it empty. Bot assistant saves must never copy this onto reply_to_id;
+	// turn linkage uses request_id (runtime run_id) instead.
 	ReplyToID string `json:"reply_to_id"`
 	// PersistOnly stores the user message and returns JSON without running an agent.
 	PersistOnly bool `json:"persist_only"`
@@ -1378,11 +1380,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if err := runCtx.Err(); err != nil {
 			cancelled = true
 			// Cancelled before this agent produced tokens — keep a stop marker in history.
-			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", db.AddMessageOpts{
-				AgentID:      agentID,
-				ReplyToID:    userMsg.ID,
-				ThreadRootID: threadRootID,
-			})
+			// Stop marker: no reply_to_id (quotes are user「回复」only). Thread root kept if any.
+			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(agentID, threadRootID, ""))
 			break
 		}
 		systemPrompt := ""
@@ -1474,13 +1473,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		// Empty cancel → keep a light UI/history marker so the next turn still
 		// sees the interrupted turn (keep-partial-next-turn).
 		if strings.TrimSpace(assistantText) != "" {
-			s.saveAssistantThreaded(uid, conv.ID, agentID, assistantText, userMsg.ID, threadRootID, runID, emit)
+			// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
+			s.saveAssistantThreaded(uid, conv.ID, agentID, assistantText, "", threadRootID, runID, emit)
 		} else if runCancelled {
-			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", db.AddMessageOpts{
-				AgentID:      agentID,
-				ReplyToID:    userMsg.ID,
-				ThreadRootID: threadRootID,
-			})
+			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(agentID, threadRootID, runID))
 		}
 		if runErr != nil {
 			if runCancelled {
