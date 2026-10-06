@@ -9,6 +9,7 @@ import (
 
 var allowedBotPresence = map[string]struct{}{
 	"idle":              {},
+	"thinking":          {},
 	"working":           {},
 	"awaiting_approval": {},
 	"error":             {},
@@ -47,6 +48,10 @@ func (s *Server) publishBotPresence(userID, conversationID, agentID, status stri
 		s.events.Publish(userID, evt)
 	}
 }
+
+// Presence states: idle | thinking | working | awaiting_approval | error.
+// The 300ms minimum dwell (avoid thinking/working flicker) is enforced by the
+// runtime when it pushes; the API does not debounce.
 
 // finishBotPresence maps a run outcome to idle (ok / user stop) or error.
 func (s *Server) finishBotPresence(userID, conversationID, agentID string, err error) {

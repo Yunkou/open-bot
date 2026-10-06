@@ -114,7 +114,8 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Minute}
 	}
-	s.publishBotPresence(userID, conv.ID, agentID, "working")
+	// Start of run → thinking; runtime pushes working during tool exec.
+	s.publishBotPresence(userID, conv.ID, agentID, "thinking")
 	resp, err := client.Do(req)
 	if err != nil {
 		s.publishBotPresence(userID, conv.ID, agentID, "error")

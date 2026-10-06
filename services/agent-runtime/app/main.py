@@ -40,6 +40,7 @@ from .memory import (
     scene_kind,
 )
 from . import mem0_store
+from . import thread_context
 from . import dream
 from . import mcp_client
 from . import builtin_tools
@@ -48,6 +49,7 @@ from .decision.protocol import DecisionError
 from .client_env import ClientContext
 from .skills import SkillRegistry, registry_for_user
 from . import langfuse_trace as lf
+from .presence import PresencePublisher
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
@@ -92,6 +94,11 @@ class RunRequest(BaseModel):
     enabled_skills: list[str] | None = None
     client: dict[str, Any] | None = None
     max_tool_rounds: int | None = None
+    # Slack/Grok-style thread (Go injects reply context into content/messages).
+    reply_to_id: str | None = None
+    thread_root_id: str | None = None
+    # Augmented recall query: replied snippet + recent thread turns + user text.
+    reply_context: str | None = None
 
 
 class MemoryCreate(BaseModel):
@@ -446,8 +453,9 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
     decision_token = bind_decision(body.decision)
     try:
         scene = scene_kind(body.channel_id, body.peer_agent_id)
+        recall_query = (body.reply_context or "").strip() or (user_text or "")
         recalled_buckets = mem.recall_buckets(
-            user_text or "",
+            recall_query,
             agent_id=body.agent_id,
             channel_id=body.channel_id or "",
             peer_agent_id=body.peer_agent_id or "",
@@ -462,7 +470,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 peer = (body.peer_agent_id or "") if scope_name == "agent_pair" else ""
                 hits = mem0_store.search_for_scope(
                     uid,
-                    user_text or "",
+                    recall_query,
                     scope=scope_name,
                     agent_id=aid,
                     channel_id=cid,
@@ -616,6 +624,9 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 max_tool_rounds=clamp_tool_rounds(body.max_tool_rounds),
                 client=client_ctx,
                 mem_store=mem,
+                reply_to_id=body.reply_to_id,
+                thread_root_id=body.thread_root_id,
+                reply_context=body.reply_context,
             ):
                 yield chunk
         else:
@@ -701,6 +712,9 @@ async def openai_path(
     max_tool_rounds: int = 12,
     client: ClientContext | None = None,
     mem_store: MemoryStore | None = None,
+    reply_to_id: str | None = None,
+    thread_root_id: str | None = None,
+    reply_context: str | None = None,
 ) -> AsyncIterator[str]:
     allow = set(enabled_skills) if enabled_skills is not None else None
     skill_reg = skill_reg or skills_for(user_id)
@@ -1099,6 +1113,25 @@ async def openai_path(
                 )
             except Exception as e:  # noqa: BLE001
                 return json.dumps({"error": str(e)}, ensure_ascii=False)
+        if name == "clone_agent":
+            from . import openbot_api as obapi
+
+            if (channel_id or "").strip() or (peer_agent_id or "").strip():
+                return json.dumps(
+                    {"ok": False, "error": "只能在与用户的单聊里复制助手；群聊或助手间对话中不可用"},
+                    ensure_ascii=False,
+                )
+            if not (user_id or "").strip() or not (agent_id or "").strip():
+                return json.dumps({"ok": False, "error": "缺少用户或助手身份，无法复制"}, ensure_ascii=False)
+            try:
+                res = obapi.clone_agent(
+                    str(user_id),
+                    str(agent_id),
+                    **obapi.clone_agent_args(args),
+                )
+                return json.dumps(obapi.summarize_clone_result(res), ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
         if name == "request_secret":
             from . import sandbox as sbx
 
@@ -1144,7 +1177,13 @@ async def openai_path(
             return json.dumps(result, ensure_ascii=False)
         return json.dumps({"error": f"unknown tool {name}"})
 
+    presence = PresencePublisher(
+        conversation_id,
+        agent_id,
+        user_id=user_id,
+    )
     try:
+        await presence.set("thinking")
         yield sse("status", {"phase": "thinking", "label": "正在思考…"})
         lf.event_status("thinking", "正在思考…")
 
@@ -1152,8 +1191,13 @@ async def openai_path(
 
         async def on_status(payload: dict[str, Any]) -> None:
             phase = str(payload.get("phase") or "")
+            label = str(payload.get("label") or "")
             if phase:
-                lf.event_status(phase, str(payload.get("label") or ""))
+                lf.event_status(phase, label)
+            if phase == "tool":
+                await presence.set("working")
+            elif phase in ("tool_done", "thinking") or "正在思考" in label:
+                await presence.set("thinking")
             await status_q.put(payload)
 
         with lf.observation_generation(
@@ -1253,6 +1297,7 @@ async def openai_path(
             if user_id and assistant_reply.strip() and mem0_store.mem0_auto_add():
                 history_for_mem0 = [m for m in llm_messages if m.get("role") in ("user", "assistant")]
                 turn = mem0_store.last_turn_messages(history_for_mem0, assistant_reply, window=4)
+                turn = thread_context.augment_mem0_turn(turn, reply_context)
                 try:
                     scope_name, aid, cid, peer = resolve_write_scope(
                         "",
@@ -1265,6 +1310,10 @@ async def openai_path(
                     )
                 except ValueError:
                     meta = mem0_store.scope_metadata("user")
+                if reply_to_id:
+                    meta["reply_to_id"] = str(reply_to_id)
+                if thread_root_id:
+                    meta["thread_root_id"] = str(thread_root_id)
                 mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
             if user_id and assistant_reply.strip():
                 dream.maybe_consolidate_user_bg(str(user_id).strip())
@@ -1281,6 +1330,7 @@ async def openai_path(
     except Exception as e:  # noqa: BLE001
         if root_obs is not None:
             lf.update_obs(root_obs, level="ERROR", status_message=str(e)[:500])
+        await presence.set("error")
         yield sse("error", {"message": str(e)})
         yield sse("done", {"ok": False, "mode": "openai"})
 

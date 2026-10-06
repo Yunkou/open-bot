@@ -101,7 +101,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "avatar-http-"+uid[:8], org.ID, db.RoleMember
 	}
 	ch := s.convEvents.subscribe(conv.ID)
 	defer s.convEvents.unsubscribe(conv.ID, ch)
-	for _, st := range []string{"working", "awaiting_approval", "error", "idle"} {
+	for _, st := range []string{"thinking", "working", "awaiting_approval", "error", "idle"} {
 		rec, _ = do(s.handleInternalBotPresence, http.MethodPost, "/internal/bot-presence", "", map[string]any{
 			"conversation_id": conv.ID, "agent_id": agentID, "user_id": uid, "status": st,
 		})
