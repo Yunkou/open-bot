@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import type { Agent, Machine } from "../api";
 import { listMachines } from "../api";
+import { isLoginOnlyMachine, preferHostMachines } from "../lib/clientEnv";
 import {
   AVATAR_COLOR_PALETTE,
   AVATAR_SHAPES,
@@ -61,8 +62,15 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
       try {
         const list = await listMachines();
         if (!cancelled) {
-          setMachines(list);
+          const hosts = preferHostMachines(list);
+          setMachines(hosts);
           setMachinesLoaded(true);
+          setMachineId((prev) => {
+            if (!prev) return prev;
+            const bound = list.find((m) => m.id === prev);
+            if (bound && isLoginOnlyMachine(bound)) return "";
+            return prev;
+          });
         }
       } catch (ex) {
         if (!cancelled) {
@@ -201,7 +209,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
               ))}
             </select>
             {machinesLoaded && machines.length === 0 ? (
-              <div className="muted small new-chat-help-wrap">还没有已连接的电脑。连上电脑后再用本地能力。</div>
+              <div className="muted small">还没有已连接的电脑。手机不能当作优先电脑。</div>
             ) : (
               <div className="muted small new-chat-help-wrap">本地能力跟「你在哪台电脑上发这条消息」走。优先电脑是无会话机时的兜底，也影响此时的在线绿点。</div>
             )}

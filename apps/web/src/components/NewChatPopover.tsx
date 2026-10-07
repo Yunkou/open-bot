@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Agent, Machine } from "../api";
 import { listMachines } from "../api";
+import { preferHostMachines } from "../lib/clientEnv";
 import { AgentAvatar } from "./AgentAvatar";
 import {
   AVATAR_COLOR_PALETTE,
@@ -93,7 +94,7 @@ export function NewChatPopover({
     let cancelled = false;
     void listMachines()
       .then((list) => {
-        if (!cancelled) setMachines(list);
+        if (!cancelled) setMachines(preferHostMachines(list));
       })
       .catch(() => {
         if (!cancelled) setMachines([]);
@@ -441,7 +442,7 @@ export function NewChatPopover({
                   </select>
                 </label>
                 {machines.length === 0 ? (
-                  <div className="muted small new-chat-help-wrap">还没有已连接的电脑。先创建也可以，连上电脑后再用本地能力。</div>
+                  <div className="muted small">还没有已连接的电脑。手机不能当作优先电脑。</div>
                 ) : (
                   <div className="muted small new-chat-help-wrap">读文件、跑命令会在你当前发消息的电脑上执行。这里只是可选的默认优先机。</div>
                 )}

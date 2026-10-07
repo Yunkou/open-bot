@@ -36,6 +36,7 @@ declare global {
       Plugins?: {
         Device?: {
           getInfo?: () => Promise<{ name?: string; model?: string }>;
+          getId?: () => Promise<{ identifier?: string }>;
         };
       };
     };
@@ -148,7 +149,7 @@ export function detectClientContext(): ClientContext {
       arch: arch || "",
       app_version: APP_VERSION,
       locale,
-      capabilities: { host_tools: false, workspace_tools: true },
+      capabilities: { host_tools: false, workspace_tools: true }, // rule A: phone never hosts
     };
   }
 
@@ -166,20 +167,107 @@ export function detectClientContext(): ClientContext {
 const MACHINE_KEY_STORAGE = "openbot_machine_key";
 const MACHINE_ID_STORAGE = "openbot_machine_id";
 
-/** Stable per-install id for desktop/mobile registration (not for plain browsers). */
-export function getOrCreateMachineKey(): string {
+export type ClientDeviceType = "desktop" | "mobile" | "browser";
+
+/** Product device_type for register / list UI (rule A: phone = login-only). */
+export function resolveClientDeviceType(
+  client: ClientContext = detectClientContext(),
+): ClientDeviceType {
+  if (client.app === "capacitor") return "mobile";
+  if (client.app === "tauri") return "desktop";
+  if (client.platform === "ios" || client.platform === "android") return "mobile";
+  return "browser";
+}
+
+function readStoredMachineKey(): string | null {
   try {
     const existing = localStorage.getItem(MACHINE_KEY_STORAGE);
     if (existing && existing.trim()) return existing.trim();
-    const key =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `mk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    localStorage.setItem(MACHINE_KEY_STORAGE, key);
-    return key;
   } catch {
-    return `mk-ephemeral-${Date.now()}`;
+    /* ignore */
   }
+  return null;
+}
+
+function writeStoredMachineKey(key: string): void {
+  try {
+    localStorage.setItem(MACHINE_KEY_STORAGE, key);
+  } catch {
+    /* ignore */
+  }
+}
+
+function newLocalMachineKey(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `mk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+/**
+ * Sync localStorage UUID (desktop / browser fallback).
+ * Prefer `resolveMachineKey` so Capacitor can use native ANDROID_ID / identifierForVendor.
+ */
+export function getOrCreateMachineKey(): string {
+  const existing = readStoredMachineKey();
+  if (existing) return existing;
+  const key = newLocalMachineKey();
+  writeStoredMachineKey(key);
+  return key;
+}
+
+/**
+ * Stable machine_key priority:
+ * 1. Capacitor: Device.getId().identifier (ANDROID_ID / identifierForVendor)
+ * 2. Tauri: invoke("host_machine_id") when desktop ships it (IOPlatformUUID / MachineGuid /etc/machine-id)
+ * 3. Fallback: localStorage UUID (openbot_machine_key)
+ * Migration: native id wins when available and is written back to localStorage so upsert merges;
+ * if native unavailable, keep prior localStorage key.
+ *
+ * Desktop Tauri exposes host_machine_id (IOPlatformUUID / MachineGuid / machine-id).
+ * If invoke fails (old build), falls back to localStorage UUID.
+ */
+export async function resolveMachineKey(
+  client: ClientContext = detectClientContext(),
+): Promise<string> {
+  const existing = readStoredMachineKey();
+
+  if (client.app === "capacitor") {
+    const nativeId = await tryCapacitorDeviceIdentifier();
+    if (nativeId) {
+      writeStoredMachineKey(nativeId);
+      return nativeId;
+    }
+  } else if (client.app === "tauri") {
+    const nativeId = await tryTauriMachineId();
+    if (nativeId) {
+      writeStoredMachineKey(nativeId);
+      return nativeId;
+    }
+  }
+
+  if (existing) return existing;
+  const key = newLocalMachineKey();
+  writeStoredMachineKey(key);
+  return key;
+}
+
+async function tryCapacitorDeviceIdentifier(): Promise<string | null> {
+  try {
+    const mod = await import("@capacitor/device");
+    const id = await mod.Device.getId();
+    const identifier = (id?.identifier || "").trim();
+    if (identifier) return identifier;
+  } catch {
+    /* fall through to bridge / none */
+  }
+  try {
+    const id = await window.Capacitor?.Plugins?.Device?.getId?.();
+    const identifier = (id?.identifier || "").trim();
+    if (identifier) return identifier;
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 export function getStoredMachineId(): string | null {
@@ -206,9 +294,37 @@ export function clearStoredMachineId(): void {
   }
 }
 
-/** Whether this client should register as a host machine (desktop/mobile shells). */
+/**
+ * Register + heartbeat for Tauri/Capacitor shells (presence listing).
+ * Host exec WebSocket stays gated on app === "tauri" separately.
+ * Capacitor keeps host_tools:false (login-only / rule A).
+ */
 export function shouldRegisterAsHost(client: ClientContext = detectClientContext()): boolean {
   return client.app === "tauri" || client.app === "capacitor";
+}
+
+/** Machine row is phone / Capacitor → login-only, never prefer-host. */
+export function isLoginOnlyMachine(m: {
+  device_type?: string | null;
+  platform?: string | null;
+  app?: string | null;
+}): boolean {
+  const dt = (m.device_type || "").toLowerCase();
+  if (dt === "mobile") return true;
+  if (dt === "desktop" || dt === "browser") return false;
+  const plat = (m.platform || "").toLowerCase();
+  if (plat === "ios" || plat === "android") return true;
+  if ((m.app || "").toLowerCase() === "capacitor") return true;
+  return false;
+}
+
+/** Prefer-computer / 优先电脑 dropdown: desktop hosts only. */
+export function preferHostMachines<T extends {
+  device_type?: string | null;
+  platform?: string | null;
+  app?: string | null;
+}>(machines: T[]): T[] {
+  return machines.filter((m) => !isLoginOnlyMachine(m));
 }
 
 function platformFallbackLabel(client: ClientContext): string {
@@ -274,6 +390,23 @@ function tauriInvoke(): TauriInvoke | null {
     .__TAURI_INTERNALS__;
   return internals?.invoke ?? null;
 }
+
+/** Best-effort: returns null if command missing (current desktop builds). */
+async function tryTauriMachineId(): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  for (const cmd of ["host_machine_id", "host_machine_key"] as const) {
+    try {
+      const raw = await invoke(cmd);
+      const id = typeof raw === "string" ? raw.trim() : "";
+      if (id) return id.slice(0, 128);
+    } catch {
+      /* command not registered yet */
+    }
+  }
+  return null;
+}
+
 
 /**
  * Best-effort real device / computer name:

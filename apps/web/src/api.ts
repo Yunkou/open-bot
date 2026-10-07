@@ -233,9 +233,18 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+function apiExtraHeaders(): HeadersInit {
+  // ngrok free interstitial breaks Capacitor/WebView JSON unless skipped.
+  if (/ngrok/i.test(API_BASE)) {
+    return { "ngrok-skip-browser-warning": "1" };
+  }
+  return {};
+}
+
 function authHeaders(extra?: HeadersInit): HeadersInit {
   const token = getToken();
   return {
+    ...apiExtraHeaders(),
     ...(extra || {}),
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
@@ -254,7 +263,7 @@ async function readError(res: Response): Promise<string> {
 export async function register(username: string, password: string): Promise<{ token: string; user: User }> {
   const res = await fetch(`${API_BASE}/v1/auth/register`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...apiExtraHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
   if (!res.ok) throw new Error(await readError(res));
@@ -264,7 +273,7 @@ export async function register(username: string, password: string): Promise<{ to
 export async function login(username: string, password: string): Promise<{ token: string; user: User }> {
   const res = await fetch(`${API_BASE}/v1/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...apiExtraHeaders(), "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
   if (!res.ok) throw new Error(await readError(res));
@@ -1905,6 +1914,8 @@ export type Machine = {
   arch: string;
   app: string;
   app_version: string;
+  /** desktop | mobile | browser — optional on old servers; client always sends on register. */
+  device_type?: "desktop" | "mobile" | "browser" | string;
   status: "online" | "offline" | string;
   last_seen: string;
   file_op_count?: number;
@@ -1930,6 +1941,8 @@ export async function registerMachine(input: {
   arch?: string;
   app?: string;
   app_version?: string;
+  /** Client sends; old servers ignore unknown fields. */
+  device_type?: "desktop" | "mobile" | "browser";
 }): Promise<Machine> {
   const res = await fetch(`${API_BASE}/v1/machines/register`, {
     method: "POST",

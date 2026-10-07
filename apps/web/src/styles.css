@@ -1638,6 +1638,13 @@ button.ghost {
   color: var(--accent);
 }
 
+/* Product rule A: phone presence row — secondary grey, not danger */
+.tag.machine-login-only {
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--muted, #6b7280);
+  font-weight: 500;
+}
+
 .llm-form {
   display: flex;
   flex-direction: column;

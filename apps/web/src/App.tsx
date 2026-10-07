@@ -111,7 +111,9 @@ import {
 import {
   detectClientContext,
   shouldRegisterAsHost,
-  getOrCreateMachineKey,
+  resolveMachineKey,
+  resolveClientDeviceType,
+  isLoginOnlyMachine,
   getStoredMachineId,
   setStoredMachineId,
   clearStoredMachineId,
@@ -748,13 +750,14 @@ export default function App() {
         const label =
           deviceDisplayName.trim() || (await resolveDefaultMachineLabel(clientEnv));
         const m = await registerMachine({
-          machine_key: getOrCreateMachineKey(),
+          machine_key: await resolveMachineKey(clientEnv),
           label,
           platform: clientEnv.platform,
           os: clientEnv.os,
           arch: clientEnv.arch,
           app: clientEnv.app,
           app_version: clientEnv.app_version,
+          device_type: resolveClientDeviceType(clientEnv),
         });
         if (cancelled) return;
         setStoredMachineId(m.id);
@@ -5264,6 +5267,7 @@ export default function App() {
                 <SettingsHint>
                   桌面端登录后会连上本机文件通道；网页不会登记为电脑。操作仍经「通用 → Bot → 自动审核」检查（硬拒绝始终有效）。当前客户端：{clientEnv.platform} / {clientEnv.app}
                   {shouldRegisterAsHost(clientEnv) ? "（会自动注册）" : "（浏览器，不自动注册）"}。
+                  手机只用来登录聊天，本地文件和命令在已连接的电脑上跑。
                 </SettingsHint>
 
                 {(() => {
@@ -5276,6 +5280,35 @@ export default function App() {
                         <SettingsCard padded>
                           <div className="bot-settings-desc">
                             浏览器不能作为本机执行通道。请用桌面应用打开并保持在线。
+                          </div>
+                        </SettingsCard>
+                      </SettingsSection>
+                    );
+                  }
+                  const loginOnlyHere =
+                    resolveClientDeviceType(clientEnv) === "mobile" ||
+                    clientEnv.app === "capacitor";
+                  if (loginOnlyHere) {
+                    return (
+                      <SettingsSection title="当前设备">
+                        <SettingsCard padded>
+                          <div className="bot-general-settings">
+                            <div className="settings-row bot-settings-row">
+                              <div className="bot-settings-copy">
+                                <div className="bot-settings-title">
+                                  {current?.label || deviceDisplayName || "本机"}
+                                </div>
+                                <div className="bot-settings-desc">
+                                  手机只用来登录聊天；本地文件和命令请在已连接的电脑上跑。
+                                </div>
+                              </div>
+                              <span className="tag machine-login-only">仅登录</span>
+                            </div>
+                            {!current ? (
+                              <div className="bot-settings-desc">
+                                尚未登记本机。点击下方「重新注册本机」以出现在设备列表。
+                              </div>
+                            ) : null}
                           </div>
                         </SettingsCard>
                       </SettingsSection>
@@ -5423,13 +5456,14 @@ export default function App() {
                                 deviceDisplayName.trim() ||
                                 (await resolveDefaultMachineLabel(clientEnv));
                               const m = await registerMachine({
-                                machine_key: getOrCreateMachineKey(),
+                                machine_key: await resolveMachineKey(clientEnv),
                                 label,
                                 platform: clientEnv.platform,
                                 os: clientEnv.os,
                                 arch: clientEnv.arch,
                                 app: clientEnv.app,
                                 app_version: clientEnv.app_version,
+                                device_type: resolveClientDeviceType(clientEnv),
                               });
                               setStoredMachineId(m.id);
                               setHostMachineId(m.id);
@@ -5496,7 +5530,11 @@ export default function App() {
                               ) : (
                                 <div className="agent-name">
                                   {m.label}{" "}
-                                  <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                                  {isLoginOnlyMachine(m) ? (
+                                    <span className="tag machine-login-only">仅登录</span>
+                                  ) : (
+                                    <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                                  )}
                                   {hostMachineId === m.id ? <span className="tag">当前</span> : null}
                                 </div>
                               )}
@@ -5505,7 +5543,10 @@ export default function App() {
                                 {m.os ? ` · ${m.os}` : ""}
                                 {m.arch ? ` · ${m.arch}` : ""}
                                 {m.app ? ` · ${m.app}` : ""}
-                                {` · ${normalizeMachineExecPolicy(m.exec_policy) === "allow" ? "始终允许" : normalizeMachineExecPolicy(m.exec_policy) === "ask" ? "每次询问" : "不允许"}`}
+                                {m.device_type ? ` · ${m.device_type}` : ""}
+                                {isLoginOnlyMachine(m)
+                                  ? ""
+                                  : ` · ${normalizeMachineExecPolicy(m.exec_policy) === "allow" ? "始终允许" : normalizeMachineExecPolicy(m.exec_policy) === "ask" ? "每次询问" : "不允许"}`}
                                 {m.last_seen ? ` · 最近 ${m.last_seen}` : ""}
                               </div>
                             </div>
@@ -5570,7 +5611,11 @@ export default function App() {
                                     .then(() => {
                                       if (getStoredMachineId() === m.id) clearStoredMachineId();
                                       if (renamingMachineId === m.id) setRenamingMachineId(null);
-                                      setMachinesMsg(`已删除 ${m.label}`);
+                                      setMachinesMsg(
+                                        isLoginOnlyMachine(m)
+                                          ? `已移除 ${m.label}`
+                                          : `已删除 ${m.label}`,
+                                      );
                                       return refreshMachines();
                                     })
                                     .catch((err) =>
@@ -5579,7 +5624,7 @@ export default function App() {
                                     .finally(() => setMachinesBusy(false));
                                 }}
                               >
-                                删除
+                                {isLoginOnlyMachine(m) ? "移除" : "删除"}
                               </button>
                             </div>
                           </div>
