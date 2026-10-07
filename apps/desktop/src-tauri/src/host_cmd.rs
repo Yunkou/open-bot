@@ -313,12 +313,101 @@ pub fn host_device_name() -> Result<String, String> {
     Err("无法读取设备名称".into())
 }
 
+fn extract_quoted_value(line: &str) -> Option<String> {
+    let parts = line.split('"');
+    // skip until after key quote pair; take last quoted segment as value
+    let chunks: Vec<&str> = parts.collect();
+    if chunks.len() >= 4 {
+        let val = chunks[chunks.len() - 2].trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
+
+/// Stable platform machine id for machine_key registration.
+/// macOS IOPlatformUUID / Windows MachineGuid / Linux /etc/machine-id (or dbus).
+#[tauri::command]
+pub fn host_machine_id() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = Command::new("ioreg")
+            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    if line.contains("IOPlatformUUID") {
+                        if let Some(id) = extract_quoted_value(line) {
+                            return Ok(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(out) = Command::new("reg")
+            .args([
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.to_ascii_lowercase().starts_with("machineguid") {
+                        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                        if let Some(id) = parts.last() {
+                            let id = id.trim();
+                            if !id.is_empty()
+                                && !id.eq_ignore_ascii_case("REG_SZ")
+                                && !id.eq_ignore_ascii_case("MachineGuid")
+                            {
+                                return Ok(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+            if let Ok(s) = fs::read_to_string(path) {
+                let id = s.trim();
+                if !id.is_empty() {
+                    return Ok(id.to_string());
+                }
+            }
+        }
+    }
+    Err("无法读取平台机器码".into())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::HOST_SHELL_TIMEOUT_SECS;
+    use super::{extract_quoted_value, HOST_SHELL_TIMEOUT_SECS};
 
     #[test]
     fn host_shell_timeout_is_120s_and_bounded() {
         assert_eq!(HOST_SHELL_TIMEOUT_SECS, 120);
+    }
+
+    #[test]
+    fn extract_quoted_value_reads_ioplatform_uuid_line() {
+        let line = r#"    "IOPlatformUUID" = "CC87D070-8EC8-5EF4-B679-9048FCF29292""#;
+        assert_eq!(
+            extract_quoted_value(line).as_deref(),
+            Some("CC87D070-8EC8-5EF4-B679-9048FCF29292")
+        );
     }
 }

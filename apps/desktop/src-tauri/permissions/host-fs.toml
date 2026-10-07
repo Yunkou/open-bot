@@ -72,3 +72,9 @@ commands.allow = ["host_ssh_exec"]
 identifier = "allow-host-device-name"
 description = "Enables the host_device_name command."
 commands.allow = ["host_device_name"]
+
+[[permission]]
+identifier = "allow-host-machine-id"
+description = "Enables the host_machine_id command."
+commands.allow = ["host_machine_id"]
+

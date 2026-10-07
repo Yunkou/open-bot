@@ -16,6 +16,7 @@ pub fn run() {
             host_cmd::host_open,
             host_cmd::host_shell,
             host_cmd::host_device_name,
+            host_cmd::host_machine_id,
             host_ssh::host_ssh_probe,
             host_ssh::host_ssh_ls,
             host_ssh::host_ssh_read,

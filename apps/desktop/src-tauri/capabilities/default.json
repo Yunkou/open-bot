@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities for Open Bot desktop",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "shell:allow-open",
@@ -15,6 +17,7 @@
     "allow-host-open",
     "allow-host-shell",
     "allow-host-device-name",
+    "allow-host-machine-id",
     "allow-host-ssh-probe",
     "allow-host-ssh-ls",
     "allow-host-ssh-read",
