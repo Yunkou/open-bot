@@ -394,7 +394,7 @@ export default function MemoryPage() {
                 request={async () => {
                   try {
                     const data = await adminListMemories(memoryQuery);
-                    return { data: data.memories || [], success: true };
+                    return { data: data.memories || [], success: true, total: (data.memories || []).length };
                   } catch (err) {
                     message.error(err instanceof Error ? err.message : String(err));
                     return { data: [], success: false };
@@ -435,7 +435,7 @@ export default function MemoryPage() {
                     try {
                       const data = await adminListAutoMemories(memoryQuery);
                       setAutoReason(data.reason || (data.enabled ? "" : "自动记忆未启用"));
-                      return { data: data.memories || [], success: true };
+                      return { data: data.memories || [], success: true, total: (data.memories || []).length };
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : String(err));
                       return { data: [], success: false };
@@ -489,7 +489,7 @@ export default function MemoryPage() {
                         conversation_id: conversationId,
                         limit: 100,
                       });
-                      return { data: data.recalls || [], success: true };
+                      return { data: data.recalls || [], success: true, total: (data.recalls || []).length };
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : String(err));
                       return { data: [], success: false };
@@ -534,7 +534,7 @@ export default function MemoryPage() {
                         limit: 100,
                       });
                       setCompactNote(data.note || "");
-                      return { data: data.compactions || [], success: true };
+                      return { data: data.compactions || [], success: true, total: (data.compactions || []).length };
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : String(err));
                       return { data: [], success: false };

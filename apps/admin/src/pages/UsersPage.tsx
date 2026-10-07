@@ -314,7 +314,7 @@ export default function UsersPage() {
                   request={async () => {
                     try {
                       const data = await adminListUsers();
-                      return { data: data.users || [], success: true };
+                      return { data: data.users || [], success: true, total: (data.users || []).length };
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : String(err));
                       return { data: [], success: false };

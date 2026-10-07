@@ -56,7 +56,7 @@ export default function AuditPage() {
         request={async () => {
           try {
             const data = await adminListAuditLogs(150);
-            return { data: data.logs || [], success: true };
+            return { data: data.logs || [], success: true, total: (data.logs || []).length };
           } catch (err) {
             message.error(err instanceof Error ? err.message : String(err));
             return { data: [], success: false };

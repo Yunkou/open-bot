@@ -262,7 +262,7 @@ export default function SkillsPage() {
                   (s.description || "").toLowerCase().includes(q),
               );
             }
-            return { data: list, success: true };
+            return { data: list, success: true, total: list.length };
           } catch (err) {
             message.error(err instanceof Error ? err.message : String(err));
             return { data: [], success: false };

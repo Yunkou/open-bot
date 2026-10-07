@@ -155,7 +155,7 @@ export default function MembersPage() {
         columns={memberColumns}
         request={async () => {
           const data = await adminListMembers();
-          return { data: data.members || [], success: true };
+          return { data: data.members || [], success: true, total: (data.members || []).length };
         }}
       />
 

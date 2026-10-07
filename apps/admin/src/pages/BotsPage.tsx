@@ -247,10 +247,11 @@ export default function BotsPage() {
         request={async () => {
           try {
             const data = await adminListBots();
-            return { data: data.bots || [], success: true };
+            const bots = data.bots || [];
+            return { data: bots, success: true, total: bots.length };
           } catch (err) {
             message.error(err instanceof Error ? err.message : String(err));
-            return { data: [], success: false };
+            return { data: [], success: false, total: 0 };
           }
         }}
       />
