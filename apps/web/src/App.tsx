@@ -500,6 +500,43 @@ export default function App() {
   const confirm = useConfirm();
   const touchUi = useIsTouchUi();
   const sheetForm = useSheetFormUi();
+
+  /* §8 mobile shell: visualViewport → keep composer at visible bottom */
+  useEffect(() => {
+    if (!sheetForm) {
+      document.documentElement.style.removeProperty("--vv-height");
+      document.documentElement.style.removeProperty("--vv-offset-top");
+      document.documentElement.style.removeProperty("--keyboard-inset");
+      return;
+    }
+    const root = document.documentElement;
+    const sync = () => {
+      const vv = window.visualViewport;
+      if (!vv) {
+        root.style.setProperty("--vv-height", `${window.innerHeight}px`);
+        root.style.setProperty("--vv-offset-top", "0px");
+        root.style.setProperty("--keyboard-inset", "0px");
+        return;
+      }
+      root.style.setProperty("--vv-height", `${Math.round(vv.height)}px`);
+      root.style.setProperty("--vv-offset-top", `${Math.round(vv.offsetTop)}px`);
+      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      root.style.setProperty("--keyboard-inset", `${Math.round(inset)}px`);
+    };
+    sync();
+    window.visualViewport?.addEventListener("resize", sync);
+    window.visualViewport?.addEventListener("scroll", sync);
+    window.addEventListener("resize", sync);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", sync);
+      window.visualViewport?.removeEventListener("scroll", sync);
+      window.removeEventListener("resize", sync);
+      root.style.removeProperty("--vv-height");
+      root.style.removeProperty("--vv-offset-top");
+      root.style.removeProperty("--keyboard-inset");
+    };
+  }, [sheetForm]);
+
   const [convSheet, setConvSheet] = useState<
     | { kind: "agent"; agent: Agent }
     | { kind: "channel"; channel: Channel }
@@ -3674,15 +3711,17 @@ export default function App() {
           )}
         </div>
 
-        <div className="sidebar-foot">
-          <AccountMenu
-            username={user?.username || "账户"}
-            llm={defaultLLM}
-            onOpenSettings={() => void openSettings("general")}
-            onChangeModel={() => void openSettings("llm")}
-            onLogout={onLogout}
-          />
-        </div>
+        {!sheetForm ? (
+          <div className="sidebar-foot">
+            <AccountMenu
+              username={user?.username || "账户"}
+              llm={defaultLLM}
+              onOpenSettings={() => void openSettings("general")}
+              onChangeModel={() => void openSettings("llm")}
+              onLogout={onLogout}
+            />
+          </div>
+        ) : null}
       </aside>
 
       <CreateActionSheet
@@ -3745,7 +3784,7 @@ export default function App() {
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M15 18l-6-6 6-6" />
             </svg>
-            返回
+            <span className="topbar-back-label">返回</span>
           </button>
           <div className="agent-pill">
             {activeChannel ? (

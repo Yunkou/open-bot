@@ -4924,14 +4924,17 @@ html.touch-ui .diagram-menu-item {
 
 .sidebar-shell-search-btn {
   position: relative;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   border-radius: 50%;
   background: var(--bg-soft, #f3f4f6);
   display: grid;
   place-items: center;
   color: var(--muted);
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .sidebar-shell-search-btn svg {
@@ -4951,9 +4954,10 @@ html.touch-ui .diagram-menu-item {
 }
 
 .sidebar-shell-search-btn:focus-within {
-  width: min(160px, 42vw);
-  border-radius: 18px;
-  padding: 0 10px;
+  width: min(180px, 48vw);
+  min-width: 44px;
+  border-radius: 22px;
+  padding: 0 12px;
   justify-items: start;
   grid-template-columns: 18px 1fr;
   display: flex;
@@ -4976,8 +4980,11 @@ html.touch-ui .diagram-menu-item {
 }
 
 .sidebar-shell-plus {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 50%;
 }
 
 .sidebar-identity {
@@ -5065,7 +5072,7 @@ html.touch-ui .diagram-menu-item {
 }
 
 .shell-narrow .sidebar-foot {
-  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px));
+  display: none !important; /* §8.2: no bottom avatar+name; settings via top-left only */
 }
 
 /* C-1 create action sheet row leading icon */
@@ -5210,8 +5217,15 @@ html.touch-ui .diagram-menu-item {
 .settings-dialog-shell .settings-row,
 .settings-dialog-shell .bot-settings-row {
   min-height: 52px;
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: 14px;
+  padding-bottom: 14px;
+  box-sizing: border-box;
+}
+.settings-dialog-shell .settings-row:has(.settings-hint),
+.settings-dialog-shell .bot-settings-row:has(.settings-hint),
+.settings-dialog-shell .settings-row:has(.muted),
+.settings-dialog-shell .bot-settings-row:has(.muted) {
+  min-height: 64px;
 }
 
 .settings-shell-subhead {
@@ -5238,16 +5252,22 @@ html.touch-ui .diagram-menu-item {
 .settings-shell-back {
   width: 44px;
   height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   border: none;
-  background: transparent;
-  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 50%;
   font-size: 20px;
   cursor: pointer;
   color: var(--text);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 .settings-shell-back:active {
-  background: rgba(0, 0, 0, 0.06);
+  background: rgba(0, 0, 0, 0.12);
 }
 
 .settings-hub {
@@ -5325,20 +5345,25 @@ html.touch-ui .diagram-menu-item {
 
 .settings-hub-row {
   width: 100%;
-  min-height: 56px;
+  min-height: 52px;
   height: auto;
   border: none;
   background: transparent;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 14px 14px;
   text-align: left;
   cursor: pointer;
   color: var(--text);
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   overflow: visible;
   box-sizing: border-box;
+}
+.settings-hub-row:has(.settings-hub-row-sub) {
+  min-height: 64px;
+  padding-top: 12px;
+  padding-bottom: 12px;
 }
 
 [data-theme="dark"] .settings-hub-row {
@@ -5370,12 +5395,16 @@ html.touch-ui .diagram-menu-item {
 }
 
 .settings-hub-row-sub {
-  font-size: 13px;
+  font-size: 12.5px;
   line-height: 1.35;
   color: #6b7280;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  word-break: break-word;
+  padding-bottom: 2px; /* keep ≥10 from row bottom with padding */
 }
 
 .settings-hub-row-value {
@@ -5434,11 +5463,24 @@ html.touch-ui .diagram-menu-item {
 }
 
 .shell-narrow .topbar-back {
-  /* whole control ≥44 and sits in padded topbar below status bar */
+  /* §8.1: perfect circle ≥44, icon-only (label hidden) */
+  width: 44px;
+  height: 44px;
   min-width: 44px;
   min-height: 44px;
-  padding: 10px 8px;
+  padding: 0;
+  gap: 0;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-soft, #f3f4f6);
   box-sizing: border-box;
+  left: 12px;
+}
+.shell-narrow .topbar-back-label {
+  display: none;
+}
+.shell-narrow .topbar-back svg {
+  opacity: 0.85;
 }
 
 /* Settings drill-down close hit ≥44 (grid cell already 44) */
@@ -5450,11 +5492,12 @@ html.touch-ui .diagram-menu-item {
   display: grid;
   place-items: center;
   border: none;
-  background: transparent;
-  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 50%;
   cursor: pointer;
   color: var(--text);
   padding: 0;
+  box-sizing: border-box;
 }
 
 /* Bottom: max(8px, env(safe-area-inset-bottom)) — + sheet / delete confirm */
@@ -5472,7 +5515,10 @@ html.touch-ui .diagram-menu-item {
 
 /* Composer / sticky bottom CTAs on shell */
 .shell-narrow .composer-wrap {
-  padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+  padding: 0 12px max(12px, env(safe-area-inset-bottom, 0px));
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .shell-narrow .feedback-actions,
@@ -5493,4 +5539,85 @@ html.touch-ui .composer-quote-clear {
     width: 44px;
     height: 44px;
   }
+}
+
+/* ---- Mobile shell C patch §8 (round / no foot / chat pin / row height) ---- */
+
+/* Round top-bar icon language on shell (search / + already sized above) */
+.shell-narrow .sidebar-shell-user {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+}
+.shell-narrow .sidebar-shell-user-avatar {
+  width: 36px;
+  height: 36px;
+}
+.shell-narrow .icon-btn.sidebar-shell-plus,
+.shell-narrow .sidebar-shell-plus.icon-btn {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: 50%;
+}
+
+/* Chat: topbar → messages flex:1 → composer pinned bottom (+ vv / safe-area) */
+.app.shell-narrow {
+  height: var(--vv-height, 100%);
+  max-height: var(--vv-height, 100%);
+  /* keyboard scroll offset: pin shell to visible viewport top */
+  margin-top: var(--vv-offset-top, 0px);
+}
+/* specificity ≥ .app.mobile-chat .main (display:grid @860) */
+.app.shell-narrow .main,
+.app.shell-narrow.mobile-chat .main,
+.app.shell-narrow.mobile-list .main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+.app.shell-narrow .main > .status {
+  flex-shrink: 0;
+}
+.app.shell-narrow .main > .topbar {
+  flex-shrink: 0;
+}
+.app.shell-narrow .main > .messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 16px 12px; /* composer is sibling — no 120 overlay pad */
+}
+.app.shell-narrow .main > .composer-wrap {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 5;
+}
+/* icon-only back: slightly less left pad than text「返回」 */
+@media (max-width: 860px) {
+  .app.shell-narrow.mobile-chat .topbar {
+    padding-left: 64px;
+  }
+}
+
+/* Settings cards: gap already 12 on .settings-hub-scroll; reinforce section spacing */
+.shell-narrow .settings-hub-scroll {
+  gap: 12px;
+}
+.shell-narrow .settings-dialog-shell .settings-section {
+  margin-top: 12px;
+}
+
+/* Dark: round back/close soft fill */
+[data-theme="dark"] .settings-shell-back,
+[data-theme="dark"] .settings-dialog-shell .settings-shell-subhead .settings-close,
+[data-theme="dark"] .settings-hub-close {
+  background: rgba(255, 255, 255, 0.1);
 }
