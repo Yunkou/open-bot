@@ -1448,7 +1448,7 @@ button {
   cursor: pointer;
 }
 
-/* Mobile master-detail (860px matches prior breakpoint): list = sidebar only, chat = main only.
+/* layout-narrow (max-width: 860px): sidebar↔chat master-detail.
    Wide layout always shows both panes; `.mobile-list` / `.mobile-chat` on `.app` are ignored above 860px. */
 .topbar-back {
   display: none;
@@ -2073,6 +2073,7 @@ button.ghost {
   margin: 0;
 }
 
+/* panel-compact (max-width: 720px): settings top nav row */
 @media (max-width: 720px) {
   .settings-dialog {
     grid-template-columns: 1fr;
@@ -3299,12 +3300,25 @@ button.ghost {
 .main:has(.composer-card.has-quote) .thread-panel {
   bottom: 152px;
 }
+/* panel-compact */
 @media (max-width: 720px) {
   .main:has(.composer-card.has-quote) .thread-panel {
     bottom: 148px;
   }
 }
-@media (max-width: 767px) {
+/* Quote × hit ≥44 under touch-ui and layout-narrow (desktop fine/wide keeps 28). */
+.touch-ui .composer-quote-clear,
+html.touch-ui .composer-quote-clear {
+  width: 44px;
+  height: 44px;
+  margin-right: -6px;
+}
+.touch-ui .composer-quote-bar,
+html.touch-ui .composer-quote-bar {
+  height: 40px;
+}
+@media (max-width: 860px) {
+  /* layout-narrow */
   .composer-quote-clear {
     width: 44px;
     height: 44px;
@@ -3352,6 +3366,7 @@ button.ghost {
   overflow: auto;
   padding: 12px 14px 16px;
 }
+/* panel-compact: thread full-bleed + .msg-actions always visible */
 @media (max-width: 720px) {
   .thread-panel {
     left: 8px;
@@ -3691,6 +3706,7 @@ button.ghost {
 .bubble-stack > .bubble {
   max-width: 100%;
 }
+/* layout-narrow */
 @media (max-width: 860px) {
   .bubble-stack-user { max-width: 88%; }
   .bubble-stack-assistant { max-width: 92%; }
@@ -3748,7 +3764,7 @@ button.ghost {
   opacity: 1;
   pointer-events: auto;
 }
-/* Hide hover bars when useIsTouchUi sets html.touch-ui (pointer:coarse OR ≤767). */
+/* touch-ui token: hide hover bars when useIsTouchUi sets html.touch-ui (coarse OR ≤767). */
 .touch-ui .msg-hover-bar { display: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .msg-hover-bar { transition: none; }
@@ -4373,19 +4389,13 @@ button.ghost {
   padding: 14px 16px;
 }
 
+/* touch-ui width half (≤767): mobile diagram chrome; hit size → P1 touch-ui / panel-compact below */
 @media (max-width: 767px) {
-  .diagram-card,
-  .diagram-fs {
-    --diagram-hit: 40px;
-  }
   .diagram-card {
     --diagram-max-h: 240px;
   }
   .diagram-source-tail {
     max-height: 120px;
-  }
-  .diagram-menu-item {
-    height: 40px;
   }
   .diagram-fs {
     width: 100vw;
@@ -4558,7 +4568,7 @@ button.ghost {
 }
 
 
-/* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets ---- */
+/* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets (layout-narrow 860) ---- */
 
 .touch-ui .conv-item:hover .conv-del,
 .touch-ui .conv-item:focus-within .conv-del {
@@ -4719,7 +4729,7 @@ button.ghost {
   line-height: 1.45;
 }
 
-/* Bot avatar settings: full-width bottom sheet on touch / ≤860 */
+/* Bot avatar settings: full-width bottom sheet on touch-ui / layout-narrow (≤860) */
 .bot-avatar-backdrop-sheet {
   align-items: flex-end;
   justify-content: stretch;
@@ -4790,4 +4800,73 @@ button.ghost {
 
 .bot-avatar-modal-sheet .bot-machine-select {
   font-size: 16px;
+}
+
+/* ---- P1-A breakpoints: diagram hit ≥44 + toolbar ⋯ overflow ---- */
+/* Tokens: layout-narrow 860 · touch-ui (html.touch-ui / coarse|≤767) · panel-compact 720 */
+
+.touch-ui .diagram-card,
+.touch-ui .diagram-fs,
+html.touch-ui .diagram-card,
+html.touch-ui .diagram-fs {
+  --diagram-hit: 44px;
+}
+
+@media (max-width: 720px) {
+  /* panel-compact */
+  .diagram-card,
+  .diagram-fs {
+    --diagram-hit: 44px;
+  }
+}
+
+.touch-ui .diagram-menu-item,
+html.touch-ui .diagram-menu-item {
+  min-height: 44px;
+  height: auto;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+@media (max-width: 720px) {
+  .diagram-menu-item {
+    min-height: 44px;
+    height: auto;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+}
+
+.diagram-toolbar-extra {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.diagram-actions-inline {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+
+.diagram-card.is-toolbar-collapsed .diagram-actions-inline {
+  position: absolute;
+  width: max-content;
+  visibility: hidden;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+}
+
+.diagram-actions-more {
+  display: flex;
+  align-items: center;
+}
+
+.diagram-actions-more[hidden] {
+  display: none !important;
+}
+
+.diagram-overflow-menu {
+  min-width: 128px;
 }

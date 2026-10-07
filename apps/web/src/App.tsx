@@ -142,7 +142,7 @@ import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover
 import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ConvActionSheet } from "./components/ConvActionSheet";
-import { useIsTouchUi } from "./components/useIsTouchUi";
+import { LAYOUT_NARROW_MQ, useIsTouchUi } from "./components/useIsTouchUi";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
@@ -373,8 +373,7 @@ function readLastActiveSelection(userId: string): LastActiveSelection | null {
   return null;
 }
 
-/** Keep in sync with `@media (max-width: 860px)` in styles.css — master-detail chat nav. */
-const MOBILE_LAYOUT_MQ = "(max-width: 860px)";
+/** layout-narrow token (≤860) — master-detail / mobileView; CSS `@media (max-width: 860px)`. */
 
 const emptyLLMForm: LLMInput = {
   name: "默认连接",
@@ -432,7 +431,7 @@ export default function App() {
   const [mobileView, setMobileView] = useState<"list" | "chat">("list");
   const [isNarrowLayout, setIsNarrowLayout] = useState(() =>
     typeof window !== "undefined" && typeof window.matchMedia === "function"
-      ? window.matchMedia(MOBILE_LAYOUT_MQ).matches
+      ? window.matchMedia(LAYOUT_NARROW_MQ).matches
       : false,
   );
   const [onboardingDismissed, setOnboardingDismissedState] = useState(false);
@@ -2899,10 +2898,10 @@ export default function App() {
     await refreshConversations();
   };
 
-  // Sync with CSS `@media (max-width: 860px)`. Keep mobileView across wide↔narrow so the same pane returns.
+  // layout-narrow: sync with CSS max-width 860px. Keep mobileView across wide↔narrow so the same pane returns.
   useEffect(() => {
     if (typeof window.matchMedia !== "function") return;
-    const mq = window.matchMedia(MOBILE_LAYOUT_MQ);
+    const mq = window.matchMedia(LAYOUT_NARROW_MQ);
     const sync = () => setIsNarrowLayout(mq.matches);
     sync();
     if (typeof mq.addEventListener === "function") {

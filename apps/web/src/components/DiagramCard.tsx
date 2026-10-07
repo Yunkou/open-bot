@@ -24,9 +24,9 @@ import { copyText, downloadPng, downloadSvg } from "../lib/diagramExport";
 import { useAppTheme } from "./useAppTheme";
 import { HtmlDiagramCard } from "./HtmlDiagramCard";
 import { ImageDiagramCard } from "./ImageDiagramCard";
-import { DiagramCardFrame, type DiagramKind } from "./DiagramCardFrame";
+import { DiagramCardFrame, type DiagramKind, type DiagramOverflowItem } from "./DiagramCardFrame";
 
-export type { DiagramKind } from "./DiagramCardFrame";
+export type { DiagramKind, DiagramOverflowItem } from "./DiagramCardFrame";
 export { DiagramCardFrame } from "./DiagramCardFrame";
 
 const INLINE_ZOOM = { min: 0.5, max: 2 };
@@ -606,6 +606,34 @@ function MermaidDiagramCard({
     </>
   );
 
+  const overflowItems: DiagramOverflowItem[] = [
+    {
+      key: "source",
+      label: viewSource ? "图表" : "源码",
+      disabled: !ok,
+      onClick: toggleSource,
+    },
+    { key: "copy", label: "复制", onClick: onCopy },
+    {
+      key: "dl-svg",
+      label: "下载 SVG",
+      disabled: !ok || downloading,
+      onClick: () => onDownload("svg"),
+    },
+    {
+      key: "dl-png",
+      label: "下载 PNG",
+      disabled: !ok || downloading,
+      onClick: () => onDownload("png"),
+    },
+    {
+      key: "fs",
+      label: "全屏",
+      disabled: !ok,
+      onClick: () => setFullscreen(true),
+    },
+  ];
+
   const zoomBadge =
     ok && !viewSource && scale !== 1 ? (
       <button
@@ -656,7 +684,13 @@ function MermaidDiagramCard({
 
   return (
     <>
-      <DiagramCardFrame kind="mermaid" pending={loading} extra={zoomBadge} actions={actions}>
+      <DiagramCardFrame
+        kind="mermaid"
+        pending={loading}
+        extra={zoomBadge}
+        actions={actions}
+        overflowItems={overflowItems}
+      >
         {body}
       </DiagramCardFrame>
       {fullscreen && ok ? (

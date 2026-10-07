@@ -20,7 +20,7 @@ import {
   htmlSourceByteLength,
   sanitizeHtmlDiagram,
 } from "../lib/htmlDiagramSanitize";
-import { DiagramCardFrame } from "./DiagramCardFrame";
+import { DiagramCardFrame, type DiagramOverflowItem } from "./DiagramCardFrame";
 import { useAppTheme } from "./useAppTheme";
 
 function Svg16({ children }: { children: ReactNode }) {
@@ -279,6 +279,28 @@ export function HtmlDiagramCard({ source, pending = false }: { source: string; p
     </>
   );
 
+  const overflowItems: DiagramOverflowItem[] = [
+    {
+      key: "source",
+      label: viewSource && ready ? "预览" : "源码",
+      disabled: !ready,
+      onClick: toggleSource,
+    },
+    { key: "copy", label: "复制", onClick: onCopy },
+    {
+      key: "download",
+      label: "下载",
+      disabled: !ready,
+      onClick: onDownload,
+    },
+    {
+      key: "fs",
+      label: "全屏",
+      disabled: !ready,
+      onClick: () => setFullscreen(true),
+    },
+  ];
+
   let body: ReactNode;
   if (preview.mode === "pending") {
     body = (
@@ -338,7 +360,12 @@ export function HtmlDiagramCard({ source, pending = false }: { source: string; p
 
   return (
     <>
-      <DiagramCardFrame kind="html" pending={preview.mode === "pending"} actions={actions}>
+      <DiagramCardFrame
+        kind="html"
+        pending={preview.mode === "pending"}
+        actions={actions}
+        overflowItems={overflowItems}
+      >
         {body}
       </DiagramCardFrame>
       {fullscreen && ready && preview.mode === "ok" ? (

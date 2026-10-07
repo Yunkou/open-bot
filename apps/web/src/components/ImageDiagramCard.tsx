@@ -19,7 +19,7 @@ import {
   imageDownloadFilename,
 } from "../api";
 import { copyText } from "../lib/diagramExport";
-import { DiagramCardFrame } from "./DiagramCardFrame";
+import { DiagramCardFrame, type DiagramOverflowItem } from "./DiagramCardFrame";
 
 function Svg16({ children }: { children: ReactNode }) {
   return (
@@ -282,6 +282,27 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
     </>
   );
 
+  const overflowItems: DiagramOverflowItem[] = [
+    {
+      key: "copy",
+      label: "复制",
+      disabled: !copyTarget,
+      onClick: onCopy,
+    },
+    {
+      key: "download",
+      label: "下载",
+      disabled: !displaySrc || downloading,
+      onClick: onDownload,
+    },
+    {
+      key: "fs",
+      label: "全屏",
+      disabled: !ready,
+      onClick: () => setFullscreen(true),
+    },
+  ];
+
   let body: ReactNode;
   if (!displaySrc || status === "error") {
     body = (
@@ -324,7 +345,12 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
 
   return (
     <>
-      <DiagramCardFrame kind="image" pending={status === "loading"} actions={actions}>
+      <DiagramCardFrame
+        kind="image"
+        pending={status === "loading"}
+        actions={actions}
+        overflowItems={overflowItems}
+      >
         {body}
       </DiagramCardFrame>
       {fullscreen && displaySrc && status === "ok" ? (

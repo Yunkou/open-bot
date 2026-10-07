@@ -300,7 +300,7 @@ export function ChatMessage({
         }
       : {};
 
-  // Desktop (fine pointer & wide): hover bar. Touch UI (coarse OR ≤767): bottom action sheet.
+  // Desktop (fine pointer & wide): hover bar. touch-ui (coarse OR ≤767): bottom action sheet.
   const desktopBar =
     hasActions && !touchUi ? (
       <MessageHoverBar
