@@ -17,6 +17,7 @@ import {
   type AdminMember,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph } = Typography;
 
@@ -150,7 +151,7 @@ export default function MembersPage() {
         rowKey="id"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ ...LIST_PAGINATION }}
         columns={memberColumns}
         request={async () => {
           const data = await adminListMembers();

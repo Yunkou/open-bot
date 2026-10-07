@@ -12,7 +12,6 @@ import {
   type ProColumns,
 } from "@ant-design/pro-components";
 import {
-  adminCloneBot,
   adminCreateBot,
   adminDeleteBot,
   adminListBotSkills,
@@ -24,6 +23,7 @@ import {
   type AdminBotSkill,
   type AdminUser,
 } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph, Text } = Typography;
 
@@ -31,7 +31,6 @@ const MODE_OPTIONS = [
   { label: "团队模式", value: "team" },
   { label: "私人模式", value: "private" },
 ];
-
 
 function BotSkillsEditor({ botId }: { botId: string }) {
   const [skills, setSkills] = useState<AdminBotSkill[]>([]);
@@ -150,7 +149,7 @@ export default function BotsPage() {
     {
       title: "操作",
       valueType: "option",
-      width: 180,
+      width: 140,
       render: (_, row) => [
         <a
           key="edit"
@@ -161,23 +160,6 @@ export default function BotsPage() {
         >
           编辑
         </a>,
-        <Popconfirm
-          key="clone"
-          title="复制该 Bot？"
-          description="复制人设、岗位描述、电脑模式与 Skills 开关，归属同一成员；聊天记录、记忆、例行任务、密钥不复制。"
-          okText="复制"
-          onConfirm={async () => {
-            try {
-              const res = await adminCloneBot(row.id);
-              message.success(`已复制为「${res.bot?.name ?? "副本"}」`);
-              reload();
-            } catch (err) {
-              message.error(err instanceof Error ? err.message : String(err));
-            }
-          }}
-        >
-          <a>复制</a>
-        </Popconfirm>,
         row.is_builtin ? (
           <span key="del" style={{ color: "#999" }}>
             删除
@@ -208,7 +190,7 @@ export default function BotsPage() {
   return (
     <PageContainer title="Bot 管理">
       <Paragraph type="secondary">
-        管理本组织成员名下的助手（Bot）：创建、编辑系统提示与电脑模式、复制、删除。技能正文在「技能」页维护；此处仅勾选启用。
+        管理本组织成员名下的助手（Bot）：创建、编辑系统提示与电脑模式、删除。技能正文在「技能」页维护；此处仅勾选启用。
       </Paragraph>
       <ProTable<AdminBot>
         headerTitle="Bot 列表"
@@ -216,7 +198,7 @@ export default function BotsPage() {
         rowKey="id"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ ...LIST_PAGINATION }}
         toolBarRender={() => [
           <ModalForm
             key="create"

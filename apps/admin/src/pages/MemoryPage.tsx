@@ -36,6 +36,7 @@ import {
   type AdminUser,
   type MemoryQuery,
 } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph, Text } = Typography;
 
@@ -388,7 +389,7 @@ export default function MemoryPage() {
                 rowKey="id"
                 search={false}
                 options={{ reload: true }}
-                pagination={{ pageSize: 20 }}
+                pagination={{ ...LIST_PAGINATION }}
                 columns={memoryColumns}
                 request={async () => {
                   try {
@@ -424,7 +425,7 @@ export default function MemoryPage() {
                   rowKey={(row) => row.id || row.content}
                   search={false}
                   options={{ reload: true }}
-                  pagination={{ pageSize: 20 }}
+                  pagination={{ ...LIST_PAGINATION }}
                   columns={autoColumns}
                   request={async () => {
                     if (!userId) {
@@ -478,7 +479,7 @@ export default function MemoryPage() {
                   rowKey="id"
                   search={false}
                   options={{ reload: true }}
-                  pagination={{ pageSize: 20 }}
+                  pagination={{ ...LIST_PAGINATION }}
                   columns={recallColumns}
                   request={async () => {
                     try {
@@ -521,7 +522,7 @@ export default function MemoryPage() {
                   rowKey="id"
                   search={false}
                   options={{ reload: true }}
-                  pagination={{ pageSize: 20 }}
+                  pagination={{ ...LIST_PAGINATION }}
                   columns={compactColumns}
                   request={async () => {
                     try {

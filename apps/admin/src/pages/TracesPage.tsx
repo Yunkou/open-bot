@@ -10,6 +10,7 @@ import {
   type AdminMemoryRecallItem,
   type AdminTrace,
 } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph, Text, Link, Title } = Typography;
 
@@ -262,7 +263,7 @@ export default function TracesPage() {
             rowKey="id"
             search={false}
             options={{ reload: true }}
-            pagination={{ pageSize: 20 }}
+            pagination={{ ...LIST_PAGINATION }}
             columns={columns}
             request={async (params) => {
               try {

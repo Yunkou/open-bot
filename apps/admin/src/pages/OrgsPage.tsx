@@ -9,6 +9,7 @@ import {
   type PlatformOrgSummary,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { LIST_PAGINATION } from "../pagination";
 
 export default function OrgsPage() {
   const { user } = useAuth();
@@ -82,6 +83,7 @@ export default function OrgsPage() {
         rowKey="org_id"
         loading={loading}
         dataSource={orgs}
+        pagination={{ ...LIST_PAGINATION }}
         columns={[
           { title: "名称", dataIndex: "name" },
           { title: "Slug", dataIndex: "slug" },

@@ -32,6 +32,7 @@ import {
   adminUpsertSkill,
   type AdminSkill,
 } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph, Text } = Typography;
 
@@ -193,7 +194,7 @@ export default function SkillsPage() {
         rowKey="name"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ ...LIST_PAGINATION }}
         toolbar={{
           search: (
             <Input.Search

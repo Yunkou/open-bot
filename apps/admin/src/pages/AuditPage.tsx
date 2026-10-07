@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { Typography, message } from "antd";
 import { PageContainer, ProTable, type ActionType, type ProColumns } from "@ant-design/pro-components";
 import { adminListAuditLogs, type AuditLog } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph } = Typography;
 
@@ -50,7 +51,7 @@ export default function AuditPage() {
         rowKey="id"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 50 }}
+        pagination={{ ...LIST_PAGINATION }}
         columns={columns}
         request={async () => {
           try {

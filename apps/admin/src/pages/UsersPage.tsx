@@ -29,6 +29,7 @@ import {
   type AdminUserSkill,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph } = Typography;
 
@@ -225,7 +226,7 @@ export default function UsersPage() {
                   rowKey="id"
                   search={false}
                   options={{ reload: true }}
-                  pagination={{ pageSize: 20 }}
+                  pagination={{ ...LIST_PAGINATION }}
                   rowSelection={{
                     selectedRowKeys: selectedKeys,
                     onChange: (keys) => setSelectedKeys(keys as string[]),
