@@ -178,7 +178,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
             ))}
           </select>
           {machinesLoaded && machines.length === 0 ? (
-            <div className="muted small">还没有已连接的电脑。先保存也可以，连上电脑后再用本地能力。</div>
+            <div className="muted small">还没有已连接的电脑。连上电脑后再用本地能力。</div>
           ) : (
             <div className="muted small">本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。</div>
           )}

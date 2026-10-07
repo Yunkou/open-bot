@@ -364,7 +364,7 @@ export function NewChatPopover({
                 ))}
               </div>
               <label className="new-chat-field">
-                优先电脑（可选）
+                优先电脑
                 <select
                   className="bot-machine-select"
                   value={botMachineId}
@@ -386,13 +386,9 @@ export function NewChatPopover({
                 </select>
               </label>
               {machines.length === 0 ? (
-                <div className="muted small">
-                  还没有已连接的电脑。先创建也可以，连上电脑后再用本地能力。
-                </div>
+                <div className="muted small">还没有已连接的电脑。先创建也可以，连上电脑后再用本地能力。</div>
               ) : (
-                <div className="muted small">
-                  读文件、跑命令会在你当前发消息的电脑上执行。这里只是可选的默认优先机。
-                </div>
+                <div className="muted small">读文件、跑命令会在你当前发消息的电脑上执行。这里只是可选的默认优先机。</div>
               )}
             </div>
             {error ? <div className="new-chat-error">{error}</div> : null}
