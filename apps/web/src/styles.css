@@ -1637,7 +1637,6 @@ button.ghost {
   background: rgba(59, 130, 246, 0.12);
   color: var(--accent);
 }
-
 /* Product rule A: phone presence row — secondary grey, not danger */
 .tag.machine-login-only {
   background: rgba(107, 114, 128, 0.12);
@@ -5266,9 +5265,15 @@ html.touch-ui .diagram-menu-item {
 
 .settings-shell-subhead h2 {
   margin: 0;
-  text-align: center;
-  font-size: 17px;
+  text-align: left; /* subpages: title left of ×, not centered */
+  font-size: 16px;
   font-weight: 650;
+  letter-spacing: -0.01em;
+  padding-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .settings-shell-back {
@@ -5646,7 +5651,7 @@ html.touch-ui .composer-quote-clear {
   gap: 16px;
 }
 .shell-narrow .settings-dialog-shell .settings-section {
-  margin-top: 12px;
+  margin-top: 16px; /* hub card gap token */
 }
 
 /* Dark: round back/close soft fill */
@@ -5748,4 +5753,471 @@ html.touch-ui .composer-quote-clear {
   color: #6b7280;
   padding: 0 4px;
   margin-top: 0;
+}
+
+
+/* ============================================================
+   Settings subpages = hub token pack (2026-10-07)
+   Gate: .settings-dialog-shell / sheetForm / .shell-narrow only.
+   Desktop wide settings dialog stays as-is.
+   ============================================================ */
+
+/* --- Circle chrome: beat `.modal button` / `.llm-actions button` (0,1,1) --- */
+.modal.settings-dialog .settings-hub-close,
+.modal.settings-dialog .settings-shell-back,
+.modal.settings-dialog-shell .settings-hub-close,
+.modal.settings-dialog-shell .settings-shell-back,
+.modal.settings-dialog-shell .settings-shell-subhead .settings-close,
+.modal.bot-avatar-modal-shell .settings-shell-back,
+.modal.bot-avatar-modal-shell .settings-close,
+.bot-avatar-modal-shell .settings-shell-back,
+.bot-avatar-modal-shell .settings-close {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  margin: 0;
+  margin-top: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.modal.settings-dialog .settings-hub-close:active,
+.modal.settings-dialog .settings-shell-back:active,
+.modal.settings-dialog-shell .settings-shell-subhead .settings-close:active,
+.bot-avatar-modal-shell .settings-shell-back:active,
+.bot-avatar-modal-shell .settings-close:active {
+  background: var(--bg-hover, #eceef1);
+}
+
+[data-theme="dark"] .modal.settings-dialog .settings-hub-close,
+[data-theme="dark"] .modal.settings-dialog .settings-shell-back,
+[data-theme="dark"] .modal.settings-dialog-shell .settings-shell-subhead .settings-close,
+[data-theme="dark"] .bot-avatar-modal-shell .settings-shell-back,
+[data-theme="dark"] .bot-avatar-modal-shell .settings-close {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Subhead grid already 44 | 1fr | 44; reinforce side pad */
+.settings-dialog-shell .settings-shell-subhead,
+.bot-avatar-modal-shell .settings-shell-subhead {
+  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 8px;
+  background: #f2f2f7;
+}
+
+[data-theme="dark"] .bot-avatar-modal-shell .settings-shell-subhead {
+  background: #1c1c1e;
+}
+
+/* --- Shell page fill: scroll body + room for sticky CTA --- */
+.settings-dialog-shell > .settings-hub {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.settings-dialog-shell {
+  display: flex !important;
+  flex-direction: column;
+  grid-template-columns: none !important;
+  grid-template-rows: none !important;
+}
+
+.settings-dialog-shell > .settings-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: transparent;
+}
+
+.settings-dialog-shell .settings-main-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 16px 0;
+  display: flex;
+  flex-direction: column;
+  background: transparent;
+}
+
+.settings-dialog-shell .settings-page {
+  flex: 1 1 auto;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+}
+
+.settings-dialog-shell .settings-section:first-child {
+  margin-top: 8px;
+}
+
+.settings-dialog-shell .settings-card {
+  border-radius: 16px;
+  border: none;
+  overflow: visible; /* allow sticky CTA */
+  background: #fff;
+}
+
+[data-theme="dark"] .settings-dialog-shell .settings-card {
+  background: #2c2c2e;
+}
+
+.settings-dialog-shell .settings-section-label,
+.settings-dialog-shell .settings-section-head .settings-section-label {
+  font-size: 13px;
+  color: #6b7280;
+  padding-left: 4px;
+}
+
+.settings-dialog-shell .settings-hint {
+  font-size: 13px;
+  color: #8e8e93;
+  margin: 4px 4px 8px;
+  line-height: 1.5;
+}
+
+/* --- Forms: label above, touch height ≥44 --- */
+.settings-dialog-shell .llm-form {
+  gap: 14px;
+  border-top: none;
+}
+
+.settings-dialog-shell .settings-card > .llm-form {
+  padding: 16px;
+  gap: 14px;
+}
+
+.settings-dialog-shell .settings-card-padded {
+  padding: 16px;
+}
+
+.settings-dialog-shell .llm-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.settings-dialog-shell .llm-form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 400;
+}
+
+.settings-dialog-shell .llm-form input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  min-height: 20px;
+  flex-shrink: 0;
+}
+
+.settings-dialog-shell .llm-form input[type="text"],
+.settings-dialog-shell .llm-form input[type="password"],
+.settings-dialog-shell .llm-form input[type="number"],
+.settings-dialog-shell .llm-form input:not([type]),
+.settings-dialog-shell .llm-form select,
+.settings-dialog-shell .llm-form textarea,
+.settings-dialog-shell .settings-card input[type="text"],
+.settings-dialog-shell .settings-card input[type="password"],
+.settings-dialog-shell .settings-card input[type="number"],
+.settings-dialog-shell .settings-card input:not([type]),
+.settings-dialog-shell .settings-card select,
+.settings-dialog-shell .settings-card textarea,
+.settings-dialog-shell .bot-machine-select,
+.settings-dialog-shell .bot-settings-select,
+.settings-dialog-shell .bot-machine-name-edit input {
+  min-height: 44px;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  background: #fff;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 16px; /* avoid iOS zoom */
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.settings-dialog-shell .llm-form textarea,
+.settings-dialog-shell .settings-card textarea {
+  min-height: 88px;
+  resize: vertical;
+}
+
+/* Push last-section form CTA toward bottom when content is short */
+.settings-dialog-shell .settings-page > .settings-section:last-of-type {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.settings-dialog-shell .settings-page > .settings-section:last-of-type > .settings-card {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* --- Sticky full-width primary CTA (form actions only, not list-row actions) --- */
+.settings-dialog-shell .llm-form > .llm-actions {
+  display: flex;
+  flex-direction: column-reverse; /* DOM: primary first → visual bottom */
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 12px;
+  margin-left: -16px;
+  margin-right: -16px;
+  margin-bottom: 0;
+  padding: 12px 16px;
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  background: #f2f2f7;
+  border-top: 0.5px solid rgba(60, 60, 67, 0.12);
+  box-sizing: border-box;
+  border-radius: 0 0 16px 16px; /* mid-page: stay at card foot */
+}
+
+/* Last section form: true page-bottom sticky + safe-area */
+.settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form > .llm-actions {
+  margin-top: auto;
+  margin-bottom: -16px;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom, 0px));
+  border-radius: 0;
+}
+
+[data-theme="dark"] .settings-dialog-shell .llm-form > .llm-actions {
+  background: #1c1c1e;
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+/* When form sits in non-padded card (.settings-card > .llm-form has own pad) */
+.settings-dialog-shell .settings-card > .llm-form > .llm-actions {
+  margin-left: -16px;
+  margin-right: -16px;
+}
+
+.settings-dialog-shell .llm-form > .llm-actions > button.primary,
+.settings-dialog-shell .llm-form > .llm-actions > button[type="submit"].primary {
+  width: 100%;
+  min-height: 48px;
+  height: auto;
+  border: none;
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+}
+
+.settings-dialog-shell .llm-form > .llm-actions > button:not(.primary) {
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--accent, #3b82f6);
+  font-size: 15px;
+  font-weight: 500;
+  padding: 8px 12px;
+  box-shadow: none;
+}
+
+.settings-dialog-shell .llm-form > .llm-actions > button:not(.primary):active {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+/* List-row actions stay compact horizontal (设默认 / 编辑 / 删除) */
+.settings-dialog-shell .llm-item .llm-actions,
+.settings-dialog-shell .llm-list .llm-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  position: static;
+  background: transparent;
+  border: none;
+}
+.settings-dialog-shell .llm-item .llm-actions > button,
+.settings-dialog-shell .llm-list .llm-actions > button {
+  width: auto;
+  min-height: 36px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+/* Machines name+save: stack on shell instead of side-by-side flat */
+.settings-dialog-shell .bot-machine-name-edit {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+.settings-dialog-shell .bot-machine-name-edit > button.primary {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 14px;
+  font-size: 16px;
+  margin: 0;
+}
+
+/* --- Bot avatar / prefer-computer sheet = same shell tokens --- */
+.bot-avatar-backdrop-shell {
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.bot-avatar-modal-shell {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  margin: 0;
+  border-radius: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f2f2f7;
+  border: none;
+  box-shadow: none;
+}
+
+[data-theme="dark"] .bot-avatar-modal-shell {
+  background: #1c1c1e;
+}
+
+.bot-avatar-modal-shell .bot-avatar-form {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+}
+
+.bot-avatar-modal-shell .bot-avatar-form-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bot-avatar-modal-shell .bot-avatar-shell-card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+[data-theme="dark"] .bot-avatar-modal-shell .bot-avatar-shell-card {
+  background: #2c2c2e;
+}
+
+.bot-avatar-modal-shell .bot-avatar-label {
+  font-size: 13px;
+  color: #6b7280;
+  margin-top: 0;
+}
+
+.bot-avatar-modal-shell .bot-machine-select {
+  min-height: 44px;
+  border-radius: 12px;
+  font-size: 16px;
+}
+
+.bot-avatar-modal-shell .bot-avatar-form-footer,
+.bot-avatar-modal-shell .llm-actions.bot-avatar-form-footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 16px max(12px, env(safe-area-inset-bottom, 0px));
+  background: #f2f2f7;
+  border-top: 0.5px solid rgba(60, 60, 67, 0.12);
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+}
+
+[data-theme="dark"] .bot-avatar-modal-shell .bot-avatar-form-footer {
+  background: #1c1c1e;
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+.bot-avatar-modal-shell .bot-avatar-form-footer > button.primary {
+  width: 100%;
+  min-height: 48px;
+  border: none;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0;
+  padding: 12px 16px;
+}
+
+.bot-avatar-modal-shell .bot-avatar-form-footer > button:not(.primary) {
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent, #3b82f6);
+  font-size: 15px;
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+
+/* Keep legacy bottom-sheet class as alias when both applied */
+.bot-avatar-modal-sheet.bot-avatar-modal-shell {
+  max-height: 100%;
+  border-radius: 0;
+  padding: 0;
 }
