@@ -452,9 +452,9 @@ export default function App() {
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
   // bot_presence per agent (idle|thinking|working|awaiting_approval|error), pushed by server.
   const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
-  // bot_online overrides pushed by server (green dot); independent of presence face.
-  // Agent-global (not reset on conversation switch). Seeded from ListAgents `online`,
-  // updated live by `bot_online` (chat WS + conversation SSE).
+  // bot_online overrides (green dot); independent of presence face.
+  // Seeded from ListAgents / conversation.participants; live via bot_online.
+  // Conversation SSE frames are scoped to the open chat; WS frames are agent-global fallback.
   const [onlineByAgent, setOnlineByAgent] = useState<Record<string, boolean>>({});
   const applyBotOnline = useCallback((agentId: string, on: boolean) => {
     setOnlineByAgent((prev) => (prev[agentId] === on ? prev : { ...prev, [agentId]: on }));
@@ -1754,7 +1754,12 @@ export default function App() {
       await subscribeConversationEvents(
         conv.id,
         {
-          onBotOnline: (evt) => applyBotOnline(evt.agent_id, evt.online === true),
+          onBotOnline: (evt) => {
+            if (!evt.agent_id) return;
+            const openId = conversationRef.current?.id;
+            if (evt.conversation_id && openId && evt.conversation_id !== openId) return;
+            applyBotOnline(evt.agent_id, evt.online === true);
+          },
           onAgentStart: (info) => {
             if (!isRunCurrent()) return;
             const name =
@@ -1886,6 +1891,12 @@ export default function App() {
     // Sync ref immediately so in-flight tokens for the previous conv cannot paint into this view.
     conversationRef.current = conv;
     setConversation(conv);
+    // Session-host green dot: stamp from this conversation's participants.
+    for (const p of conv.participants ?? []) {
+      if (p.agent_id && typeof p.online === "boolean") {
+        applyBotOnline(p.agent_id, p.online);
+      }
+    }
     replyTargetRef.current = null;
     setReplyTarget(null);
     setOpenThreadRootId(null);

@@ -1334,6 +1334,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		userMsg.Attachments = linked
 	}
+	// Session host for green-dot / host routing: desktop client_env.machine_id.
+	if mid := clientEnvMachineID(body.Client); mid != "" {
+		if err := s.db.SetConversationLastMachineID(uid, conv.ID, mid); err == nil {
+			conv.LastMachineID = mid
+			if a, gerr := s.db.GetAgent(uid, conv.AgentID); gerr == nil && a != nil {
+				s.publishAgentOnlineSessionFlip(uid, a, mid, false)
+			}
+		}
+	}
 	if body.PersistOnly {
 		writeJSON(w, http.StatusOK, map[string]any{"message": userMsg, "persist_only": true})
 		return

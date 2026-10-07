@@ -18,6 +18,9 @@ type Conversation struct {
 	ChannelID string    `json:"channel_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// LastMachineID is the desktop host for the latest user message (session host).
+	// Empty for browser-only / never-desktop sessions. Not required on every SELECT.
+	LastMachineID string `json:"last_machine_id,omitempty"`
 	Messages  []Message `json:"messages,omitempty"`
 	// Participants carries agent avatar + online for the primary bot (DM) or channel members.
 	// Online is stamped by the API; not stored.

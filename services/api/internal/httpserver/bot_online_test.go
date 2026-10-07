@@ -148,7 +148,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-http-"+uid[:8], org.ID, db.RoleMember
 	if _, err := d.SetAgentMachineID(uid, a1.ID, m1.ID); err != nil {
 		t.Fatal(err)
 	}
-	// a2 unbound => offline even if some user machine is connected
+	// a2 unbound => 任一在线 (any connected host lights it)
 
 	s.hosts.mu.Lock()
 	s.hosts.sessions[hostKey(uid, m1.ID)] = &hostSession{userID: uid, machineID: m1.ID}
@@ -180,8 +180,8 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-http-"+uid[:8], org.ID, db.RoleMember
 	if !got[a1.ID] {
 		t.Fatalf("bound connected bot want online: %v", got)
 	}
-	if got[a2.ID] {
-		t.Fatalf("unbound bot must be offline: %v", got)
+	if !got[a2.ID] {
+		t.Fatalf("unbound bot must be online when any host is up: %v", got)
 	}
 	if mids[a1.ID] != m1.ID {
 		t.Fatalf("a1 machine_id=%q want %q", mids[a1.ID], m1.ID)
@@ -215,7 +215,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-http-"+uid[:8], org.ID, db.RoleMember
 		t.Fatalf("a2 should stay online on m2: %v", got)
 	}
 
-	// PATCH bind on create path: create unbound stays offline.
+	// Create unbound while m2 still connected => 任一在线 → online.
 	var buf bytes.Buffer
 	_ = json.NewEncoder(&buf).Encode(map[string]any{"name": "另一个"})
 	req = httptest.NewRequest(http.MethodPost, "/v1/agents", &buf)
@@ -224,12 +224,12 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-http-"+uid[:8], org.ID, db.RoleMember
 	s.handleCreateAgent(rec, req)
 	var created map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &created)
-	if created["online"] != false {
-		t.Fatalf("create unbound online=%v", created["online"])
+	if created["online"] != true {
+		t.Fatalf("create unbound with live host online=%v", created["online"])
 	}
 }
 
-func TestBotOnlineFanoutOnlyBoundAgent(t *testing.T) {
+func TestBotOnlineFanoutBoundAndUnbound(t *testing.T) {
 	d, err := db.Open("")
 	if err != nil {
 		t.Skip(err)
@@ -275,7 +275,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sse-"+uid[:8], org.ID, db.RoleMember,
 	if _, err := d.SetAgentMachineID(uid, aBound.ID, m.ID); err != nil {
 		t.Fatal(err)
 	}
-	// aOther intentionally unbound / different — must not light up.
+	// aOther unbound → 任一在线: also lights when this host connects.
 
 	chBound := s.convEvents.subscribe(convBound.ID)
 	defer s.convEvents.unsubscribe(convBound.ID, chBound)
@@ -301,8 +301,13 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sse-"+uid[:8], org.ID, db.RoleMember,
 
 	select {
 	case raw := <-chOther:
-		t.Fatalf("unbound agent must not receive bot_online, got %s", raw)
-	case <-time.After(200 * time.Millisecond):
+		var evt map[string]any
+		_ = json.Unmarshal(raw, &evt)
+		if evt["type"] != "bot_online" || evt["agent_id"] != aOther.ID || evt["online"] != true {
+			t.Fatalf("unbound connect evt=%v", evt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no bot_online on connect for unbound agent")
 	}
 
 	s.hosts.unregister(sess)
@@ -509,5 +514,68 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-unseen-"+uid[:8], org.ID, db.RoleMemb
 	case raw := <-ch:
 		t.Fatalf("duplicate %s", raw)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestAgentHostOnlineSessionOverridesPreferred(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sess-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid) })
+
+	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
+	a, err := d.CreateAgentWithAvatar(uid, "SessBot", "", "", "drop", "#9b5de5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mPref, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "pref-" + uid[:8], Label: "Pref", Platform: "macos",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mSess, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "sess-" + uid[:8], Label: "Sess", Platform: "linux",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetAgentMachineID(uid, a.ID, mPref.ID); err != nil {
+		t.Fatal(err)
+	}
+	a, _ = d.GetAgent(uid, a.ID)
+
+	// Prefer online, session host offline → session wins (must not 误亮).
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, mPref.ID)] = &hostSession{userID: uid, machineID: mPref.ID}
+	s.hosts.mu.Unlock()
+	if !s.agentHostOnline(uid, a) {
+		t.Fatal("preferred host up → ListAgents online")
+	}
+	if s.agentHostOnlineSession(uid, a, mSess.ID) {
+		t.Fatal("session host down → conversation online must be false")
+	}
+
+	// Session host up → online even if we only check session id.
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, mSess.ID)] = &hostSession{userID: uid, machineID: mSess.ID}
+	delete(s.hosts.sessions, hostKey(uid, mPref.ID))
+	s.hosts.mu.Unlock()
+	if !s.agentHostOnlineSession(uid, a, mSess.ID) {
+		t.Fatal("session host up → online")
+	}
+	if s.agentHostOnline(uid, a) {
+		t.Fatal("preferred down, no session arg → ListAgents offline")
 	}
 }

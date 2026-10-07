@@ -33,7 +33,7 @@ export type Agent = {
   avatar_shape?: string;
   /** Whitelisted 12-color palette (#rrggbb). */
   avatar_color?: string;
-  /** Bound host machine (user_machines.id). Empty/unset = unbound → online stays false. */
+  /** 优先电脑 (user_machines.id). Empty = session host, else any online. */
   machine_id?: string;
   /** Bound machine exec channel Connected + last_seen within BOT_ONLINE_THRESHOLD_SEC (server-computed). */
   online?: boolean;
@@ -72,16 +72,15 @@ export type BotPresenceEvent = {
 };
 
 /**
- * Bot online rule (PM locked): online iff host/runtime channel connected AND
- * heartbeat within the machine online threshold (90s, single constant on server).
- * Server computes `online` on ListAgents / member_profiles / participants and pushes
- * `bot_online` frames; client only consumes, never polls machines. Independent of
- * bot_presence face states.
+ * Bot online (green dot): session host → 优先电脑 → 任一在线; Connected ∧ heartbeat ≤90s.
+ * ListAgents uses 优先电脑→任一在线; conversation participants use session host when set.
+ * Client consumes `online` + `bot_online`; never polls machines. Independent of bot_presence.
  */
+
 export const BOT_ONLINE_THRESHOLD_SEC = 90;
 export type BotOnlineEvent = {
   type?: "bot_online" | string;
-  /** Optional; online is agent-global so clients do not filter on it. */
+  /** Present on conversation SSE; session-flip pushes update the active chat green dot. */
   conversation_id?: string;
   agent_id: string;
   online: boolean;
@@ -191,6 +190,8 @@ export type Conversation = {
   created_at: string;
   updated_at?: string;
   messages?: Message[];
+  /** Session-aware online for bots in this conversation (server-stamped). */
+  participants?: ChannelMemberProfile[];
 };
 
 export type LLMConnection = {

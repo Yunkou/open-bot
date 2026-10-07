@@ -10,13 +10,18 @@ import (
 	"github.com/tangxin/open-bot/services/api/internal/db"
 )
 
-// Bot↔host binding: agents.machine_id points at user_machines.id (this agent's
-// host/runtime exec channel). computer_mode remains sandbox layout only.
+// Bot online (green dot), independent of bot_presence face.
 //
-// Online rule (per Bot, independent of other bots / other machines / bot_presence):
-//   online == true iff the bound machine's exec socket is Connected in hostHub
-//   AND last_seen is within db.MachineOfflineAfter (90s).
-// Empty machine_id, missing machine, channel down, or stale last_seen => offline.
+// Host check: Connected in hostHub AND last_seen within db.MachineOfflineAfter (90s).
+//
+// Which machine (product 2026-10-07):
+//  1. Conversation session host (conversations.last_machine_id) when set — that
+//     machine only (offline stays dark; no silent fallthrough).
+//  2. Else agents.machine_id「优先电脑」when set — that machine only.
+//  3. Else any of the user's machines online (OR).
+//
+// ListAgents / agent-global pushes use (2) then (3). Conversation participants
+// pass session host via agentHostOnlineSession.
 
 // machineHostOnline is the pure host check used for Bot green-dot online.
 func machineHostOnline(m db.Machine, now time.Time) bool {
@@ -29,12 +34,48 @@ func machineHostOnline(m db.Machine, now time.Time) bool {
 	return now.Sub(m.LastSeen) <= db.MachineOfflineAfter
 }
 
-// agentHostOnline reports whether this agent's bound host/runtime channel is up.
+// agentHostOnline is ListAgents / agent-global: 优先电脑 → 任一在线.
 func (s *Server) agentHostOnline(userID string, a *db.Agent) bool {
+	return s.agentHostOnlineSession(userID, a, "")
+}
+
+// agentHostOnlineSession applies session host → 优先电脑 → 任一在线.
+func (s *Server) agentHostOnlineSession(userID string, a *db.Agent, sessionMachineID string) bool {
 	if s == nil || a == nil {
 		return false
 	}
-	return s.machineIDHostOnline(userID, a.MachineID)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return false
+	}
+	if sid := strings.TrimSpace(sessionMachineID); sid != "" {
+		return s.machineIDHostOnline(userID, sid)
+	}
+	if pref := strings.TrimSpace(a.MachineID); pref != "" {
+		return s.machineIDHostOnline(userID, pref)
+	}
+	return s.anyUserMachineOnline(userID)
+}
+
+// anyUserMachineOnline is true if any registered machine for the user is Connected + fresh.
+func (s *Server) anyUserMachineOnline(userID string) bool {
+	userID = strings.TrimSpace(userID)
+	if s == nil || s.db == nil || s.hosts == nil || userID == "" {
+		return false
+	}
+	machines, err := s.db.ListMachines(userID)
+	if err != nil || len(machines) == 0 {
+		return false
+	}
+	now := db.Now()
+	for i := range machines {
+		m := machines[i]
+		m.Connected = s.hosts.Connected(userID, m.ID)
+		if machineHostOnline(m, now) {
+			return true
+		}
+	}
+	return false
 }
 
 // machineIDHostOnline checks one user_machines row by id.
@@ -80,10 +121,15 @@ func (s *Server) seedBotOnlineCache(agentID string, online bool) {
 }
 
 func (s *Server) stampMemberProfilesOnline(userID string, profiles []db.ChannelMemberProfile) {
+	s.stampMemberProfilesOnlineSession(userID, profiles, "")
+}
+
+func (s *Server) stampMemberProfilesOnlineSession(userID string, profiles []db.ChannelMemberProfile, sessionMachineID string) {
 	if len(profiles) == 0 || s == nil || s.db == nil {
 		return
 	}
 	userID = strings.TrimSpace(userID)
+	sessionMachineID = strings.TrimSpace(sessionMachineID)
 	for i := range profiles {
 		aid := strings.TrimSpace(profiles[i].AgentID)
 		if aid == "" {
@@ -95,7 +141,7 @@ func (s *Server) stampMemberProfilesOnline(userID string, profiles []db.ChannelM
 			profiles[i].Online = false
 			continue
 		}
-		profiles[i].Online = s.agentHostOnline(userID, a)
+		profiles[i].Online = s.agentHostOnlineSession(userID, a, sessionMachineID)
 	}
 }
 
@@ -128,8 +174,15 @@ func (s *Server) conversationParticipants(userID string, c *db.Conversation) []d
 	if len(agentIDs) == 0 {
 		return nil
 	}
+	sessionMid := strings.TrimSpace(c.LastMachineID)
+	if sessionMid == "" && s.db != nil {
+		if mid, err := s.db.ConversationLastMachineID(userID, c.ID); err == nil {
+			sessionMid = mid
+			c.LastMachineID = mid
+		}
+	}
 	out := s.db.ChannelMemberProfiles(userID, agentIDs)
-	s.stampMemberProfilesOnline(userID, out)
+	s.stampMemberProfilesOnlineSession(userID, out, sessionMid)
 	return out
 }
 
@@ -140,8 +193,8 @@ func (s *Server) enrichConversationOnline(userID string, c *db.Conversation) {
 	c.Participants = s.conversationParticipants(userID, c)
 }
 
-// publishBotOnline pushes bot_online on conversation SSE (and chat WS, same as bot_presence).
-// Fan-out: conversations where this agent is the primary bot (conversations.agent_id).
+// publishBotOnline pushes bot_online on chat WS (agent-global: 优先电脑→任一在线)
+// and conversation SSE (per-conversation: session host → 优先电脑 → 任一在线).
 func (s *Server) publishBotOnline(userID, agentID string, online bool) {
 	if s == nil {
 		return
@@ -168,12 +221,21 @@ func (s *Server) publishBotOnline(userID, agentID string, online bool) {
 	if err != nil || len(ids) == 0 {
 		return
 	}
+	var agent *db.Agent
+	if a, err := s.db.GetAgent(userID, agentID); err == nil {
+		agent = a
+	}
 	for _, convID := range ids {
+		bit := online
+		if agent != nil {
+			mid, _ := s.db.ConversationLastMachineID(userID, convID)
+			bit = s.agentHostOnlineSession(userID, agent, mid)
+		}
 		evt := map[string]any{
 			"type":            "bot_online",
 			"conversation_id": convID,
 			"agent_id":        agentID,
-			"online":          online,
+			"online":          bit,
 			"updated_at":      updatedAt,
 		}
 		if payload, err := json.Marshal(evt); err == nil {
@@ -244,21 +306,78 @@ func (s *Server) publishAgentOnlineFlip(userID string, a *db.Agent, staleSweep b
 	s.publishBotOnline(userID, agentID, online)
 }
 
-// publishAgentsOnlineForMachine refreshes bots bound to this machine_id only.
-// machineID empty is a no-op (no user-wide OR).
+// publishAgentsOnlineForMachine refreshes bots affected when this host flips:
+// preferred binding, session-host conversations, and unbound (任一在线) bots.
 func (s *Server) publishAgentsOnlineForMachine(userID, machineID string) {
 	userID = strings.TrimSpace(userID)
 	machineID = strings.TrimSpace(machineID)
 	if s == nil || s.db == nil || userID == "" || machineID == "" {
 		return
 	}
-	agents, err := s.db.ListAgentsByMachineID(userID, machineID)
-	if err != nil {
-		return
-	}
-	for _, a := range agents {
+	seen := map[string]struct{}{}
+	refresh := func(a *db.Agent) {
+		if a == nil {
+			return
+		}
+		id := strings.TrimSpace(a.ID)
+		if id == "" {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
 		s.publishAgentOnlineIfChanged(userID, a)
 	}
+	if agents, err := s.db.ListAgentsByMachineID(userID, machineID); err == nil {
+		for _, a := range agents {
+			refresh(a)
+		}
+	}
+	if ids, err := s.db.ListAgentIDsByConversationLastMachine(userID, machineID); err == nil {
+		for _, aid := range ids {
+			if a, err := s.db.GetAgent(userID, aid); err == nil && a != nil {
+				// Session-aware bit for this host (even if preferred differs).
+				s.publishAgentOnlineSessionFlip(userID, a, machineID, false)
+			}
+		}
+	}
+	if unbound, err := s.db.ListAgentsWithEmptyMachineID(userID); err == nil {
+		for _, a := range unbound {
+			refresh(a)
+		}
+	}
+}
+
+// publishAgentOnlineSessionFlip publishes using sessionMachineID resolution.
+func (s *Server) publishAgentOnlineSessionFlip(userID string, a *db.Agent, sessionMachineID string, staleSweep bool) {
+	if s == nil || a == nil {
+		return
+	}
+	userID = strings.TrimSpace(userID)
+	agentID := strings.TrimSpace(a.ID)
+	if userID == "" || agentID == "" {
+		return
+	}
+	online := s.agentHostOnlineSession(userID, a, sessionMachineID)
+	cache := s.ensureBotOnlineCache()
+	cache.mu.Lock()
+	_, seen := cache.seen[agentID]
+	prev := cache.last[agentID]
+	if seen && prev == online {
+		cache.mu.Unlock()
+		return
+	}
+	if !seen && !online && !staleSweep {
+		cache.seen[agentID] = struct{}{}
+		cache.last[agentID] = false
+		cache.mu.Unlock()
+		return
+	}
+	cache.seen[agentID] = struct{}{}
+	cache.last[agentID] = online
+	cache.mu.Unlock()
+	s.publishBotOnline(userID, agentID, online)
 }
 
 // botOnlineSweepInterval: how often Connected host sockets are re-checked
@@ -296,13 +415,28 @@ func (s *Server) sweepBotOnline() {
 	if s == nil || s.db == nil || s.hosts == nil {
 		return
 	}
+	unboundDone := map[string]struct{}{}
 	for _, k := range s.hosts.connectedKeys() {
 		agents, err := s.db.ListAgentsByMachineID(k.userID, k.machineID)
-		if err != nil {
-			continue
+		if err == nil {
+			for _, a := range agents {
+				s.publishAgentOnlineFlip(k.userID, a, true)
+			}
 		}
-		for _, a := range agents {
-			s.publishAgentOnlineFlip(k.userID, a, true)
+		if ids, err := s.db.ListAgentIDsByConversationLastMachine(k.userID, k.machineID); err == nil {
+			for _, aid := range ids {
+				if a, err := s.db.GetAgent(k.userID, aid); err == nil && a != nil {
+					s.publishAgentOnlineSessionFlip(k.userID, a, k.machineID, true)
+				}
+			}
+		}
+		if _, ok := unboundDone[k.userID]; !ok {
+			unboundDone[k.userID] = struct{}{}
+			if unbound, err := s.db.ListAgentsWithEmptyMachineID(k.userID); err == nil {
+				for _, a := range unbound {
+					s.publishAgentOnlineFlip(k.userID, a, true)
+				}
+			}
 		}
 	}
 }

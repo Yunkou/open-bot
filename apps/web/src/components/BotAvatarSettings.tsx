@@ -203,7 +203,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
             {machinesLoaded && machines.length === 0 ? (
               <div className="muted small new-chat-help-wrap">还没有已连接的电脑。连上电脑后再用本地能力。</div>
             ) : (
-              <div className="muted small new-chat-help-wrap">本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。</div>
+              <div className="muted small new-chat-help-wrap">本地能力跟「你在哪台电脑上发这条消息」走。优先电脑是无会话机时的兜底，也影响此时的在线绿点。</div>
             )}
 
             {err ? <div className="auth-error">{err}</div> : null}
