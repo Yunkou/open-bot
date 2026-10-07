@@ -32,7 +32,7 @@
   --safe-top: max(env(safe-area-inset-top, 0px), var(--sat, 0px));
   --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sab, 0px));
   --chat-immersive-bg: var(--bg-elevated, #ffffff);
-  --chat-top-chrome: 52px;
+  --chat-top-chrome: 48px; /* floating row (~44) + tight pad; not a solid bar height */
   --chat-composer-chrome: 72px;
   --bg: #f0f1f3;
   --bg-elevated: #ffffff;
@@ -5632,7 +5632,8 @@ html.touch-ui .composer-quote-clear {
 /*
  * Immersive chat (Grok-style / ref-chat-fullheight-immersive):
  * - messages = full-bleed scroll layer (edge-to-edge under system bars)
- * - topbar + composer = absolute frosted overlays (not flex siblings that shrink the list)
+ * - topbar = absolute *floating controls* only (no full-width frosted band; bot-chat-top-chrome-float-v1)
+ * - composer = absolute gradient overlay (not flex siblings that shrink the list)
  * - scroll padding clears interactive chrome + --safe-top/--safe-bottom (Capacitor floors)
  * Settings / list stay non-immersive padded shells.
  */
@@ -5664,13 +5665,15 @@ html.touch-ui .composer-quote-clear {
   box-sizing: border-box;
   background: transparent;
   /* top: safe + topbar row; bottom: composer + home indicator */
-  padding-top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 52px));
+  padding-top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 48px));
   padding-bottom: calc(max(12px, var(--safe-bottom, 0px)) + var(--chat-composer-chrome, 72px));
   padding-left: 16px;
   padding-right: 16px;
 }
 
-/* Frosted overlay topbar — sits on messages; hit targets clear status bar via --safe-top */
+/* Minimal floating top chrome (bot-chat-top-chrome-float-v1):
+ * NO full-width frosted band — transparent header + short soft fade;
+ * frost/bg only on individual controls (← circle, Bot pill). */
 .app.shell-narrow.mobile-chat .main > .topbar {
   position: absolute;
   top: 0;
@@ -5679,42 +5682,96 @@ html.touch-ui .composer-quote-clear {
   z-index: 10;
   flex-shrink: 0;
   box-sizing: border-box;
+  /* Safe inset hangs on floating controls, not a solid bar */
   padding-top: max(16px, calc(var(--safe-top, 0px) + 8px));
-  padding-bottom: 10px;
+  padding-bottom: 6px;
   padding-left: 64px;
   padding-right: 12px;
   border-bottom: none;
-  background: color-mix(in srgb, var(--chat-immersive-bg, #fff) 72%, transparent);
-  backdrop-filter: blur(16px) saturate(1.2);
-  -webkit-backdrop-filter: blur(16px) saturate(1.2);
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  pointer-events: none; /* scroll reaches messages through gaps */
 }
-[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar {
-  background: rgba(17, 17, 19, 0.72);
+.app.shell-narrow.mobile-chat .main > .topbar > * {
+  pointer-events: auto;
 }
-/* Fallback when color-mix unsupported */
+/* Short soft top fade (~24–40px per float-v1) — conversation shows through; not a slab */
+.app.shell-narrow.mobile-chat .main > .topbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 36px; /* locked ~24–40px; independent of full chrome height */
+  pointer-events: none;
+  z-index: -1;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--chat-immersive-bg, #fff) 70%, transparent) 0%,
+    color-mix(in srgb, var(--chat-immersive-bg, #fff) 22%, transparent) 60%,
+    transparent 100%
+  );
+}
+[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar::after {
+  background: linear-gradient(
+    180deg,
+    rgba(17, 17, 19, 0.65) 0%,
+    rgba(17, 17, 19, 0.18) 60%,
+    transparent 100%
+  );
+}
 @supports not (background: color-mix(in srgb, white 50%, transparent)) {
-  .app.shell-narrow.mobile-chat .main > .topbar {
-    background: rgba(255, 255, 255, 0.78);
-  }
-  [data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar {
-    background: rgba(17, 17, 19, 0.78);
+  .app.shell-narrow.mobile-chat .main > .topbar::after {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.65) 0%, rgba(255, 255, 255, 0.15) 60%, transparent 100%);
   }
 }
 
-.app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
-  background: color-mix(in srgb, var(--bg-elevated, #fff) 55%, transparent);
-  border-color: transparent;
+/* Frost/bg on floating ← circle only */
+.app.shell-narrow.mobile-chat .main > .topbar .topbar-back {
+  background: color-mix(in srgb, var(--chat-immersive-bg, #fff) 62%, transparent);
+  backdrop-filter: blur(12px) saturate(1.15);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar .topbar-back {
+  background: rgba(255, 255, 255, 0.12);
   box-shadow: none;
 }
+
+/* Compact Bot/agent pill — avatar + name only; frost on pill */
+.app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
+  max-width: min(220px, calc(100vw - 120px));
+  background: color-mix(in srgb, var(--bg-elevated, #fff) 70%, transparent);
+  border-color: transparent;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  backdrop-filter: blur(12px) saturate(1.15);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+  overflow: hidden;
+}
 [data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.1);
   color: #f5f5f7;
+  box-shadow: none;
+}
+.app.shell-narrow.mobile-chat .main > .topbar .agent-pill-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Hide channel member dump + 「训练」 on shell-narrow chat (clutter) */
+.shell-narrow .agent-pill-members {
+  display: none;
+}
+.shell-narrow .train-entry-btn {
+  display: none !important;
 }
 
 /* Host activity strip — float under topbar, does not steal flex space */
 .app.shell-narrow.mobile-chat .main > .status {
   position: absolute;
-  top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 52px));
+  top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 48px));
   left: 0;
   right: 0;
   z-index: 9;

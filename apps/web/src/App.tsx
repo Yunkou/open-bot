@@ -439,6 +439,8 @@ export default function App() {
   const [agentId, setAgentId] = useState("");
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  /** True while opening another bot/channel chat — suppress stale paint / onboarding flash. */
+  const [chatSwitchPending, setChatSwitchPending] = useState(false);
   /** Composer reply target (Slack-style). */
   const [replyTarget, setReplyTarget] = useState<ComposerReplyTarget | null>(null);
   const replyTargetRef = useRef<ComposerReplyTarget | null>(null);
@@ -1314,7 +1316,7 @@ export default function App() {
   );
 
   const showOnboarding = Boolean(
-    authed && selectionHydrated && !hasChatMessages && !onboardingDismissed && !sending,
+    authed && selectionHydrated && !hasChatMessages && !onboardingDismissed && !sending && !chatSwitchPending,
   );
 
 
@@ -2128,6 +2130,7 @@ export default function App() {
     replyTargetRef.current = null;
     setReplyTarget(null);
     setOpenThreadRootId(null);
+    setChatSwitchPending(false);
     const activeRun = runsRef.current.get(conv.id);
     if (activeRun) {
       const buffered = messagesByConvRef.current.get(conv.id) ?? [];
@@ -2144,6 +2147,11 @@ export default function App() {
       messagesByConvRef.current.set(conv.id, mapped);
       messagesLiveRef.current = mapped;
       setMessages(mapped);
+    } else {
+      // Never leave the previous conversation's bubbles on screen when apiMsgs was omitted.
+      const cached = messagesByConvRef.current.get(conv.id) ?? [];
+      messagesLiveRef.current = cached;
+      setMessages(cached);
     }
   };
 
@@ -2157,6 +2165,24 @@ export default function App() {
     setAgentId(id);
     setPendingFiles([]);
     setStatus("");
+    // Drop previous conv immediately so stream patches cannot re-paint old bubbles under the new header.
+    stickToBottomRef.current = true;
+    setChatSwitchPending(true);
+    conversationRef.current = null;
+    setConversation(null);
+    replyTargetRef.current = null;
+    setReplyTarget(null);
+    setOpenThreadRootId(null);
+    const agentEntry = agents.find((a) => a.id === id);
+    const cachedConvId = (agentEntry?.conversation_id || "").trim();
+    const cachedMsgs = cachedConvId ? messagesByConvRef.current.get(cachedConvId) : undefined;
+    if (cachedMsgs) {
+      messagesLiveRef.current = cachedMsgs;
+      setMessages(cachedMsgs);
+    } else {
+      messagesLiveRef.current = [];
+      setMessages([]);
+    }
     try {
       const conv = await openPrimaryConversation(id);
       if (selectGen !== selectGenRef.current) return;
@@ -2183,7 +2209,9 @@ export default function App() {
       if (selectGen !== selectGenRef.current) return;
       conversationRef.current = null;
       setConversation(null);
+      messagesLiveRef.current = [];
       setMessages([]);
+      setChatSwitchPending(false);
       setSending(false);
       setStatus(err instanceof Error ? err.message : String(err));
     }
@@ -2196,12 +2224,30 @@ export default function App() {
       setSending(false);
       setRunLabel("正在思考…");
       setMobileView("chat");
+      stickToBottomRef.current = true;
+      setChatSwitchPending(true);
+      // Drop previous conv immediately so old bubbles cannot linger under the new channel header.
+      conversationRef.current = null;
+      setConversation(null);
+      replyTargetRef.current = null;
+      setReplyTarget(null);
+      setOpenThreadRootId(null);
+      const channelEntry = channels.find((c) => c.id === channelId);
+      const cachedConvId = (channelEntry?.conversation_id || "").trim();
+      const cachedMsgs = cachedConvId ? messagesByConvRef.current.get(cachedConvId) : undefined;
+      if (cachedMsgs) {
+        messagesLiveRef.current = cachedMsgs;
+        setMessages(cachedMsgs);
+      } else {
+        messagesLiveRef.current = [];
+        setMessages([]);
+      }
+      setPendingFiles([]);
+      setStatus("");
       const { conversation: conv } = await openChannelConversation(channelId);
       if (selectGen !== selectGenRef.current) return;
       conversationRef.current = conv;
       setAgentId(conv.agent_id);
-      setPendingFiles([]);
-      setStatus("");
       const activeRun = runsRef.current.get(conv.id);
       let apiMsgs: Message[] | undefined;
       let runActive = false;
@@ -2221,9 +2267,10 @@ export default function App() {
         void resumeActiveRun(conv, agentNameById);
       }
     } catch (err) {
+      setChatSwitchPending(false);
       toast.error(err instanceof Error ? err.message : String(err));
     }
-  }, [agentNameById, refreshChannels, saveLastActiveSelection]);
+  }, [agentNameById, channels, refreshChannels, saveLastActiveSelection]);
 
   const sendUserText = async (rawContent: string, filesToSend: PendingFile[] = []) => {
     const content = rawContent.trim();
@@ -4037,7 +4084,7 @@ export default function App() {
                   ))}
                 </span>
                 <span className="agent-pill-name">{activeChannel.name}</span>
-                <span className="muted small" style={{ marginLeft: 8 }}>
+                <span className="agent-pill-members muted small" style={{ marginLeft: 8 }}>
                   {(activeChannel.members || [])
                     .map((id) => agentNameById.get(id) || id)
                     .join("、")}
@@ -4073,8 +4120,13 @@ export default function App() {
           </div>
         </header>
 
-        <div className="messages" ref={messagesRef} onScroll={onMessagesScroll}>
-          {!selectionHydrated ? (
+        <div
+          className="messages"
+          key={conversation?.id ?? agentId ?? "none"}
+          ref={messagesRef}
+          onScroll={onMessagesScroll}
+        >
+          {!selectionHydrated || (chatSwitchPending && messages.length === 0) ? (
             <div className="empty">
               <p className="muted">加载中…</p>
             </div>
