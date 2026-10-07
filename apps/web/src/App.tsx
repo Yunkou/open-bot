@@ -375,6 +375,32 @@ function readLastActiveSelection(userId: string): LastActiveSelection | null {
   return null;
 }
 
+const listFoldStorageKey = (userId: string) => `openbot_list_fold_${userId}`;
+
+type ListFoldState = { assistantsCollapsed: boolean; groupsCollapsed: boolean };
+
+function readListFoldState(userId: string): ListFoldState {
+  try {
+    const raw = localStorage.getItem(listFoldStorageKey(userId));
+    if (!raw) return { assistantsCollapsed: false, groupsCollapsed: false };
+    const parsed = JSON.parse(raw) as Partial<ListFoldState>;
+    return {
+      assistantsCollapsed: Boolean(parsed.assistantsCollapsed),
+      groupsCollapsed: Boolean(parsed.groupsCollapsed),
+    };
+  } catch {
+    return { assistantsCollapsed: false, groupsCollapsed: false };
+  }
+}
+
+function writeListFoldState(userId: string, next: ListFoldState) {
+  try {
+    localStorage.setItem(listFoldStorageKey(userId), JSON.stringify(next));
+  } catch {
+    // Ignore unavailable localStorage.
+  }
+}
+
 /** layout-narrow token (≤860) — master-detail / mobileView; CSS `@media (max-width: 860px)`. */
 
 const emptyLLMForm: LLMInput = {
@@ -435,6 +461,9 @@ export default function App() {
   const [mobileView, setMobileView] = useState<"list" | "chat">("list");
   /** Mobile settings hub (C-2); true = Grok-style grouped home. */
   const [settingsShellHub, setSettingsShellHub] = useState(true);
+  /** #6 shell list fold — default both expanded; persisted per user. */
+  const [assistantsCollapsed, setAssistantsCollapsed] = useState(false);
+  const [groupsCollapsed, setGroupsCollapsed] = useState(false);
   const [isNarrowLayout, setIsNarrowLayout] = useState(() =>
     typeof window !== "undefined" && typeof window.matchMedia === "function"
       ? window.matchMedia(LAYOUT_NARROW_MQ).matches
@@ -457,9 +486,9 @@ export default function App() {
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
   // bot_presence per agent (idle|thinking|working|awaiting_approval|error), pushed by server.
   const [presenceByAgent, setPresenceByAgent] = useState<Record<string, BotPresenceStatus>>({});
-  // bot_online overrides (green dot); independent of presence face.
-  // Seeded from ListAgents / conversation.participants; live via bot_online.
-  // Conversation SSE frames are scoped to the open chat; WS frames are agent-global fallback.
+  // bot_online overrides pushed by server (green dot); independent of presence face.
+  // Agent-global (not reset on conversation switch). Seeded from ListAgents `online`,
+  // updated live by `bot_online` (chat WS + conversation SSE).
   const [onlineByAgent, setOnlineByAgent] = useState<Record<string, boolean>>({});
   const applyBotOnline = useCallback((agentId: string, on: boolean) => {
     setOnlineByAgent((prev) => (prev[agentId] === on ? prev : { ...prev, [agentId]: on }));
@@ -536,6 +565,38 @@ export default function App() {
       root.style.removeProperty("--keyboard-inset");
     };
   }, [sheetForm]);
+
+  useEffect(() => {
+    if (!user?.id) {
+      setAssistantsCollapsed(false);
+      setGroupsCollapsed(false);
+      return;
+    }
+    const saved = readListFoldState(user.id);
+    setAssistantsCollapsed(saved.assistantsCollapsed);
+    setGroupsCollapsed(saved.groupsCollapsed);
+  }, [user?.id]);
+
+  const toggleAssistantsCollapsed = useCallback(() => {
+    setAssistantsCollapsed((prev) => {
+      const next = !prev;
+      if (user?.id) {
+        writeListFoldState(user.id, { assistantsCollapsed: next, groupsCollapsed });
+      }
+      return next;
+    });
+  }, [user?.id, groupsCollapsed]);
+
+  const toggleGroupsCollapsed = useCallback(() => {
+    setGroupsCollapsed((prev) => {
+      const next = !prev;
+      if (user?.id) {
+        writeListFoldState(user.id, { assistantsCollapsed, groupsCollapsed: next });
+      }
+      return next;
+    });
+  }, [user?.id, assistantsCollapsed]);
+
 
   const [convSheet, setConvSheet] = useState<
     | { kind: "agent"; agent: Agent }
@@ -3566,7 +3627,27 @@ export default function App() {
           </div>
         )}
 
-        <div className="section-label">助手</div>
+        {sheetForm ? (
+          <button
+            type="button"
+            className="section-fold-head"
+            aria-expanded={!assistantsCollapsed}
+            onClick={toggleAssistantsCollapsed}
+          >
+            <span className="section-fold-title">助手</span>
+            <span className="section-fold-meta">
+              {assistantsCollapsed ? (
+                <span className="section-fold-count">{filteredAgents.length}</span>
+              ) : null}
+              <span className="section-fold-chevron" aria-hidden>
+                {assistantsCollapsed ? "▸" : "▾"}
+              </span>
+            </span>
+          </button>
+        ) : (
+          <div className="section-label">助手</div>
+        )}
+        {!(sheetForm && assistantsCollapsed) ? (
         <nav className="agent-list">
           {agents.length === 0 ? (
             <div className="muted small" style={{ padding: "8px 10px", lineHeight: 1.5 }}>
@@ -3636,8 +3717,31 @@ export default function App() {
             })
           )}
         </nav>
+        ) : null}
 
-        <div className="section-label">群聊</div>
+        {sheetForm && channels.length === 0 ? null : (
+        <>
+        {sheetForm ? (
+          <button
+            type="button"
+            className="section-fold-head"
+            aria-expanded={!groupsCollapsed}
+            onClick={toggleGroupsCollapsed}
+          >
+            <span className="section-fold-title">群聊</span>
+            <span className="section-fold-meta">
+              {groupsCollapsed ? (
+                <span className="section-fold-count">{filteredChannels.length}</span>
+              ) : null}
+              <span className="section-fold-chevron" aria-hidden>
+                {groupsCollapsed ? "▸" : "▾"}
+              </span>
+            </span>
+          </button>
+        ) : (
+          <div className="section-label">群聊</div>
+        )}
+        {!(sheetForm && groupsCollapsed) ? (
         <div className="conv-list channel-list">
           {filteredChannels.length === 0 ? (
             <div className="muted small" style={{ padding: "4px 10px" }}>
@@ -3710,6 +3814,9 @@ export default function App() {
             })
           )}
         </div>
+        ) : null}
+        </>
+        )}
 
         {!sheetForm ? (
           <div className="sidebar-foot">

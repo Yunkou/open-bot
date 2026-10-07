@@ -35,8 +35,8 @@ function Chevron() {
 }
 
 /**
- * Grok-style grouped settings hub for touch-ui / layout-narrow (C-2).
- * Drill-downs use existing settings tabs / sheets.
+ * Grok-style grouped settings hub for touch-ui / layout-narrow (C-2 → #7 v2).
+ * Fullscreen gray+white cards; drill-downs use existing settings tabs / sheets.
  */
 export function MobileSettingsHub({
   username,
@@ -50,7 +50,7 @@ export function MobileSettingsHub({
   onLogout,
 }: Props) {
   return (
-    <div className="settings-hub">
+    <div className="settings-hub settings-hub-v2">
       <div className="settings-hub-top">
         <h2 className="settings-hub-title">设置</h2>
         <button type="button" className="settings-hub-close" aria-label="关闭" onClick={onClose}>

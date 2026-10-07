@@ -4880,12 +4880,27 @@ html.touch-ui .diagram-menu-item {
   padding: 0;
   height: 100%;
   max-height: 100%;
+  background: var(--bg-elevated, #fff); /* #5: match chat main surface (white/elevated) */
+}
+/* Beat @media .app.mobile-list .sidebar { margin:10px } grey gutters */
+.app.shell-narrow.mobile-list .sidebar {
+  display: flex;
+  margin: 0;
+  width: auto;
+  height: 100%;
+  max-height: 100%;
+  background: var(--bg-elevated, #fff);
+}
+.app.shell-narrow.mobile-list {
+  background: var(--bg-elevated, #fff);
+}
+.app.shell-narrow.mobile-chat {
   background: var(--bg-elevated, #fff);
 }
 
 .sidebar-shell-head {
   flex-shrink: 0;
-  padding: max(12px, env(safe-area-inset-top, 0px)) 12px 4px;
+  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 4px;
 }
 
 .sidebar-shell-topbar {
@@ -5234,7 +5249,7 @@ html.touch-ui .diagram-menu-item {
   grid-template-columns: 44px 1fr 44px;
   align-items: center;
   gap: 4px;
-  padding: max(12px, env(safe-area-inset-top, 0px)) 8px 4px;
+  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 8px 4px;
   background: #f2f2f7;
 }
 
@@ -5255,7 +5270,7 @@ html.touch-ui .diagram-menu-item {
   min-width: 44px;
   min-height: 44px;
   border: none;
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--bg-soft, #f3f4f6);
   border-radius: 50%;
   font-size: 20px;
   cursor: pointer;
@@ -5267,15 +5282,17 @@ html.touch-ui .diagram-menu-item {
 }
 
 .settings-shell-back:active {
-  background: rgba(0, 0, 0, 0.12);
+  background: var(--bg-hover, #eceef1);
 }
 
 .settings-hub {
   display: flex;
   flex-direction: column;
   height: 100%;
+  max-height: 100%;
   min-height: 0;
-  background: #f2f2f7;
+  overflow: hidden;
+  background: #f2f2f7; /* #7: settings gray; list/chat stay white (#5) */
 }
 
 [data-theme="dark"] .settings-hub {
@@ -5287,7 +5304,7 @@ html.touch-ui .diagram-menu-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: max(12px, env(safe-area-inset-top, 0px)) 12px 8px;
+  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 8px;
   min-height: 52px;
   box-sizing: content-box;
 }
@@ -5307,12 +5324,14 @@ html.touch-ui .diagram-menu-item {
   min-height: 44px;
   border: none;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--bg-soft, #f3f4f6);
   display: grid;
   place-items: center;
   cursor: pointer;
   color: var(--text);
   flex-shrink: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 .settings-hub-scroll {
@@ -5320,10 +5339,10 @@ html.touch-ui .diagram-menu-item {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 8px 16px 16px;
+  padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px; /* #7: card gap 16 */
 }
 
 .settings-hub-section-label {
@@ -5335,7 +5354,7 @@ html.touch-ui .diagram-menu-item {
 
 .settings-hub-card {
   background: #fff;
-  border-radius: 14px;
+  border-radius: 16px; /* #7: 14–16 */
   overflow: hidden;
 }
 
@@ -5457,9 +5476,9 @@ html.touch-ui .diagram-menu-item {
 
 /* ---- Mobile safe-area hotfixes (§7 · status bar / home indicator) ---- */
 
-/* Top: max(12px, env(safe-area-inset-top)) — chat topbar (hub/list/subhead set above) */
+/* Top: max(16px, env(safe-area-inset-top)+8px) — chat topbar (hub/list/subhead set above) */
 .shell-narrow .topbar {
-  padding-top: max(12px, env(safe-area-inset-top, 0px));
+  padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + 8px));
 }
 
 .shell-narrow .topbar-back {
@@ -5492,7 +5511,7 @@ html.touch-ui .diagram-menu-item {
   display: grid;
   place-items: center;
   border: none;
-  background: rgba(0, 0, 0, 0.06);
+  background: var(--bg-soft, #f3f4f6);
   border-radius: 50%;
   cursor: pointer;
   color: var(--text);
@@ -5510,7 +5529,7 @@ html.touch-ui .diagram-menu-item {
 
 /* Logout: §7 — last hub card clears home indicator (scroll pad + card margin) */
 .settings-hub-scroll > .settings-hub-card:last-child {
-  margin-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  margin-bottom: max(16px, env(safe-area-inset-bottom, 0px));
 }
 
 /* Composer / sticky bottom CTAs on shell */
@@ -5564,6 +5583,9 @@ html.touch-ui .composer-quote-clear {
   min-width: 44px;
   min-height: 44px;
   border-radius: 50%;
+  background: var(--bg-soft, #f3f4f6);
+  border: none;
+  box-sizing: border-box;
 }
 
 /* Chat: topbar → messages flex:1 → composer pinned bottom (+ vv / safe-area) */
@@ -5573,29 +5595,34 @@ html.touch-ui .composer-quote-clear {
   /* keyboard scroll offset: pin shell to visible viewport top */
   margin-top: var(--vv-offset-top, 0px);
 }
-/* specificity ≥ .app.mobile-chat .main (display:grid @860) */
-.app.shell-narrow .main,
-.app.shell-narrow.mobile-chat .main,
-.app.shell-narrow.mobile-list .main {
+/* #1 CRITICAL: flex ONLY on mobile-chat.
+   Do NOT set display:flex on .mobile-list .main — that overrode
+   @media .app.mobile-list .main { display:none } and stacked list+chat. */
+.app.shell-narrow.mobile-chat .main {
   display: flex;
   flex-direction: column;
   min-height: 0;
   height: 100%;
   max-height: 100%;
   overflow: hidden;
+  background: var(--bg-elevated, #fff);
 }
-.app.shell-narrow .main > .status {
+/* specificity ≥ the old flex rule AND ≥ @media .app.mobile-list .main */
+.app.shell-narrow.mobile-list .main {
+  display: none;
+}
+.app.shell-narrow.mobile-chat .main > .status {
   flex-shrink: 0;
 }
-.app.shell-narrow .main > .topbar {
+.app.shell-narrow.mobile-chat .main > .topbar {
   flex-shrink: 0;
 }
-.app.shell-narrow .main > .messages {
+.app.shell-narrow.mobile-chat .main > .messages {
   flex: 1 1 auto;
   min-height: 0;
   padding: 8px 16px 12px; /* composer is sibling — no 120 overlay pad */
 }
-.app.shell-narrow .main > .composer-wrap {
+.app.shell-narrow.mobile-chat .main > .composer-wrap {
   flex-shrink: 0;
   position: relative;
   z-index: 5;
@@ -5609,7 +5636,7 @@ html.touch-ui .composer-quote-clear {
 
 /* Settings cards: gap already 12 on .settings-hub-scroll; reinforce section spacing */
 .shell-narrow .settings-hub-scroll {
-  gap: 12px;
+  gap: 16px;
 }
 .shell-narrow .settings-dialog-shell .settings-section {
   margin-top: 12px;
@@ -5618,6 +5645,100 @@ html.touch-ui .composer-quote-clear {
 /* Dark: round back/close soft fill */
 [data-theme="dark"] .settings-shell-back,
 [data-theme="dark"] .settings-dialog-shell .settings-shell-subhead .settings-close,
-[data-theme="dark"] .settings-hub-close {
+[data-theme="dark"] .settings-hub-close,
+[data-theme="dark"] .shell-narrow .topbar-back,
+[data-theme="dark"] .shell-narrow .sidebar-shell-search-btn,
+[data-theme="dark"] .shell-narrow .icon-btn.sidebar-shell-plus {
   background: rgba(255, 255, 255, 0.1);
+}
+
+
+/* ---- #6 Fold sections (shell-narrow only) ---- */
+.shell-narrow .section-fold-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  padding: 10px 16px 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  min-height: 40px;
+  text-align: left;
+}
+.shell-narrow .section-fold-head:active {
+  background: var(--bg-soft, #f3f4f6);
+}
+.shell-narrow .section-fold-title {
+  flex: 1;
+  min-width: 0;
+}
+.shell-narrow .section-fold-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.shell-narrow .section-fold-count {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  opacity: 0.85;
+}
+.shell-narrow .section-fold-chevron {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  opacity: 0.7;
+  transition: transform 160ms ease;
+}
+.shell-narrow .section-fold-body[hidden] {
+  display: none !important;
+}
+
+
+/* ---- #7 Settings hub v2 deepen ---- */
+.settings-hub-v2.settings-hub,
+.settings-hub.settings-hub-v2 {
+  height: 100%;
+  max-height: 100%;
+}
+.settings-hub-v2 .settings-hub-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 16px;
+  padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
+}
+.settings-hub-v2 .settings-hub-card {
+  border-radius: 16px;
+}
+.settings-hub-v2 .settings-hub-row-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.settings-hub-v2 .settings-hub-row-sub {
+  font-size: 13px;
+  line-height: 1.35;
+  margin-top: 2px;
+  padding-bottom: 2px; /* keep sub clear of row bottom (≥10 with row pad) */
+}
+.settings-hub-v2 .settings-hub-row {
+  border-bottom-width: 0.5px;
+}
+.settings-hub-v2 .settings-hub-section-label {
+  font-size: 13px;
+  color: #6b7280;
+  padding: 0 4px;
+  margin-top: 0;
 }
