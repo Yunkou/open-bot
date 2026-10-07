@@ -138,11 +138,13 @@ import {
 import { AgentAvatar } from "./components/AgentAvatar";
 import { FeedbackModal, type FeedbackTarget } from "./components/FeedbackModal";
 import { TrainPanel } from "./components/TrainPanel";
-import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
+import { NewChatPopover, type CreateBotInput, type NewChatMode } from "./components/NewChatPopover";
 import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ConvActionSheet } from "./components/ConvActionSheet";
-import { LAYOUT_NARROW_MQ, useIsTouchUi } from "./components/useIsTouchUi";
+import { CreateActionSheet } from "./components/CreateActionSheet";
+import { MobileSettingsHub, type SettingsHubNav } from "./components/MobileSettingsHub";
+import { LAYOUT_NARROW_MQ, useIsTouchUi, useSheetFormUi } from "./components/useIsTouchUi";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
@@ -427,8 +429,12 @@ export default function App() {
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
+  const [createSheetOpen, setCreateSheetOpen] = useState(false);
+  const [newChatInitialMode, setNewChatInitialMode] = useState<NewChatMode>("list");
   /** Narrow panes: list = sidebar only, chat = main only. Wide layout ignores this (CSS). */
   const [mobileView, setMobileView] = useState<"list" | "chat">("list");
+  /** Mobile settings hub (C-2); true = Grok-style grouped home. */
+  const [settingsShellHub, setSettingsShellHub] = useState(true);
   const [isNarrowLayout, setIsNarrowLayout] = useState(() =>
     typeof window !== "undefined" && typeof window.matchMedia === "function"
       ? window.matchMedia(LAYOUT_NARROW_MQ).matches
@@ -493,6 +499,7 @@ export default function App() {
   const [compactCfg, setCompactCfg] = useState<CompactConfig | null>(null);
   const confirm = useConfirm();
   const touchUi = useIsTouchUi();
+  const sheetForm = useSheetFormUi();
   const [convSheet, setConvSheet] = useState<
     | { kind: "agent"; agent: Agent }
     | { kind: "channel"; channel: Channel }
@@ -2981,6 +2988,8 @@ export default function App() {
 
   const openSettings = async (tab: SettingsTab = "llm") => {
     setShowSettings(true);
+    // touch / layout-narrow: AccountMenu "设置" → hub; deep links (更改模型) skip hub.
+    setSettingsShellHub(Boolean(sheetForm && tab === "general"));
     setSettingsTab(tab);
     setLLMMsg("");
     setSkillsMsg("");
@@ -3173,8 +3182,8 @@ export default function App() {
   const removeAgent = async (a: Agent, e?: MouseEvent) => {
     e?.stopPropagation();
     const ok = await confirm({
-      title: `确定删除助手「${a.name}」？`,
-      description: "删除后无法恢复",
+      title: "确定删除该会话？",
+      description: `「${a.name}」删除后无法找回`,
       confirmLabel: "删除",
       cancelLabel: "取消",
       danger: true,
@@ -3220,8 +3229,8 @@ export default function App() {
   const removeChannel = async (ch: Channel, e?: MouseEvent) => {
     e?.stopPropagation();
     const ok = await confirm({
-      title: `确定删除群聊「${ch.name}」？`,
-      description: "删除后无法恢复",
+      title: "确定删除该会话？",
+      description: `「${ch.name}」删除后无法找回`,
       confirmLabel: "删除",
       cancelLabel: "取消",
       danger: true,
@@ -3396,35 +3405,129 @@ export default function App() {
   }
 
   return (
-    <div className={`app${isNarrowLayout ? ` mobile-${mobileView}` : ""}`}>
+    <div className={`app${isNarrowLayout ? ` mobile-${mobileView}` : ""}${sheetForm ? " shell-narrow" : ""}`}>
       <aside className="sidebar">
-        <div className="sidebar-top">
-          <label className="sidebar-search">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="M20 20l-3.5-3.5" />
-            </svg>
-            <input
-              value={convSearch}
-              onChange={(e) => setConvSearch(e.target.value)}
-              placeholder="搜索助手 / 群聊"
-              aria-label="搜索助手或群聊"
-            />
-          </label>
-          <button
-            ref={newChatBtnRef}
-            type="button"
-            className={`icon-btn${showNewChat ? " active-plus" : ""}`}
-            title="新建聊天"
-            aria-haspopup="dialog"
-            aria-expanded={showNewChat}
-            onClick={() => setShowNewChat((v) => !v)}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
-        </div>
+        {sheetForm ? (
+          <div className="sidebar-shell-head">
+            <div className="sidebar-shell-topbar">
+              <button
+                type="button"
+                className="sidebar-shell-user"
+                title={user?.username || "账户"}
+                aria-label="打开设置"
+                onClick={() => void openSettings("general")}
+              >
+                <span className="sidebar-shell-user-avatar" aria-hidden>
+                  {accountInitials(user?.username || "")}
+                </span>
+              </button>
+              <div className="sidebar-shell-top-actions">
+                <label className="sidebar-shell-search-btn" title="搜索">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="M20 20l-3.5-3.5" />
+                  </svg>
+                  <input
+                    value={convSearch}
+                    onChange={(e) => setConvSearch(e.target.value)}
+                    placeholder="搜索"
+                    aria-label="搜索助手或群聊"
+                  />
+                </label>
+                <button
+                  ref={newChatBtnRef}
+                  type="button"
+                  className={`icon-btn sidebar-shell-plus${createSheetOpen || showNewChat ? " active-plus" : ""}`}
+                  title="新建"
+                  aria-haspopup="dialog"
+                  aria-expanded={createSheetOpen || showNewChat}
+                  onClick={() => {
+                    if (showNewChat) {
+                      setShowNewChat(false);
+                      return;
+                    }
+                    setCreateSheetOpen((v) => !v);
+                  }}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+            <div className="sidebar-identity">
+              {(() => {
+                const focus =
+                  activeAgent ||
+                  agents.find((a) => a.id === agentId) ||
+                  agents[0] ||
+                  null;
+                return (
+                  <>
+                    <div className="sidebar-identity-avatar">
+                      {focus ? (
+                        <AgentAvatar
+                          id={focus.id}
+                          name={focus.name}
+                          size={80}
+                          shape={focus.avatar_shape}
+                          color={focus.avatar_color}
+                          status={presenceByAgent[focus.id] || "idle"}
+                          online={isBotOnline(focus.id)}
+                          onClick={() => openAvatarSettings(focus)}
+                        />
+                      ) : (
+                        <span className="sidebar-identity-fallback" aria-hidden>
+                          {accountInitials(user?.username || "open bot")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="sidebar-identity-name">
+                      {focus?.name || user?.username || "open bot"}
+                    </div>
+                    <button type="button" className="sidebar-identity-workspace" aria-label="工作区">
+                      open bot
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden>
+                        <path d="M6 9l6 6 6-6" />
+                      </svg>
+                    </button>
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        ) : (
+          <div className="sidebar-top">
+            <label className="sidebar-search">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20l-3.5-3.5" />
+              </svg>
+              <input
+                value={convSearch}
+                onChange={(e) => setConvSearch(e.target.value)}
+                placeholder="搜索助手 / 群聊"
+                aria-label="搜索助手或群聊"
+              />
+            </label>
+            <button
+              ref={newChatBtnRef}
+              type="button"
+              className={`icon-btn${showNewChat ? " active-plus" : ""}`}
+              title="新建聊天"
+              aria-haspopup="dialog"
+              aria-expanded={showNewChat}
+              onClick={() => {
+                setNewChatInitialMode("list");
+                setShowNewChat((v) => !v);
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+        )}
 
         <div className="section-label">助手</div>
         <nav className="agent-list">
@@ -3466,7 +3569,7 @@ export default function App() {
                   <AgentAvatar
                     id={a.id}
                     name={a.name}
-                    size={32}
+                    size={sheetForm ? 46 : 32}
                     shape={a.avatar_shape}
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
@@ -3582,11 +3685,30 @@ export default function App() {
         </div>
       </aside>
 
+      <CreateActionSheet
+        open={createSheetOpen}
+        onClose={() => setCreateSheetOpen(false)}
+        onCreateBot={() => {
+          setCreateSheetOpen(false);
+          setNewChatInitialMode("bot");
+          setShowNewChat(true);
+        }}
+        onCreateGroup={() => {
+          setCreateSheetOpen(false);
+          setNewChatInitialMode("group");
+          setShowNewChat(true);
+        }}
+      />
+
       <NewChatPopover
         open={showNewChat}
         agents={agents}
         anchorRef={newChatBtnRef}
-        onClose={() => setShowNewChat(false)}
+        initialMode={newChatInitialMode}
+        onClose={() => {
+          setShowNewChat(false);
+          setNewChatInitialMode("list");
+        }}
         onSelectAgent={(a) => void startChatWithAgent(a)}
         onCreateBot={(input) => createBotFromPopover(input)}
         onCreateGroup={(name, ids) => createGroupFromPopover(name, ids)}
@@ -3844,9 +3966,97 @@ export default function App() {
       </main>
 
       {showSettings && (
-        <div className="modal-backdrop" onClick={() => setShowSettings(false)}>
-          <div className="modal settings-dialog" onClick={(e) => e.stopPropagation()}>
-            <nav className="settings-nav" aria-label="设置分类">
+        <div
+          className={`modal-backdrop${sheetForm ? " settings-backdrop-shell" : ""}`}
+          onClick={() => setShowSettings(false)}
+        >
+          <div
+            className={`modal settings-dialog${sheetForm ? " settings-dialog-shell" : ""}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {sheetForm && settingsShellHub ? (
+              <MobileSettingsHub
+                username={user?.username || "账户"}
+                email={user?.email}
+                accountInitials={accountInitials(user?.username || "")}
+                focusBot={activeAgent || agents[0] || null}
+                preferredMachineLabel={(() => {
+                  const focus = activeAgent || agents[0];
+                  const mid = focus?.machine_id;
+                  if (!mid) return undefined;
+                  const m = machines.find((x) => x.id === mid);
+                  return m?.label || mid;
+                })()}
+                onClose={() => setShowSettings(false)}
+                onOpenBotAvatar={() => {
+                  const focus = activeAgent || agents[0];
+                  if (focus) {
+                    setShowSettings(false);
+                    openAvatarSettings(focus);
+                  } else {
+                    setSettingsShellHub(false);
+                    setSettingsTab("bot");
+                  }
+                }}
+                onLogout={() => {
+                  setShowSettings(false);
+                  onLogout();
+                }}
+                onNavigate={(tab: SettingsHubNav) => {
+                  const mapped: SettingsTab =
+                    tab === "account" ? "general" : (tab as SettingsTab);
+                  setSettingsTab(mapped);
+                  setSettingsShellHub(false);
+                  if (mapped === "mcp") {
+                    void refreshMCP().catch((err) =>
+                      setMcpMsg(err instanceof Error ? err.message : String(err)),
+                    );
+                  } else if (mapped === "compact") {
+                    void refreshCompact();
+                  } else if (mapped === "routines") {
+                    void refreshRoutines().catch((err) =>
+                      setRoutinesMsg(err instanceof Error ? err.message : String(err)),
+                    );
+                  } else if (mapped === "sandbox") {
+                    void refreshSandbox().catch((err) =>
+                      setSandboxMsg(err instanceof Error ? err.message : String(err)),
+                    );
+                  } else if (mapped === "machines") {
+                    void refreshMachines().catch((err) =>
+                      setMachinesMsg(err instanceof Error ? err.message : String(err)),
+                    );
+                  } else if (mapped === "secrets") {
+                    void refreshSecrets();
+                  }
+                }}
+              />
+            ) : null}
+            {sheetForm && !settingsShellHub ? (
+              <div className="settings-shell-subhead">
+                <button
+                  type="button"
+                  className="settings-shell-back"
+                  aria-label="返回"
+                  onClick={() => setSettingsShellHub(true)}
+                >
+                  ←
+                </button>
+                <h2>{SETTINGS_TITLE[settingsTab]}</h2>
+                <button
+                  type="button"
+                  className="settings-close"
+                  aria-label="关闭"
+                  onClick={() => setShowSettings(false)}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                    <path d="M6 6l12 12M18 6 6 18" />
+                  </svg>
+                </button>
+              </div>
+            ) : null}
+            {!(sheetForm && settingsShellHub) ? (
+            <>
+            <nav className={`settings-nav${sheetForm ? " settings-nav-hidden" : ""}`} aria-label="设置分类">
               {(
                 [
                   ["general", "通用"],
@@ -3896,6 +4106,7 @@ export default function App() {
               ))}
             </nav>
             <div className="settings-main">
+              {!sheetForm ? (
               <div className="settings-main-head">
                 <h2>{SETTINGS_TITLE[settingsTab]}</h2>
                 <button
@@ -3909,6 +4120,7 @@ export default function App() {
                   </svg>
                 </button>
               </div>
+              ) : null}
               <div className="settings-main-body">
             {settingsTab === "general" && (
               <SettingsPage>
@@ -5324,6 +5536,8 @@ export default function App() {
 
               </div>
             </div>
+            </>
+            ) : null}
           </div>
         </div>
       )}

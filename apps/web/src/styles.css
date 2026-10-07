@@ -4870,3 +4870,559 @@ html.touch-ui .diagram-menu-item {
 .diagram-overflow-menu {
   min-width: 128px;
 }
+
+/* ---- Mobile shell C (Grok-align): touch-ui OR layout-narrow via .shell-narrow ---- */
+
+.shell-narrow .sidebar {
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  height: 100%;
+  max-height: 100%;
+  background: var(--bg-elevated, #fff);
+}
+
+.sidebar-shell-head {
+  flex-shrink: 0;
+  padding: 8px 12px 4px;
+}
+
+.sidebar-shell-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.sidebar-shell-user {
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.sidebar-shell-user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 12px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+}
+
+.sidebar-shell-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-shell-search-btn {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--bg-soft, #f3f4f6);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  overflow: hidden;
+}
+
+.sidebar-shell-search-btn svg {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.sidebar-shell-search-btn input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.sidebar-shell-search-btn:focus-within {
+  width: min(160px, 42vw);
+  border-radius: 18px;
+  padding: 0 10px;
+  justify-items: start;
+  grid-template-columns: 18px 1fr;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-shell-search-btn:focus-within svg {
+  flex-shrink: 0;
+}
+
+.sidebar-shell-search-btn:focus-within input {
+  position: static;
+  opacity: 1;
+  cursor: text;
+  flex: 1;
+  min-width: 0;
+  outline: none;
+  color: var(--text);
+}
+
+.sidebar-shell-plus {
+  width: 36px;
+  height: 36px;
+}
+
+.sidebar-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 12px 8px 16px;
+  gap: 6px;
+}
+
+.sidebar-identity-avatar {
+  width: 80px;
+  height: 80px;
+  display: grid;
+  place-items: center;
+}
+
+.sidebar-identity-fallback {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: #111827;
+  color: #fff;
+  font-size: 22px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.sidebar-identity-name {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-identity-workspace {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.sidebar-identity-workspace:hover,
+.sidebar-identity-workspace:active {
+  background: var(--bg-soft, #f3f4f6);
+}
+
+.shell-narrow .section-label {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.shell-narrow .agent-item,
+.shell-narrow .conv-item {
+  min-height: 64px;
+  padding: 10px 14px;
+  gap: 12px;
+  border-radius: 0;
+}
+
+.shell-narrow .agent-name {
+  font-size: 15px;
+}
+
+.shell-narrow .agent-desc {
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.shell-narrow .agent-list,
+.shell-narrow .conv-list {
+  gap: 0;
+}
+
+.shell-narrow .sidebar-foot {
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+}
+
+/* C-1 create action sheet row leading icon */
+.create-action-sheet .action-sheet-row-icon {
+  justify-content: flex-start;
+  padding-left: 16px;
+  gap: 12px;
+  font-weight: 500;
+}
+
+.action-sheet-row-leading {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  color: var(--muted);
+}
+
+/* C-4 bottom confirm dual buttons */
+.confirm-action-sheet {
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.confirm-sheet-title {
+  text-align: center;
+  font-size: 17px;
+  font-weight: 650;
+  padding: 4px 12px 6px;
+}
+
+.confirm-sheet-desc {
+  text-align: center;
+  font-size: 13px;
+  color: var(--muted);
+  padding: 0 16px 14px;
+  line-height: 1.4;
+}
+
+.confirm-sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 0 4px 4px;
+}
+
+.confirm-sheet-btn {
+  min-height: 48px;
+  border-radius: 12px;
+  border: 1px solid var(--border, #e5e7eb);
+  background: var(--bg-soft, #f3f4f6);
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.confirm-sheet-btn-cancel {
+  color: var(--text);
+}
+
+.confirm-sheet-btn-confirm {
+  border-color: transparent;
+  background: #111827;
+  color: #fff;
+}
+
+.confirm-sheet-btn-confirm.is-danger {
+  background: #dc2626;
+  color: #fff;
+}
+
+.confirm-sheet-btn:active {
+  filter: brightness(0.96);
+}
+
+/* C-2 settings shell */
+.settings-backdrop-shell {
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.settings-dialog-shell {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 100% !important;
+  max-height: 100% !important;
+  margin: 0;
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #f2f2f7;
+  border: none;
+  box-shadow: none;
+  grid-template-columns: 1fr !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+}
+
+[data-theme="dark"] .settings-dialog-shell {
+  background: #1c1c1e;
+}
+
+.settings-nav-hidden {
+  display: none !important;
+}
+
+.settings-dialog-shell .settings-main {
+  background: transparent;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-dialog-shell .settings-main-body {
+  background: transparent;
+  padding: 8px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+}
+
+.settings-dialog-shell .settings-card {
+  border-radius: 14px;
+  border: none;
+  background: #fff;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .settings-dialog-shell .settings-card {
+  background: #2c2c2e;
+}
+
+.settings-dialog-shell .settings-section {
+  margin-top: 12px;
+}
+
+.settings-dialog-shell .settings-section-label {
+  font-size: 13px;
+  color: #6b7280;
+  padding-left: 4px;
+}
+
+.settings-dialog-shell .settings-row,
+.settings-dialog-shell .bot-settings-row {
+  min-height: 52px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.settings-shell-subhead {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 8px 4px;
+  background: #f2f2f7;
+}
+
+[data-theme="dark"] .settings-shell-subhead {
+  background: #1c1c1e;
+}
+
+.settings-shell-subhead h2 {
+  margin: 0;
+  text-align: center;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.settings-shell-back {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: transparent;
+  border-radius: 12px;
+  font-size: 20px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.settings-shell-back:active {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.settings-hub {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: #f2f2f7;
+}
+
+[data-theme="dark"] .settings-hub {
+  background: #1c1c1e;
+}
+
+.settings-hub-top {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
+  min-height: 52px;
+}
+
+.settings-hub-title {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+  padding-left: 4px;
+}
+
+.settings-hub-close {
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.06);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.settings-hub-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-hub-section-label {
+  font-size: 13px;
+  color: #6b7280;
+  padding: 4px 4px 0;
+  margin-top: 4px;
+}
+
+.settings-hub-card {
+  background: #fff;
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .settings-hub-card {
+  background: #2c2c2e;
+}
+
+.settings-hub-row {
+  width: 100%;
+  min-height: 54px;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="dark"] .settings-hub-row {
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.settings-hub-card > .settings-hub-row:last-child {
+  border-bottom: none;
+}
+
+.settings-hub-row:active {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.settings-hub-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-hub-row-title {
+  font-size: 16px;
+  font-weight: 550;
+}
+
+.settings-hub-row-sub {
+  font-size: 12px;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-hub-row-value {
+  font-size: 14px;
+  color: #6b7280;
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-hub-chevron {
+  flex-shrink: 0;
+  opacity: 0.35;
+}
+
+.settings-hub-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #e5e7eb;
+  color: #374151;
+  font-size: 13px;
+  font-weight: 650;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.settings-hub-avatar-sm {
+  width: 36px;
+  height: 36px;
+}
+
+.settings-hub-row-account {
+  min-height: 64px;
+}
+
+.settings-hub-row-logout {
+  justify-content: center;
+  color: #dc2626;
+  font-size: 16px;
+  font-weight: 600;
+  min-height: 52px;
+}
+
+/* Optional A: quote × ≥44 under touch-ui (wide coarse tablets too) */
+.touch-ui .composer-quote-clear,
+html.touch-ui .composer-quote-clear {
+  width: 44px;
+  height: 44px;
+  margin-right: -6px;
+}
+
+@media (max-width: 860px) {
+  .composer-quote-clear {
+    width: 44px;
+    height: 44px;
+  }
+}

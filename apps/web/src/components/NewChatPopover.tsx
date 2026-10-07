@@ -19,6 +19,8 @@ export type CreateBotInput = {
   machine_id?: string;
 };
 
+export type NewChatMode = "list" | "group" | "bot";
+
 export type NewChatPopoverProps = {
   open: boolean;
   agents: Agent[];
@@ -27,9 +29,9 @@ export type NewChatPopoverProps = {
   onSelectAgent: (agent: Agent) => void | Promise<void>;
   onCreateBot: (input: CreateBotInput) => void | Promise<void>;
   onCreateGroup: (name: string, memberIds: string[]) => void | Promise<void>;
+  /** When opening from + Action Sheet, jump straight into create form. */
+  initialMode?: NewChatMode;
 };
-
-type Mode = "list" | "group" | "bot";
 
 export function NewChatPopover({
   open,
@@ -39,12 +41,13 @@ export function NewChatPopover({
   onSelectAgent,
   onCreateBot,
   onCreateGroup,
+  initialMode = "list",
 }: NewChatPopoverProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const sheetForm = useSheetFormUi();
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState<Mode>("list");
+  const [mode, setMode] = useState<NewChatMode>(initialMode);
   const [groupName, setGroupName] = useState("");
   const [memberIds, setMemberIds] = useState<string[]>([]);
   const [botName, setBotName] = useState("");
@@ -70,7 +73,7 @@ export function NewChatPopover({
   useEffect(() => {
     if (!open) return;
     setQuery("");
-    setMode("list");
+    setMode(initialMode || "list");
     setGroupName("");
     setMemberIds([]);
     setBotName("");
@@ -112,7 +115,7 @@ export function NewChatPopover({
       window.clearTimeout(t);
       window.removeEventListener("resize", place);
     };
-  }, [open, anchorRef, agents, sheetForm]);
+  }, [open, anchorRef, agents, sheetForm, initialMode]);
 
   useEffect(() => {
     if (!open) return;
@@ -440,7 +443,7 @@ export function NewChatPopover({
                 {machines.length === 0 ? (
                   <div className="muted small new-chat-help-wrap">还没有已连接的电脑。先创建也可以，连上电脑后再用本地能力。</div>
                 ) : (
-                  <div className="muted small new-chat-help-wrap">读文件、跑命令会在你当前发消息的电脑上执行。优先电脑是无会话机时的兜底，也影响此时的在线绿点。</div>
+                  <div className="muted small new-chat-help-wrap">读文件、跑命令会在你当前发消息的电脑上执行。这里只是可选的默认优先机。</div>
                 )}
               </div>
               {error ? <div className="new-chat-error">{error}</div> : null}
