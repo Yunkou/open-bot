@@ -38,6 +38,17 @@ declare global {
           getInfo?: () => Promise<{ name?: string; model?: string }>;
           getId?: () => Promise<{ identifier?: string }>;
         };
+        StatusBar?: {
+          getInfo?: () => Promise<{ visible?: boolean; overlays?: boolean; style?: string }>;
+          setOverlaysWebView?: (opts: { overlay: boolean }) => Promise<void>;
+        };
+        SafeArea?: {
+          getSafeAreaInsets?: () => Promise<{
+            insets?: { top?: number; bottom?: number; left?: number; right?: number };
+            top?: number;
+            bottom?: number;
+          }>;
+        };
       };
     };
   }

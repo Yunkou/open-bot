@@ -26,6 +26,14 @@
 
 :root {
   color-scheme: light;
+  /* Safe-area: env() when WebView reports it; --sat/--sab from JS (Capacitor floors) */
+  --sat: 0px;
+  --sab: 0px;
+  --safe-top: max(env(safe-area-inset-top, 0px), var(--sat, 0px));
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sab, 0px));
+  --chat-immersive-bg: var(--bg-elevated, #ffffff);
+  --chat-top-chrome: 52px;
+  --chat-composer-chrome: 72px;
   --bg: #f0f1f3;
   --bg-elevated: #ffffff;
   --bg-soft: #f5f5f7;
@@ -3796,7 +3804,7 @@ html.touch-ui .composer-quote-bar {
   position: relative;
   background: #fff;
   border-radius: 16px 16px 0 0;
-  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px));
+  padding: 8px 12px max(8px, var(--safe-bottom, 0px));
   box-shadow: 0 -8px 32px rgba(0,0,0,0.18);
   max-height: min(78vh, 560px);
   overflow: auto;
@@ -3885,7 +3893,7 @@ html.touch-ui .composer-quote-bar {
     max-height: min(92vh, 720px);
     display: flex;
     flex-direction: column;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
+    padding-bottom: var(--safe-bottom, 0px);
   }
   .feedback-form {
     flex: 1;
@@ -3896,7 +3904,7 @@ html.touch-ui .composer-quote-bar {
     position: sticky;
     bottom: 0;
     background: #fff;
-    padding: 10px 0 calc(6px + env(safe-area-inset-bottom, 0px));
+    padding: 10px 0 calc(6px + var(--safe-bottom, 0px));
     margin-top: auto;
     border-top: 1px solid var(--border, #e2e5ea);
   }
@@ -3935,7 +3943,7 @@ html.touch-ui .composer-quote-bar {
     position: sticky;
     bottom: 0;
     background: #fff;
-    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(8px + var(--safe-bottom, 0px));
   }
 }
 
@@ -4412,8 +4420,8 @@ html.touch-ui .composer-quote-bar {
   }
   .diagram-fs-toolbar {
     padding: 0 2px 0 8px;
-    padding-top: env(safe-area-inset-top, 0px);
-    height: calc(var(--diagram-hit) + env(safe-area-inset-top, 0px));
+    padding-top: var(--safe-top, 0px);
+    height: calc(var(--diagram-hit) + var(--safe-top, 0px));
   }
   .diagram-zoom {
     margin-left: 2px;
@@ -4613,7 +4621,7 @@ html.touch-ui .composer-quote-bar {
   max-height: min(90dvh, 90vh);
   margin: 0;
   border-radius: 16px 16px 0 0;
-  padding: 0 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  padding: 0 12px calc(10px + var(--safe-bottom, 0px));
   gap: 0;
   z-index: 1;
   pointer-events: auto;
@@ -4691,7 +4699,7 @@ html.touch-ui .composer-quote-bar {
 
 .new-chat-group-footer {
   flex-shrink: 0;
-  padding: 8px 0 calc(4px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 0 calc(4px + var(--safe-bottom, 0px));
   background: var(--bg-elevated);
   border-top: 1px solid var(--border);
 }
@@ -4749,7 +4757,7 @@ html.touch-ui .composer-quote-bar {
   max-height: min(90dvh, 90vh);
   margin: 0;
   border-radius: 16px 16px 0 0;
-  padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  padding: 12px 14px calc(12px + var(--safe-bottom, 0px));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -4877,6 +4885,13 @@ html.touch-ui .diagram-menu-item {
   min-width: 128px;
 }
 
+
+/* Capacitor native floors when JS has not yet written inline --sat/--sab */
+html.capacitor-native {
+  --sat: 32px;
+  --sab: 20px;
+}
+
 /* ---- Mobile shell C (Grok-align): touch-ui OR layout-narrow via .shell-narrow ---- */
 
 .shell-narrow .sidebar {
@@ -4906,7 +4921,7 @@ html.touch-ui .diagram-menu-item {
 
 .sidebar-shell-head {
   flex-shrink: 0;
-  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 4px;
+  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 4px;
 }
 
 .sidebar-shell-topbar {
@@ -5113,7 +5128,7 @@ html.touch-ui .diagram-menu-item {
 
 /* C-4 bottom confirm dual buttons */
 .confirm-action-sheet {
-  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(8px, var(--safe-bottom, 0px));
 }
 
 .confirm-sheet-title {
@@ -5210,7 +5225,7 @@ html.touch-ui .diagram-menu-item {
 
 .settings-dialog-shell .settings-main-body {
   background: transparent;
-  padding: 8px 16px max(16px, env(safe-area-inset-bottom, 0px));
+  padding: 8px 16px max(16px, var(--safe-bottom, 0px));
 }
 
 .settings-dialog-shell .settings-card {
@@ -5255,7 +5270,7 @@ html.touch-ui .diagram-menu-item {
   grid-template-columns: 44px 1fr 44px;
   align-items: center;
   gap: 4px;
-  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 8px 4px;
+  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 8px 4px;
   background: #f2f2f7;
 }
 
@@ -5316,7 +5331,7 @@ html.touch-ui .diagram-menu-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 8px;
+  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 8px;
   min-height: 52px;
   box-sizing: content-box;
 }
@@ -5351,7 +5366,7 @@ html.touch-ui .diagram-menu-item {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
+  padding: 12px 16px max(16px, var(--safe-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: 16px; /* #7: card gap 16 */
@@ -5488,9 +5503,9 @@ html.touch-ui .diagram-menu-item {
 
 /* ---- Mobile safe-area hotfixes (§7 · status bar / home indicator) ---- */
 
-/* Top: max(16px, env(safe-area-inset-top)+8px) — chat topbar (hub/list/subhead set above) */
+/* Top: max(16px, --safe-top+8px) — chat topbar (hub/list/subhead set above); --safe-top = max(env,--sat) */
 .shell-narrow .topbar {
-  padding-top: max(16px, calc(env(safe-area-inset-top, 0px) + 8px));
+  padding-top: max(16px, calc(var(--safe-top, 0px) + 8px));
 }
 
 .shell-narrow .topbar-back {
@@ -5531,22 +5546,22 @@ html.touch-ui .diagram-menu-item {
   box-sizing: border-box;
 }
 
-/* Bottom: max(8px, env(safe-area-inset-bottom)) — + sheet / delete confirm */
+/* Bottom: max(8px, --safe-bottom) — + sheet / delete confirm; --safe-bottom = max(env,--sab) */
 .create-action-sheet.action-sheet,
 .action-sheet.create-action-sheet,
 .confirm-action-sheet.action-sheet,
 .confirm-action-sheet {
-  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(8px, var(--safe-bottom, 0px));
 }
 
 /* Logout: §7 — last hub card clears home indicator (scroll pad + card margin) */
 .settings-hub-scroll > .settings-hub-card:last-child {
-  margin-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  margin-bottom: max(16px, var(--safe-bottom, 0px));
 }
 
 /* Composer / sticky bottom CTAs on shell */
 .shell-narrow .composer-wrap {
-  padding: 0 12px max(12px, env(safe-area-inset-bottom, 0px));
+  padding: 0 12px max(12px, var(--safe-bottom, 0px));
   flex-shrink: 0;
   width: 100%;
   box-sizing: border-box;
@@ -5554,7 +5569,7 @@ html.touch-ui .diagram-menu-item {
 
 .shell-narrow .feedback-actions,
 .touch-ui .feedback-actions {
-  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(8px, var(--safe-bottom, 0px));
 }
 
 /* Optional A: quote × ≥44 under touch-ui (wide coarse tablets too) */
@@ -5600,50 +5615,155 @@ html.touch-ui .composer-quote-clear {
   box-sizing: border-box;
 }
 
-/* Chat: topbar → messages flex:1 → composer pinned bottom (+ vv / safe-area) */
+/* Chat shell height (vv) — list + chat share */
 .app.shell-narrow {
   height: var(--vv-height, 100%);
   max-height: var(--vv-height, 100%);
   /* keyboard scroll offset: pin shell to visible viewport top */
   margin-top: var(--vv-offset-top, 0px);
 }
-/* #1 CRITICAL: flex ONLY on mobile-chat.
+/* #1 CRITICAL: show main ONLY on mobile-chat.
    Do NOT set display:flex on .mobile-list .main — that overrode
    @media .app.mobile-list .main { display:none } and stacked list+chat. */
+.app.shell-narrow.mobile-list .main {
+  display: none;
+}
+
+/*
+ * Immersive chat (Grok-style / ref-chat-fullheight-immersive):
+ * - messages = full-bleed scroll layer (edge-to-edge under system bars)
+ * - topbar + composer = absolute frosted overlays (not flex siblings that shrink the list)
+ * - scroll padding clears interactive chrome + --safe-top/--safe-bottom (Capacitor floors)
+ * Settings / list stay non-immersive padded shells.
+ */
 .app.shell-narrow.mobile-chat .main {
-  display: flex;
-  flex-direction: column;
+  display: block; /* not flex column — overlays position against this box */
+  position: relative;
   min-height: 0;
   height: 100%;
   max-height: 100%;
   overflow: hidden;
-  background: var(--bg-elevated, #fff);
+  background: var(--chat-immersive-bg, var(--bg-elevated, #fff));
 }
-/* specificity ≥ the old flex rule AND ≥ @media .app.mobile-list .main */
-.app.shell-narrow.mobile-list .main {
-  display: none;
+[data-theme="dark"] {
+  --chat-immersive-bg: #111113;
 }
-.app.shell-narrow.mobile-chat .main > .status {
-  flex-shrink: 0;
-}
-.app.shell-narrow.mobile-chat .main > .topbar {
-  flex-shrink: 0;
-}
+
+/* Full-bleed message scroller — content can pass under translucent chrome */
 .app.shell-narrow.mobile-chat .main > .messages {
-  flex: 1 1 auto;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  flex: none;
   min-height: 0;
-  padding: 8px 16px 12px; /* composer is sibling — no 120 overlay pad */
+  overflow: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  background: transparent;
+  /* top: safe + topbar row; bottom: composer + home indicator */
+  padding-top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 52px));
+  padding-bottom: calc(max(12px, var(--safe-bottom, 0px)) + var(--chat-composer-chrome, 72px));
+  padding-left: 16px;
+  padding-right: 16px;
 }
-.app.shell-narrow.mobile-chat .main > .composer-wrap {
+
+/* Frosted overlay topbar — sits on messages; hit targets clear status bar via --safe-top */
+.app.shell-narrow.mobile-chat .main > .topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
   flex-shrink: 0;
-  position: relative;
-  z-index: 5;
+  box-sizing: border-box;
+  padding-top: max(16px, calc(var(--safe-top, 0px) + 8px));
+  padding-bottom: 10px;
+  padding-left: 64px;
+  padding-right: 12px;
+  border-bottom: none;
+  background: color-mix(in srgb, var(--chat-immersive-bg, #fff) 72%, transparent);
+  backdrop-filter: blur(16px) saturate(1.2);
+  -webkit-backdrop-filter: blur(16px) saturate(1.2);
 }
-/* icon-only back: slightly less left pad than text「返回」 */
-@media (max-width: 860px) {
-  .app.shell-narrow.mobile-chat .topbar {
-    padding-left: 64px;
+[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar {
+  background: rgba(17, 17, 19, 0.72);
+}
+/* Fallback when color-mix unsupported */
+@supports not (background: color-mix(in srgb, white 50%, transparent)) {
+  .app.shell-narrow.mobile-chat .main > .topbar {
+    background: rgba(255, 255, 255, 0.78);
   }
+  [data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar {
+    background: rgba(17, 17, 19, 0.78);
+  }
+}
+
+.app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
+  background: color-mix(in srgb, var(--bg-elevated, #fff) 55%, transparent);
+  border-color: transparent;
+  box-shadow: none;
+}
+[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+}
+
+/* Host activity strip — float under topbar, does not steal flex space */
+.app.shell-narrow.mobile-chat .main > .status {
+  position: absolute;
+  top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 52px));
+  left: 0;
+  right: 0;
+  z-index: 9;
+  flex-shrink: 0;
+  pointer-events: none;
+  background: transparent;
+}
+
+/* Frosted overlay composer — messages scroll behind; controls clear nav/gesture */
+.app.shell-narrow.mobile-chat .main > .composer-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0 12px max(12px, var(--safe-bottom, 0px));
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--chat-immersive-bg, #fff) 55%, transparent) 28%,
+    color-mix(in srgb, var(--chat-immersive-bg, #fff) 92%, transparent) 100%
+  );
+  backdrop-filter: blur(12px) saturate(1.1);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  pointer-events: none; /* let scroll reach messages in gradient fade */
+}
+.app.shell-narrow.mobile-chat .main > .composer-wrap > * {
+  pointer-events: auto;
+}
+[data-theme="dark"] .app.shell-narrow.mobile-chat .main > .composer-wrap {
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(17, 17, 19, 0.55) 28%,
+    rgba(17, 17, 19, 0.94) 100%
+  );
+}
+@supports not (background: color-mix(in srgb, white 50%, transparent)) {
+  .app.shell-narrow.mobile-chat .main > .composer-wrap {
+    background: linear-gradient(180deg, rgba(255,255,255,0) 0%, rgba(255,255,255,0.88) 40%, rgba(255,255,255,0.96) 100%);
+  }
+}
+
+/* Thread panel stays a modal overlay above immersive layers */
+.app.shell-narrow.mobile-chat .main > .thread-panel {
+  z-index: 20;
 }
 
 /* Settings cards: gap already 12 on .settings-hub-scroll; reinforce section spacing */
@@ -5730,7 +5850,7 @@ html.touch-ui .composer-quote-clear {
   min-height: 0;
   overflow-y: auto;
   gap: 16px;
-  padding: 12px 16px max(16px, env(safe-area-inset-bottom, 0px));
+  padding: 12px 16px max(16px, var(--safe-bottom, 0px));
 }
 .settings-hub-v2 .settings-hub-card {
   border-radius: 16px;
@@ -5812,7 +5932,7 @@ html.touch-ui .composer-quote-clear {
 /* Subhead grid already 44 | 1fr | 44; reinforce side pad */
 .settings-dialog-shell .settings-shell-subhead,
 .bot-avatar-modal-shell .settings-shell-subhead {
-  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 12px 8px;
+  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 8px;
   background: #f2f2f7;
 }
 
@@ -5858,7 +5978,7 @@ html.touch-ui .composer-quote-clear {
   min-height: 100%;
   display: flex;
   flex-direction: column;
-  padding-bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(16px, var(--safe-bottom, 0px));
 }
 
 .settings-dialog-shell .settings-section:first-child {
@@ -6008,7 +6128,7 @@ html.touch-ui .composer-quote-clear {
 .settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form > .llm-actions {
   margin-top: auto;
   margin-bottom: -16px;
-  padding: 12px 16px max(12px, env(safe-area-inset-bottom, 0px));
+  padding: 12px 16px max(12px, var(--safe-bottom, 0px));
   border-radius: 0;
 }
 
@@ -6179,7 +6299,7 @@ html.touch-ui .composer-quote-clear {
   align-items: stretch;
   gap: 8px;
   margin: 0;
-  padding: 12px 16px max(12px, env(safe-area-inset-bottom, 0px));
+  padding: 12px 16px max(12px, var(--safe-bottom, 0px));
   background: #f2f2f7;
   border-top: 0.5px solid rgba(60, 60, 67, 0.12);
   position: sticky;

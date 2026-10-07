@@ -120,6 +120,7 @@ import {
   defaultMachineLabel,
   resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
+import { installSafeAreaInsets } from "./lib/safeAreaInsets";
 import {
   effectiveTimezone,
   normalizeMachineExecPolicy,
@@ -531,6 +532,23 @@ export default function App() {
   const confirm = useConfirm();
   const touchUi = useIsTouchUi();
   const sheetForm = useSheetFormUi();
+
+  /* Android Capacitor: env(safe-area-*) often 0 under overlay StatusBar — set --sat/--sab floors */
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    let cancelled = false;
+    void installSafeAreaInsets().then((c) => {
+      if (cancelled) {
+        c();
+        return;
+      }
+      cleanup = c;
+    });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  }, []);
 
   /* §8 mobile shell: visualViewport → keep composer at visible bottom */
   useEffect(() => {
