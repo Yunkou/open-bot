@@ -32,7 +32,7 @@
   --safe-top: max(env(safe-area-inset-top, 0px), var(--sat, 0px));
   --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--sab, 0px));
   --chat-immersive-bg: var(--bg-elevated, #ffffff);
-  --chat-top-chrome: 48px; /* floating row (~44) + tight pad; not a solid bar height */
+  --chat-top-chrome: 48px; /* floating row (~44) + tight pad; safe offset is separate (+12) */
   --chat-composer-chrome: 72px;
   --bg: #f0f1f3;
   --bg-elevated: #ffffff;
@@ -5665,7 +5665,7 @@ html.touch-ui .composer-quote-clear {
   box-sizing: border-box;
   background: transparent;
   /* top: safe + topbar row; bottom: composer + home indicator */
-  padding-top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 48px));
+  padding-top: calc(max(16px, calc(var(--safe-top, 0px) + 12px)) + var(--chat-top-chrome, 48px));
   padding-bottom: calc(max(12px, var(--safe-bottom, 0px)) + var(--chat-composer-chrome, 72px));
   padding-left: 16px;
   padding-right: 16px;
@@ -5683,7 +5683,10 @@ html.touch-ui .composer-quote-clear {
   flex-shrink: 0;
   box-sizing: border-box;
   /* Safe inset hangs on floating controls, not a solid bar */
-  padding-top: max(16px, calc(var(--safe-top, 0px) + 8px));
+  /* +12 under status bar (was +8) — addresses 「有点靠上」; still not a frosted slab */
+  padding-top: max(16px, calc(var(--safe-top, 0px) + 12px));
+  /* Content band = 44px (← hit) so flex-centered pill shares back centerline */
+  min-height: calc(max(16px, calc(var(--safe-top, 0px) + 12px)) + 44px + 6px);
   padding-bottom: 6px;
   padding-left: 64px;
   padding-right: 12px;
@@ -5727,8 +5730,12 @@ html.touch-ui .composer-quote-clear {
   }
 }
 
-/* Frost/bg on floating ← circle only */
+/* Frost/bg on floating ← circle only;
+ * Align to content band (same as padding-top) — NOT top:50% of full bar
+ * (50% included safe padding and sat above the flex row / .agent-pill). */
 .app.shell-narrow.mobile-chat .main > .topbar .topbar-back {
+  top: max(16px, calc(var(--safe-top, 0px) + 12px));
+  transform: none;
   background: color-mix(in srgb, var(--chat-immersive-bg, #fff) 62%, transparent);
   backdrop-filter: blur(12px) saturate(1.15);
   -webkit-backdrop-filter: blur(12px) saturate(1.15);
@@ -5739,9 +5746,11 @@ html.touch-ui .composer-quote-clear {
   box-shadow: none;
 }
 
-/* Compact Bot/agent pill — avatar + name only; frost on pill */
+/* Compact Bot/agent pill — avatar + name only; frost on pill;
+ * Centers with 44px ← in the shared content band (align-items + min-height). */
 .app.shell-narrow.mobile-chat .main > .topbar .agent-pill {
   max-width: min(220px, calc(100vw - 120px));
+  align-self: center;
   background: color-mix(in srgb, var(--bg-elevated, #fff) 70%, transparent);
   border-color: transparent;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
@@ -5771,7 +5780,7 @@ html.touch-ui .composer-quote-clear {
 /* Host activity strip — float under topbar, does not steal flex space */
 .app.shell-narrow.mobile-chat .main > .status {
   position: absolute;
-  top: calc(max(16px, calc(var(--safe-top, 0px) + 8px)) + var(--chat-top-chrome, 48px));
+  top: calc(max(16px, calc(var(--safe-top, 0px) + 12px)) + var(--chat-top-chrome, 48px));
   left: 0;
   right: 0;
   z-index: 9;
