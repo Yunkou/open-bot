@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Open Bot — 多端 AI 助手</title>
+  <meta name="description" content="Open Bot：接近 Grok Bot 体验的多端 AI 助手，支持 Web、桌面与移动端。" />
+  <link rel="icon" type="image/png" href="icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #09090b;
+      --bg-card: #18181b;
+      --bg-card-hover: #1f1f23;
+      --text: #fafafa;
+      --text-muted: #a1a1aa;
+      --border: #27272a;
+      --accent: #6366f1;
+      --accent-light: #818cf8;
+      --accent-glow: rgba(99, 102, 241, 0.15);
+      --gradient: linear-gradient(135deg, #6366f1, #8b5cf6, #a78bfa);
+      --radius: 12px;
+      --radius-lg: 20px;
+      --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      padding: 16px 0;
+      backdrop-filter: blur(20px);
+      background: rgba(9, 9, 11, 0.8);
+      border-bottom: 1px solid var(--border);
+      transition: background 0.3s;
+    }
+
+    nav .container {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.25rem;
+    }
+
+    .logo-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 10px;
+      background: var(--gradient);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .logo-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 32px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      transition: color 0.2s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-cta {
+      padding: 8px 20px;
+      border-radius: 8px;
+      background: var(--gradient);
+      font-weight: 600;
+      font-size: 0.9rem;
+      transition: opacity 0.2s;
+    }
+
+    .nav-cta:hover { opacity: 0.9; }
+
+    .nav-github {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      transition: all 0.2s;
+    }
+
+    .nav-github:hover {
+      border-color: var(--text-muted);
+      color: var(--text);
+    }
+
+    .nav-github svg {
+      width: 18px;
+      height: 18px;
+      fill: currentColor;
+    }
+
+    .mobile-toggle {
+      display: none;
+      background: none;
+      border: none;
+      color: var(--text);
+      font-size: 1.5rem;
+      cursor: pointer;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 180px 0 120px;
+      text-align: center;
+      position: relative;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 800px;
+      height: 600px;
+      background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 100px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 32px;
+    }
+
+    .hero-badge span {
+      background: var(--gradient);
+      color: white;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    h1 {
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      font-weight: 800;
+      line-height: 1.1;
+      margin-bottom: 24px;
+      letter-spacing: -0.02em;
+    }
+
+    h1 .gradient-text {
+      background: var(--gradient);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-sub {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 48px;
+      line-height: 1.7;
+    }
+
+    .hero-buttons {
+      display: flex;
+      gap: 16px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      border-radius: 10px;
+      font-weight: 600;
+      font-size: 1rem;
+      transition: all 0.2s;
+      cursor: pointer;
+      border: none;
+    }
+
+    .btn-primary {
+      background: var(--gradient);
+      color: white;
+      box-shadow: 0 4px 24px var(--accent-glow);
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px var(--accent-glow);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--text-muted);
+    }
+
+    /* ── Section common ── */
+    section {
+      padding: 100px 0;
+    }
+
+    .section-label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent-light);
+      margin-bottom: 12px;
+    }
+
+    .section-title {
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
+      font-weight: 700;
+      margin-bottom: 16px;
+      letter-spacing: -0.01em;
+    }
+
+    .section-desc {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      line-height: 1.7;
+    }
+
+    .section-header {
+      text-align: center;
+      margin-bottom: 64px;
+    }
+
+    .section-header .section-desc {
+      margin: 0 auto;
+    }
+
+    /* ── Features ── */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+    }
+
+    .feature-card {
+      padding: 32px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      transition: all 0.3s;
+    }
+
+    .feature-card:hover {
+      border-color: var(--accent);
+      background: var(--bg-card-hover);
+      transform: translateY(-4px);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    }
+
+    .feature-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: var(--accent-glow);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      margin-bottom: 20px;
+    }
+
+    .feature-card h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .feature-card p {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* ── Platforms ── */
+    .platforms {
+      background: var(--bg-card);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .platforms-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 32px;
+    }
+
+    .platform-card {
+      text-align: center;
+      padding: 48px 32px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background: var(--bg);
+      transition: all 0.3s;
+    }
+
+    .platform-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-4px);
+    }
+
+    .platform-icon {
+      font-size: 3rem;
+      margin-bottom: 20px;
+    }
+
+    .platform-card h3 {
+      font-size: 1.3rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+
+    .platform-card p {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .platform-tag {
+      display: inline-block;
+      margin-top: 16px;
+      padding: 4px 12px;
+      border-radius: 100px;
+      background: var(--accent-glow);
+      color: var(--accent-light);
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+
+    /* ── Architecture ── */
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 24px;
+    }
+
+    .arch-item {
+      padding: 28px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+
+    .arch-item .arch-icon {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--accent-glow);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+    }
+
+    .arch-item h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .arch-item p {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* ── CTA ── */
+    .cta {
+      text-align: center;
+      position: relative;
+    }
+
+    .cta::before {
+      content: '';
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 600px;
+      height: 400px;
+      background: radial-gradient(ellipse, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .cta-box {
+      padding: 80px 48px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .cta-box::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 1px;
+      background: var(--gradient);
+    }
+
+    .cta-box h2 {
+      font-size: clamp(1.8rem, 4vw, 2.5rem);
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+
+    .cta-box p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+      margin-bottom: 36px;
+      max-width: 500px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* ── Footer ── */
+    footer {
+      padding: 48px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 24px;
+      list-style: none;
+    }
+
+    .footer-links a {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      transition: color 0.2s;
+    }
+
+    .footer-links a:hover { color: var(--text); }
+
+    .footer-copy {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Animations ── */
+    .fade-in {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+
+    .fade-in.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .features-grid { grid-template-columns: repeat(2, 1fr); }
+      .arch-grid { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .features-grid { grid-template-columns: 1fr; }
+      .platforms-grid { grid-template-columns: 1fr; }
+      .nav-links { display: none; }
+      .mobile-toggle { display: block; }
+      .hero { padding: 140px 0 80px; }
+      .hero-sub { font-size: 1.05rem; }
+      .footer-inner { flex-direction: column; gap: 16px; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="container">
+      <a href="#" class="logo">
+        <div class="logo-icon">
+          <img src="icon.png" alt="Open Bot" />
+        </div>
+        Open Bot
+      </a>
+      <ul class="nav-links">
+        <li><a href="#features">功能</a></li>
+        <li><a href="#platforms">平台</a></li>
+        <li><a href="#architecture">架构</a></li>
+        <li>
+          <a href="https://github.com/guguTang/open-bot" target="_blank" rel="noopener" class="nav-github">
+            <svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+            Star
+          </a>
+        </li>
+        <li><a href="#start" class="nav-cta">开始使用</a></li>
+      </ul>
+      <button class="mobile-toggle" onclick="document.querySelector('.nav-links').classList.toggle('show')" aria-label="菜单">☰</button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span>NEW</span>
+        Phase 1 已开放体验
+      </div>
+      <h1>
+        你的多端 <span class="gradient-text">AI 助手</span>
+      </h1>
+      <p class="hero-sub">
+        Open Bot 是接近 Grok Bot 体验的开源 AI 助手，支持 Web、桌面与移动端。多模型接入、自定义助手、MCP 协议、记忆召回，一站搞定。
+      </p>
+      <div class="hero-buttons">
+        <a href="#start" class="btn btn-primary">
+          🚀 立即开始
+        </a>
+        <a href="#features" class="btn btn-secondary">
+          了解更多 →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features">
+    <div class="container">
+      <div class="section-header fade-in">
+        <p class="section-label">核心能力</p>
+        <h2 class="section-title">为效率而生的 AI 助手</h2>
+        <p class="section-desc">不只是聊天——多模型、多助手、多工具，构建真正属于你的 AI 工作流。</p>
+      </div>
+      <div class="features-grid">
+        <div class="feature-card fade-in">
+          <div class="feature-icon">🧠</div>
+          <h3>多模型接入</h3>
+          <p>每用户独立配置多条 LLM 连接，支持 OpenAI 兼容接口，随时切换、设默认。</p>
+        </div>
+        <div class="feature-card fade-in">
+          <div class="feature-icon">🎭</div>
+          <h3>自定义助手</h3>
+          <p>创建多个助手人设，独立 system prompt，按需切换对话风格与专业领域。</p>
+        </div>
+        <div class="feature-card fade-in">
+          <div class="feature-icon">🔧</div>
+          <h3>MCP 工具集成</h3>
+          <p>配置 MCP Server，测试连接、列出工具、手动调用，tools 注入 LLM 循环。</p>
+        </div>
+        <div class="feature-card fade-in">
+          <div class="feature-icon">💾</div>
+          <h3>记忆语义召回</h3>
+          <p>基于 pgvector + Embedding 的语义记忆，写入即索引，对话时自动召回相关上下文。</p>
+        </div>
+        <div class="feature-card fade-in">
+          <div class="feature-icon">⏰</div>
+          <h3>Routines 例行任务</h3>
+          <p>定时触发 AI 任务：晨间简报、数据汇总、自动报告，cron 表达式灵活配置。</p>
+        </div>
+        <div class="feature-card fade-in">
+          <div class="feature-icon">🔌</div>
+          <h3>自定义 Skill</h3>
+          <p>上传 Markdown 格式技能定义，与全局技能合并注入 runtime，扩展助手能力边界。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Platforms -->
+  <section id="platforms" class="platforms">
+    <div class="container">
+      <div class="section-header fade-in">
+        <p class="section-label">多端覆盖</p>
+        <h2 class="section-title">一个后端，三端体验</h2>
+        <p class="section-desc">Web 浏览器、桌面客户端、移动 App——共享同一套 API，数据实时同步。</p>
+      </div>
+      <div class="platforms-grid">
+        <div class="platform-card fade-in">
+          <div class="platform-icon">🌐</div>
+          <h3>Web</h3>
+          <p>React + Vite 构建，响应式设计，浏览器即用。</p>
+          <div class="platform-tag">React + TypeScript</div>
+        </div>
+        <div class="platform-card fade-in">
+          <div class="platform-icon">🖥️</div>
+          <h3>Desktop</h3>
+          <p>Tauri 2 原生壳，复用 Web 代码，轻量高性能。</p>
+          <div class="platform-tag">Tauri 2 + Rust</div>
+        </div>
+        <div class="platform-card fade-in">
+          <div class="platform-icon">📱</div>
+          <h3>Mobile</h3>
+          <p>Capacitor 7 封装，一套代码同时跑 iOS 与 Android。</p>
+          <div class="platform-tag">Capacitor 7</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section id="architecture">
+    <div class="container">
+      <div class="section-header fade-in">
+        <p class="section-label">技术架构</p>
+        <h2 class="section-title">现代技术栈，可靠基石</h2>
+        <p class="section-desc">前后端分离，微服务友好，每个组件选用最合适的工具。</p>
+      </div>
+      <div class="arch-grid">
+        <div class="arch-item fade-in">
+          <div class="arch-icon">⚡</div>
+          <div>
+            <h3>Go API</h3>
+            <p>高性能产品 API：鉴权、会话管理、SSE 流式、多助手路由、LLM 连接。</p>
+          </div>
+        </div>
+        <div class="arch-item fade-in">
+          <div class="arch-icon">🐍</div>
+          <div>
+            <h3>Python Agent Runtime</h3>
+            <p>Skills 执行、Memory 管理、上下文压缩，OpenAI 兼容接口。</p>
+          </div>
+        </div>
+        <div class="arch-item fade-in">
+          <div class="arch-icon">🐘</div>
+          <div>
+            <h3>PostgreSQL + pgvector</h3>
+            <p>用户、会话、消息、助手人设持久化；向量扩展支持语义召回。</p>
+          </div>
+        </div>
+        <div class="arch-item fade-in">
+          <div class="arch-icon">🔗</div>
+          <div>
+            <h3>MCP 协议</h3>
+            <p>支持 stdio / SSE / HTTP 传输，连接外部工具生态。</p>
+          </div>
+        </div>
+        <div class="arch-item fade-in">
+          <div class="arch-icon">🤝</div>
+          <div>
+            <h3>A2A 适配</h3>
+            <p>Agent Card + JSON-RPC 消息接口，跨 Agent 系统互通。</p>
+          </div>
+        </div>
+        <div class="arch-item fade-in">
+          <div class="arch-icon">📦</div>
+          <div>
+            <h3>沙箱电脑</h3>
+            <p>Docker 隔离执行环境，安全运行代码与自动化任务。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section id="start" class="cta">
+    <div class="container">
+      <div class="cta-box fade-in">
+        <h2>准备好开始了吗？</h2>
+        <p>克隆仓库，一条命令启动本地开发环境，几分钟内拥有你自己的 AI 助手。</p>
+        <div class="hero-buttons">
+          <a href="https://github.com/guguTang/open-bot" class="btn btn-primary" target="_blank" rel="noopener">
+            GitHub 仓库
+          </a>
+          <a href="#features" class="btn btn-secondary">
+            查看文档
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container">
+      <div class="footer-inner">
+        <span class="footer-copy">© 2026 Open Bot. All rights reserved.</span>
+        <ul class="footer-links">
+          <li><a href="#features">功能</a></li>
+          <li><a href="#platforms">平台</a></li>
+          <li><a href="#architecture">架构</a></li>
+          <li><a href="https://github.com/guguTang/open-bot" target="_blank" rel="noopener">GitHub</a></li>
+        </ul>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Scroll fade-in
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+  </script>
+</body>
+</html>
