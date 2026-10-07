@@ -1468,7 +1468,7 @@ async def run_tool_loop(
                 await on_status(
                     {
                         "phase": "thinking",
-                        "label": "上游未启用 auto tool choice，改用文本工具协议",
+                        "label": "正在调整调用方式…",
                         "tools_disabled": False,
                         "reason": "auto_tool_choice_unsupported",
                         "tools_via_markup": True,
@@ -1589,7 +1589,7 @@ async def run_tool_loop(
                 await on_status(
                     {
                         "phase": "thinking",
-                        "label": "需要先调用本机工具",
+                        "label": "需要先访问本机…",
                     }
                 )
             msgs.append({"role": "assistant", "content": final or ""})
