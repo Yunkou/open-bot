@@ -566,7 +566,14 @@ button {
 }
 
 .bot-avatar-modal { max-width: 420px; }
-.bot-avatar-form { display: flex; flex-direction: column; gap: 10px; }
+.bot-avatar-form { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.bot-avatar-form-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.bot-avatar-form-footer { flex-shrink: 0; }
 .bot-avatar-preview {
   display: flex;
   flex-direction: column;
@@ -2388,8 +2395,20 @@ button.ghost {
   gap: 10px;
   min-height: 0;
   flex: 1;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+.new-chat-group-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.new-chat-group-footer {
+  flex-shrink: 0;
 }
 
 .new-chat-group-head {
@@ -3729,9 +3748,8 @@ button.ghost {
   opacity: 1;
   pointer-events: auto;
 }
-@media (max-width: 767px) {
-  .msg-hover-bar { display: none !important; }
-}
+/* Hide hover bars when useIsTouchUi sets html.touch-ui (pointer:coarse OR ≤767). */
+.touch-ui .msg-hover-bar { display: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .msg-hover-bar { transition: none; }
 }
@@ -3814,6 +3832,7 @@ button.ghost {
 .action-sheet-row:hover,
 .action-sheet-row:active { background: var(--bg-hover, #eceef1); }
 .action-sheet-cancel { color: #6b7280; margin-top: 4px; }
+.action-sheet-row-danger { color: #dc2626; font-weight: 600; }
 .action-sheet-emoji-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -4538,3 +4557,237 @@ button.ghost {
   }
 }
 
+
+/* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets ---- */
+
+.touch-ui .conv-item:hover .conv-del,
+.touch-ui .conv-item:focus-within .conv-del {
+  /* Desktop hover delete stays; touch uses long-press ConvActionSheet instead. */
+  opacity: 0;
+}
+.touch-ui .conv-item:focus-within .conv-del:focus-visible {
+  opacity: 1;
+}
+
+.new-chat-layer-sheet {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  z-index: 60;
+  background: transparent;
+}
+
+.new-chat-sheet-mask {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(15, 23, 42, 0.45);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.new-chat-popover-sheet {
+  position: relative;
+  top: auto !important;
+  left: auto !important;
+  right: auto !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  max-height: min(90dvh, 90vh);
+  margin: 0;
+  border-radius: 16px 16px 0 0;
+  padding: 0 12px calc(10px + env(safe-area-inset-bottom, 0px));
+  gap: 0;
+  z-index: 1;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.new-chat-sheet-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 12px 4px 8px;
+  min-height: 44px;
+}
+
+.new-chat-sheet-top-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.new-chat-sheet-close {
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: transparent;
+  border-radius: 10px;
+  font-size: 24px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.new-chat-sheet-close:hover,
+.new-chat-sheet-close:active {
+  background: var(--bg-hover, #eceef1);
+  color: var(--text);
+}
+
+.new-chat-popover-sheet .new-chat-search,
+.new-chat-popover-sheet .new-chat-actions {
+  flex-shrink: 0;
+}
+
+.new-chat-popover-sheet .new-chat-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.new-chat-popover-sheet .new-chat-group {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.new-chat-group-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px 12px;
+}
+
+.new-chat-group-footer {
+  flex-shrink: 0;
+  padding: 8px 0 calc(4px + env(safe-area-inset-bottom, 0px));
+  background: var(--bg-elevated);
+  border-top: 1px solid var(--border);
+}
+
+.new-chat-popover-sheet .new-chat-group-submit,
+.new-chat-popover-sheet .new-chat-action,
+.new-chat-popover-sheet .new-chat-row,
+.new-chat-popover-sheet .new-chat-member,
+.new-chat-popover-sheet .new-chat-back {
+  min-height: 44px;
+}
+
+.new-chat-popover-sheet .new-chat-field input,
+.new-chat-popover-sheet .bot-machine-select {
+  min-height: 44px;
+  font-size: 16px; /* avoid iOS zoom */
+}
+
+.new-chat-popover-sheet .bot-avatar-shape-opt {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+.new-chat-popover-sheet .new-chat-shape-grid,
+.new-chat-popover-sheet .bot-avatar-shape-grid,
+.bot-avatar-modal-sheet .bot-avatar-shape-grid,
+.touch-ui .new-chat-shape-grid,
+.touch-ui .bot-avatar-shape-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.new-chat-popover-sheet .bot-avatar-color-grid,
+.bot-avatar-modal-sheet .bot-avatar-color-grid,
+.touch-ui .bot-avatar-color-grid {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.new-chat-help-wrap {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+/* Bot avatar settings: full-width bottom sheet on touch / ≤860 */
+.bot-avatar-backdrop-sheet {
+  align-items: flex-end;
+  justify-content: stretch;
+  place-items: stretch;
+  padding: 0;
+}
+
+.bot-avatar-modal-sheet {
+  width: 100% !important;
+  max-width: 100% !important;
+  max-height: min(90dvh, 90vh);
+  margin: 0;
+  border-radius: 16px 16px 0 0;
+  padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bot-avatar-modal-sheet .bot-avatar-form {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.bot-avatar-form-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 8px;
+}
+
+.bot-avatar-form-footer {
+  flex-shrink: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+}
+
+.bot-avatar-modal-sheet .bot-avatar-close {
+  width: 44px;
+  height: 44px;
+  margin: 0 !important;
+  padding: 0 !important;
+  font-size: 22px;
+  display: grid;
+  place-items: center;
+}
+
+.bot-avatar-modal-sheet .bot-machine-select,
+.bot-avatar-modal-sheet .bot-avatar-shape-opt,
+.bot-avatar-modal-sheet .bot-avatar-status-opt,
+.bot-avatar-modal-sheet .llm-actions button {
+  min-height: 44px;
+}
+
+.bot-avatar-modal-sheet .modal-head {
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.bot-avatar-modal-sheet .bot-machine-select {
+  font-size: 16px;
+}

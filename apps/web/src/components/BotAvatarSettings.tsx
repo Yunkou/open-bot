@@ -10,6 +10,7 @@ import {
   type BotPresenceStatus,
 } from "./avatarColor";
 import { AgentAvatar } from "./AgentAvatar";
+import { useSheetFormUi } from "./useIsTouchUi";
 
 type Props = {
   agent: Agent | null;
@@ -36,6 +37,7 @@ function machineHint(m: Machine): string {
 }
 
 export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
+  const sheetForm = useSheetFormUi();
   const [shape, setShape] = useState<AvatarShape>("cloud");
   const [color, setColor] = useState("#457b9d");
   const [machineId, setMachineId] = useState("");
@@ -75,6 +77,15 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     };
   }, [agent, open]);
 
+  useEffect(() => {
+    if (!open || !sheetForm) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [open, sheetForm]);
+
   if (!open || !agent) return null;
 
   const submit = async (e: FormEvent) => {
@@ -96,95 +107,108 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal bot-avatar-modal" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={`modal-backdrop${sheetForm ? " bot-avatar-backdrop-sheet" : ""}`}
+      onPointerDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className={`modal bot-avatar-modal${sheetForm ? " bot-avatar-modal-sheet" : ""}`}
+        onPointerDown={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Bot 形象 ${agent.name}`}
+      >
         <div className="modal-head">
           <h3>Bot 形象 · {agent.name}</h3>
-          <button type="button" className="ghost" onClick={onClose}>
-            关闭
+          <button type="button" className="ghost bot-avatar-close" onClick={onClose} aria-label="关闭">
+            {sheetForm ? "×" : "关闭"}
           </button>
         </div>
         <form className="bot-avatar-form" onSubmit={(e) => void submit(e)}>
-          <div className="bot-avatar-preview">
-            <AgentAvatar
-              id={agent.id}
-              name={agent.name}
-              size={64}
-              shape={shape}
-              color={color}
-              status={previewStatus}
-            />
-            <div className="bot-avatar-status-toggles" role="group" aria-label="预览表情">
-              {PREVIEW_STATUSES.map((s) => (
+          <div className="bot-avatar-form-scroll">
+            <div className="bot-avatar-preview">
+              <AgentAvatar
+                id={agent.id}
+                name={agent.name}
+                size={64}
+                shape={shape}
+                color={color}
+                status={previewStatus}
+              />
+              <div className="bot-avatar-status-toggles" role="group" aria-label="预览表情">
+                {PREVIEW_STATUSES.map((s) => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    className={`bot-avatar-status-opt${previewStatus === s.id ? " active" : ""}`}
+                    onClick={() => setPreviewStatus(s.id)}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+              <div className="muted small">预览五态（仅本地试看，不改真实 presence）</div>
+            </div>
+
+            <label className="bot-avatar-label">形状</label>
+            <div className="bot-avatar-shape-grid">
+              {AVATAR_SHAPES.map((s) => (
                 <button
-                  key={s.id}
+                  key={s}
                   type="button"
-                  className={`bot-avatar-status-opt${previewStatus === s.id ? " active" : ""}`}
-                  onClick={() => setPreviewStatus(s.id)}
+                  className={`bot-avatar-shape-opt${shape === s ? " active" : ""}`}
+                  onClick={() => setShape(s)}
+                  title={s}
+                  aria-label={s}
                 >
-                  {s.label}
+                  <AgentAvatar id={agent.id} name={agent.name} size={36} shape={s} color={color} />
                 </button>
               ))}
             </div>
-            <div className="muted small">预览五态（仅本地试看，不改真实 presence）</div>
+
+            <label className="bot-avatar-label">主色</label>
+            <div className="bot-avatar-color-grid">
+              {AVATAR_COLOR_PALETTE.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  className={`bot-avatar-color-opt${color.toLowerCase() === c.toLowerCase() ? " active" : ""}`}
+                  style={{ background: c }}
+                  onClick={() => setColor(c)}
+                  title={c}
+                  aria-label={c}
+                />
+              ))}
+            </div>
+
+            <label className="bot-avatar-label" htmlFor="bot-machine-select">
+              优先电脑
+            </label>
+            <select
+              id="bot-machine-select"
+              className="bot-machine-select"
+              value={machineId}
+              onChange={(e) => setMachineId(e.target.value)}
+              disabled={busy}
+            >
+              <option value="">不指定（跟发消息的电脑）</option>
+              {machines.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {(m.label || m.id) + " · " + machineHint(m)}
+                </option>
+              ))}
+            </select>
+            {machinesLoaded && machines.length === 0 ? (
+              <div className="muted small new-chat-help-wrap">还没有已连接的电脑。连上电脑后再用本地能力。</div>
+            ) : (
+              <div className="muted small new-chat-help-wrap">本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。</div>
+            )}
+
+            {err ? <div className="auth-error">{err}</div> : null}
           </div>
-
-          <label className="bot-avatar-label">形状</label>
-          <div className="bot-avatar-shape-grid">
-            {AVATAR_SHAPES.map((s) => (
-              <button
-                key={s}
-                type="button"
-                className={`bot-avatar-shape-opt${shape === s ? " active" : ""}`}
-                onClick={() => setShape(s)}
-                title={s}
-                aria-label={s}
-              >
-                <AgentAvatar id={agent.id} name={agent.name} size={36} shape={s} color={color} />
-              </button>
-            ))}
-          </div>
-
-          <label className="bot-avatar-label">主色</label>
-          <div className="bot-avatar-color-grid">
-            {AVATAR_COLOR_PALETTE.map((c) => (
-              <button
-                key={c}
-                type="button"
-                className={`bot-avatar-color-opt${color.toLowerCase() === c.toLowerCase() ? " active" : ""}`}
-                style={{ background: c }}
-                onClick={() => setColor(c)}
-                title={c}
-                aria-label={c}
-              />
-            ))}
-          </div>
-
-          <label className="bot-avatar-label" htmlFor="bot-machine-select">
-            优先电脑
-          </label>
-          <select
-            id="bot-machine-select"
-            className="bot-machine-select"
-            value={machineId}
-            onChange={(e) => setMachineId(e.target.value)}
-            disabled={busy}
-          >
-            <option value="">不指定（跟发消息的电脑）</option>
-            {machines.map((m) => (
-              <option key={m.id} value={m.id}>
-                {(m.label || m.id) + " · " + machineHint(m)}
-              </option>
-            ))}
-          </select>
-          {machinesLoaded && machines.length === 0 ? (
-            <div className="muted small">还没有已连接的电脑。连上电脑后再用本地能力。</div>
-          ) : (
-            <div className="muted small">本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。</div>
-          )}
-
-          {err ? <div className="auth-error">{err}</div> : null}
-          <div className="llm-actions">
+          <div className="llm-actions bot-avatar-form-footer">
             <button type="submit" className="primary" disabled={busy}>
               {busy ? "保存中…" : "保存"}
             </button>

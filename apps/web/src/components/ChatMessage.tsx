@@ -180,7 +180,7 @@ export function ChatMessage({
     Boolean(onFeedback) && message.role === "assistant" && canReact(message);
   const isBot = message.role === "assistant";
 
-  // Reply / feedback live in the hover bar (desktop) or long-press action sheet (narrow).
+  // Reply / feedback live in the hover bar (desktop) or long-press action sheet (touch UI).
   const threadBtn =
     replyCount > 0 && onOpenThread ? (
       <button
@@ -300,7 +300,7 @@ export function ChatMessage({
         }
       : {};
 
-  // Desktop / wide: Grok-style side hover bar. Narrow (<768): bottom action sheet only.
+  // Desktop (fine pointer & wide): hover bar. Touch UI (coarse OR ≤767): bottom action sheet.
   const desktopBar =
     hasActions && !touchUi ? (
       <MessageHoverBar

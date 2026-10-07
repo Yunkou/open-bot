@@ -1,8 +1,7 @@
-import { FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, MouseEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useConfirm } from "./components/ConfirmProvider";
 import {
-  ADMIN_URL,
   Agent,
   API_BASE,
   Channel,
@@ -35,6 +34,9 @@ import {
   listMessagesWithStatus,
   getConversationRunStatus,
   listSkills,
+  uploadSkill,
+  uploadSkillPackage,
+  deleteSkill,
   applyAgentOnboarding,
   formatLLMToolsProbe,
   probeLLMTools,
@@ -63,6 +65,7 @@ import {
   AttachmentMeta,
   setDefaultLLMConnection,
   setSession,
+  setSkillEnabled,
   testMCPServer,
   updateLLMConnection,
   updateMCPServer,
@@ -138,12 +141,12 @@ import { TrainPanel } from "./components/TrainPanel";
 import { NewChatPopover, type CreateBotInput } from "./components/NewChatPopover";
 import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
+import { ConvActionSheet } from "./components/ConvActionSheet";
+import { useIsTouchUi } from "./components/useIsTouchUi";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
-import { SkillsSettings } from "./components/SkillsSettings";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
-import { CloneAgentModal } from "./components/CloneAgentModal";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
@@ -172,7 +175,7 @@ const SETTINGS_TITLE: Record<SettingsTab, string> = {
   general: "通用",
   bot: "当前 Bot",
   llm: "模型",
-  skills: "技能",
+  skills: "Skills",
   mcp: "插件 / MCP",
   compact: "压缩",
   routines: "例行任务",
@@ -444,7 +447,6 @@ export default function App() {
   const [llmMsg, setLLMMsg] = useState("");
 
   const [agentBusy, setAgentBusy] = useState(false);
-  const [cloneTarget, setCloneTarget] = useState<Agent | null>(null);
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
@@ -479,12 +481,33 @@ export default function App() {
   const [trainAgent, setTrainAgent] = useState<Agent | null>(null);
   const [trainReload, setTrainReload] = useState(0);
   const [skills, setSkills] = useState<Skill[]>([]);
-  // Settings「技能」: full editor moved to admin (entry link only). Dirty guard retained for tab UX.
-  const skillsDirtyRef = useRef(false);
-  const skillsEditing = false;
+  const [skillsMsg, setSkillsMsg] = useState("");
+  const [skillsBusy, setSkillsBusy] = useState(false);
+  const [skillName, setSkillName] = useState("");
+  const [skillDesc, setSkillDesc] = useState("");
+  const [skillBody, setSkillBody] = useState("");
+  const [skillZip, setSkillZip] = useState<File | null>(null);
+  const [skillFolder, setSkillFolder] = useState<File[]>([]);
+  const skillFolderInputRef = useRef<HTMLInputElement>(null);
+  const skillZipInputRef = useRef<HTMLInputElement>(null);
 
   const [compactCfg, setCompactCfg] = useState<CompactConfig | null>(null);
   const confirm = useConfirm();
+  const touchUi = useIsTouchUi();
+  const [convSheet, setConvSheet] = useState<
+    | { kind: "agent"; agent: Agent }
+    | { kind: "channel"; channel: Channel }
+    | null
+  >(null);
+  const convLongPressTimer = useRef<number | null>(null);
+  const convLongPressFired = useRef(false);
+  const convLongPressStart = useRef<{ x: number; y: number } | null>(null);
+  const clearConvLongPress = () => {
+    if (convLongPressTimer.current != null) {
+      window.clearTimeout(convLongPressTimer.current);
+      convLongPressTimer.current = null;
+    }
+  };
   const [channels, setChannels] = useState<Channel[]>([]);
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
   const [mcpMsg, setMcpMsg] = useState("");
@@ -906,11 +929,6 @@ export default function App() {
         if (data.type === "task_status" && data.conversation_id) {
           const active = data.status === "running" || data.status === "queued";
           noteTask(data.conversation_id, active, data.label);
-          void refreshAgents().catch(() => {});
-          return;
-        }
-        if (data.type === "agents_changed") {
-          // e.g. the bot cloned itself via clone_agent — show the new bot in the sidebar.
           void refreshAgents().catch(() => {});
           return;
         }
@@ -1795,12 +1813,15 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (typeof data.label === "string" && data.label.trim()) {
-              // Never append raw tool/skill ids to user-visible status bubbles.
-              setRunLabelForStream(data.label);
+              if (phase === "tool" && tool) {
+                setRunLabelForStream(`${data.label} · ${tool}`);
+              } else {
+                setRunLabelForStream(data.label);
+              }
               return;
             }
             if (phase === "tool") {
-              setRunLabelForStream("正在处理…");
+              setRunLabelForStream(tool ? `正在运行命令 · ${tool}` : "正在运行命令");
             } else if (phase === "thinking" || phase === "tool_done") {
               setRunLabelForStream("正在思考…");
             }
@@ -2299,12 +2320,15 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (typeof data.label === "string" && data.label.trim()) {
-              // Never append raw tool/skill ids to user-visible status bubbles.
-              setRunLabelForStream(data.label);
+              if (phase === "tool" && tool) {
+                setRunLabelForStream(`${data.label} · ${tool}`);
+              } else {
+                setRunLabelForStream(data.label);
+              }
               return;
             }
             if (phase === "tool") {
-              setRunLabelForStream("正在处理…");
+              setRunLabelForStream(tool ? `正在运行命令 · ${tool}` : "正在运行命令");
             } else if (phase === "thinking" || phase === "tool_done") {
               setRunLabelForStream("正在思考…");
             }
@@ -2945,30 +2969,11 @@ export default function App() {
     };
   }, [authed, user?.id, refreshAgents, refreshChannels, refreshLLMs]);
 
-
-  /** Leaving the「技能」editor with unsaved buffers → confirm first. */
-  const confirmLeaveSkills = async (): Promise<boolean> => {
-    if (!skillsDirtyRef.current) return true;
-    const ok = await confirm({
-      title: "有未保存的更改",
-      description: "技能编辑页有未保存的修改，离开将丢失。",
-      confirmLabel: "不保存并离开",
-      cancelLabel: "继续编辑",
-      danger: true,
-    });
-    if (ok) skillsDirtyRef.current = false;
-    return ok;
-  };
-
-  const closeSettings = async () => {
-    if (!(await confirmLeaveSkills())) return;
-    setShowSettings(false);
-  };
-
   const openSettings = async (tab: SettingsTab = "llm") => {
     setShowSettings(true);
     setSettingsTab(tab);
     setLLMMsg("");
+    setSkillsMsg("");
     setMcpMsg("");
     setMcpTestResult("");
     try {
@@ -2983,8 +2988,8 @@ export default function App() {
     }
     try {
       await refreshSkills();
-    } catch {
-      /*「技能」page loads its own list and shows errors there */
+    } catch (err) {
+      setSkillsMsg(err instanceof Error ? err.message : String(err));
     }
     try {
       await refreshCompact();
@@ -3108,10 +3113,58 @@ export default function App() {
     }
   };
 
+
+  const CONV_LONG_PRESS_MS = 400;
+  const CONV_MOVE_CANCEL_PX = 10;
+
+  const beginConvLongPress = (
+    e: ReactPointerEvent,
+    target: { kind: "agent"; agent: Agent } | { kind: "channel"; channel: Channel },
+  ) => {
+    if (!touchUi) return;
+    if (e.pointerType === "mouse") return;
+    convLongPressStart.current = { x: e.clientX, y: e.clientY };
+    convLongPressFired.current = false;
+    clearConvLongPress();
+    convLongPressTimer.current = window.setTimeout(() => {
+      convLongPressTimer.current = null;
+      convLongPressFired.current = true;
+      setConvSheet(target);
+      try {
+        navigator.vibrate?.(10);
+      } catch {
+        /* ignore */
+      }
+    }, CONV_LONG_PRESS_MS);
+  };
+
+  const moveConvLongPress = (e: ReactPointerEvent) => {
+    if (!convLongPressStart.current || convLongPressTimer.current == null) return;
+    const dx = Math.abs(e.clientX - convLongPressStart.current.x);
+    const dy = Math.abs(e.clientY - convLongPressStart.current.y);
+    if (dx + dy > CONV_MOVE_CANCEL_PX) clearConvLongPress();
+  };
+
+  const endConvLongPress = () => {
+    clearConvLongPress();
+    convLongPressStart.current = null;
+    if (convLongPressFired.current) {
+      convLongPressFired.current = false;
+      const swallow = (ev: Event) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.removeEventListener("click", swallow, true);
+      };
+      window.addEventListener("click", swallow, true);
+      window.setTimeout(() => window.removeEventListener("click", swallow, true), 500);
+    }
+  };
+
   const removeAgent = async (a: Agent, e?: MouseEvent) => {
     e?.stopPropagation();
     const ok = await confirm({
       title: `确定删除助手「${a.name}」？`,
+      description: "删除后无法恢复",
       confirmLabel: "删除",
       cancelLabel: "取消",
       danger: true,
@@ -3158,6 +3211,7 @@ export default function App() {
     e?.stopPropagation();
     const ok = await confirm({
       title: `确定删除群聊「${ch.name}」？`,
+      description: "删除后无法恢复",
       confirmLabel: "删除",
       cancelLabel: "取消",
       danger: true,
@@ -3189,6 +3243,81 @@ export default function App() {
   };
 
 
+  const onUploadSkill = async (e: FormEvent) => {
+    e.preventDefault();
+    setSkillsBusy(true);
+    setSkillsMsg("");
+    try {
+      let result;
+      if (skillZip) {
+        result = await uploadSkillPackage({
+          name: skillName.trim() || undefined,
+          description: skillDesc.trim() || undefined,
+          archive: skillZip,
+        });
+      } else if (skillFolder.length > 0) {
+        result = await uploadSkillPackage({
+          name: skillName.trim() || undefined,
+          description: skillDesc.trim() || undefined,
+          folderFiles: skillFolder,
+        });
+      } else {
+        result = await uploadSkill({
+          name: skillName.trim(),
+          description: skillDesc.trim(),
+          body_markdown: skillBody,
+        });
+      }
+      setSkillName("");
+      setSkillDesc("");
+      setSkillBody("");
+      setSkillZip(null);
+      setSkillFolder([]);
+      if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+      if (skillZipInputRef.current) skillZipInputRef.current.value = "";
+      await refreshSkills();
+      const n = result.file_count ?? result.files?.length ?? 1;
+      setSkillsMsg(`技能「${result.name}」已上传并启用（${n} 个文件）`);
+    } catch (err) {
+      setSkillsMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
+
+  const onDeleteSkill = async (name: string) => {
+    const ok = await confirm({
+      title: `删除自定义技能「${name}」？`,
+      confirmLabel: "删除",
+      cancelLabel: "取消",
+      danger: true,
+    });
+    if (!ok) return;
+    setSkillsBusy(true);
+    setSkillsMsg("");
+    try {
+      await deleteSkill(name);
+      await refreshSkills();
+      setSkillsMsg("已删除");
+    } catch (err) {
+      setSkillsMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
+
+  const toggleSkill = async (name: string, enabled: boolean) => {
+    setSkillsBusy(true);
+    setSkillsMsg("");
+    try {
+      await setSkillEnabled(name, enabled);
+      await refreshSkills();
+    } catch (err) {
+      setSkillsMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSkillsBusy(false);
+    }
+  };
 
   if (!authed) {
     return (
@@ -3316,6 +3445,13 @@ export default function App() {
                       onSelectAgent(a.id);
                     }
                   }}
+                  onPointerDown={(e) => beginConvLongPress(e, { kind: "agent", agent: a })}
+                  onPointerMove={moveConvLongPress}
+                  onPointerUp={endConvLongPress}
+                  onPointerCancel={endConvLongPress}
+                  onContextMenu={(e) => {
+                    if (touchUi) e.preventDefault();
+                  }}
                 >
                   <AgentAvatar
                     id={a.id}
@@ -3336,22 +3472,6 @@ export default function App() {
                     </div>
                     <div className="agent-desc">{snippet || "尚开始对话"}</div>
                   </div>
-                  <button
-                    type="button"
-                    className="conv-clone"
-                    title="复制助手"
-                    aria-label="复制助手"
-                    disabled={agentBusy}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setCloneTarget(a);
-                    }}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                      <rect x="9" y="9" width="13" height="13" rx="2" />
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                    </svg>
-                  </button>
                   <button
                     type="button"
                     className="conv-del"
@@ -3391,6 +3511,13 @@ export default function App() {
                       e.preventDefault();
                       (e.currentTarget as HTMLElement).click();
                     }
+                  }}
+                  onPointerDown={(e) => beginConvLongPress(e, { kind: "channel", channel: ch })}
+                  onPointerMove={moveConvLongPress}
+                  onPointerUp={endConvLongPress}
+                  onPointerCancel={endConvLongPress}
+                  onContextMenu={(e) => {
+                    if (touchUi) e.preventDefault();
                   }}
                 >
                   <div className="channel-member-stack" aria-hidden>
@@ -3453,6 +3580,25 @@ export default function App() {
         onSelectAgent={(a) => void startChatWithAgent(a)}
         onCreateBot={(input) => createBotFromPopover(input)}
         onCreateGroup={(name, ids) => createGroupFromPopover(name, ids)}
+      />
+
+      <ConvActionSheet
+        open={Boolean(convSheet)}
+        title={
+          convSheet?.kind === "agent"
+            ? convSheet.agent.name
+            : convSheet?.kind === "channel"
+              ? convSheet.channel.name
+              : undefined
+        }
+        onClose={() => setConvSheet(null)}
+        onDelete={() => {
+          const target = convSheet;
+          setConvSheet(null);
+          if (!target) return;
+          if (target.kind === "agent") void removeAgent(target.agent);
+          else void removeChannel(target.channel);
+        }}
       />
 
       <main className="main">
@@ -3688,20 +3834,17 @@ export default function App() {
       </main>
 
       {showSettings && (
-        <div className="modal-backdrop" onClick={() => void closeSettings()}>
-          <div
-            className="modal settings-dialog"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <div className="modal-backdrop" onClick={() => setShowSettings(false)}>
+          <div className="modal settings-dialog" onClick={(e) => e.stopPropagation()}>
             <nav className="settings-nav" aria-label="设置分类">
               {(
                 [
                   ["general", "通用"],
                   ["bot", "当前 Bot"],
-                  ["skills", "技能"],
                   ["machines", "电脑"],
                   ["sandbox", "运行环境"],
                   ["llm", "模型"],
+                  ["skills", "Skills"],
                   ["mcp", "插件 / MCP"],
                   ["compact", "压缩"],
                   ["routines", "例行任务"],
@@ -3712,15 +3855,7 @@ export default function App() {
                   key={id}
                   type="button"
                   className={settingsTab === id ? "active" : ""}
-                  onClick={async () => {
-                    const leavingSkillsEditor = settingsTab === "skills" && skillsEditing;
-                    if ((id !== settingsTab || leavingSkillsEditor) && !(await confirmLeaveSkills())) return;
-                    if (id === "skills" && settingsTab === "skills" && skillsEditing) {
-                      // Re-click「技能」while editing → back to list (remount).
-                      setSettingsTab("general");
-                      requestAnimationFrame(() => setSettingsTab("skills"));
-                      return;
-                    }
+                  onClick={() => {
                     setSettingsTab(id);
                     if (id === "mcp") {
                       void refreshMCP().catch((err) =>
@@ -3757,7 +3892,7 @@ export default function App() {
                   type="button"
                   className="settings-close"
                   aria-label="关闭"
-                  onClick={() => void closeSettings()}
+                  onClick={() => setShowSettings(false)}
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
                     <path d="M6 6l12 12M18 6 6 18" />
@@ -3826,10 +3961,6 @@ export default function App() {
             {settingsTab === "bot" && (
               <BotSettingsPanel
                 agent={activeAgent ?? null}
-                onClone={(a) => setCloneTarget(a)}
-                onOpenSkill={(name) => {
-                  window.open(`${ADMIN_URL}/skills/${encodeURIComponent(name)}`, "_blank", "noopener,noreferrer");
-                }}
                 onSaved={(a) => {
                   void refreshAgents().then(() => {
                     toast.success(`已更新「${a.name}」`);
@@ -3993,7 +4124,141 @@ export default function App() {
               </SettingsPage>
             )}
 
-            {settingsTab === "skills" && <SkillsSettings />}
+            {settingsTab === "skills" && (
+              <SettingsPage>
+                <SettingsHint>
+                  关闭后该技能不会注入系统提示，也无法被 load_skill 加载。默认全部启用。自定义技能是目录包（必有
+                  SKILL.md，可含 references/、scripts/ 等）。可粘贴正文、选文件夹，或上传 .zip；服务端会校验路径与体积。
+                </SettingsHint>
+                <SettingsSection title="上传自定义 Skill">
+                  <SettingsCard padded>
+                    <form className="llm-form" onSubmit={(e) => void onUploadSkill(e)}>
+                      <label>
+                        名称（可选，若 SKILL.md frontmatter 已有可省略）
+                        <input
+                          placeholder="如 my-helper"
+                          value={skillName}
+                          onChange={(e) => setSkillName(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        描述（可选，若 frontmatter 已有可省略）
+                        <input
+                          placeholder="简要说明适用场景"
+                          value={skillDesc}
+                          onChange={(e) => setSkillDesc(e.target.value)}
+                        />
+                      </label>
+                      <label>
+                        正文（单文件 Markdown；与文件夹/zip 三选一）
+                        <textarea
+                          placeholder="可省略 frontmatter，会自动补全"
+                          value={skillBody}
+                          onChange={(e) => {
+                            setSkillBody(e.target.value);
+                            setSkillZip(null);
+                            setSkillFolder([]);
+                            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+                            if (skillZipInputRef.current) skillZipInputRef.current.value = "";
+                          }}
+                          rows={6}
+                          disabled={Boolean(skillZip) || skillFolder.length > 0}
+                        />
+                      </label>
+                      <label>
+                        上传文件夹
+                        <input
+                          ref={skillFolderInputRef}
+                          type="file"
+                          multiple
+                          {...({
+                            webkitdirectory: "",
+                            directory: "",
+                          } as Record<string, string>)}
+                          onChange={(e) => {
+                            const list = Array.from(e.target.files || []);
+                            setSkillFolder(list);
+                            setSkillZip(null);
+                            setSkillBody("");
+                            if (skillZipInputRef.current) skillZipInputRef.current.value = "";
+                          }}
+                        />
+                        {skillFolder.length > 0 ? (
+                          <span className="agent-desc">已选 {skillFolder.length} 个文件</span>
+                        ) : null}
+                      </label>
+                      <label>
+                        上传 .zip 压缩包
+                        <input
+                          ref={skillZipInputRef}
+                          type="file"
+                          accept=".zip,application/zip"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] || null;
+                            setSkillZip(f);
+                            setSkillFolder([]);
+                            setSkillBody("");
+                            if (skillFolderInputRef.current) skillFolderInputRef.current.value = "";
+                          }}
+                        />
+                        {skillZip ? <span className="agent-desc">{skillZip.name}</span> : null}
+                      </label>
+                      <div className="llm-actions">
+                        <button type="submit" className="primary" disabled={skillsBusy}>
+                          {skillsBusy ? "上传中…" : "上传并启用"}
+                        </button>
+                      </div>
+                    </form>
+                  </SettingsCard>
+                </SettingsSection>
+                <SettingsSection title="已安装">
+                  <SettingsCard>
+                    <div className="llm-list">
+                      {skills.length === 0 ? (
+                        <SettingsEmpty>暂无技能。</SettingsEmpty>
+                      ) : (
+                        skills.map((s) => (
+                          <div key={s.name} className="llm-item">
+                            <div>
+                              <div className="agent-name">
+                                {s.name}
+                                {s.custom ? <span className="pill">自定义</span> : null}
+                                {s.custom && s.file_count ? (
+                                  <span className="pill">{s.file_count} 文件</span>
+                                ) : null}
+                              </div>
+                              <div className="agent-desc">{s.description}</div>
+                            </div>
+                            <div className="llm-actions">
+                              <label className="check skill-toggle">
+                                <input
+                                  type="checkbox"
+                                  checked={s.enabled}
+                                  disabled={skillsBusy}
+                                  onChange={(e) => void toggleSkill(s.name, e.target.checked)}
+                                />
+                                {s.enabled ? "已启用" : "已关闭"}
+                              </label>
+                              {s.custom ? (
+                                <button
+                                  type="button"
+                                  className="ghost danger"
+                                  disabled={skillsBusy}
+                                  onClick={() => void onDeleteSkill(s.name)}
+                                >
+                                  删除
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </SettingsCard>
+                  {skillsMsg ? <div className="settings-status">{skillsMsg}</div> : null}
+                </SettingsSection>
+              </SettingsPage>
+            )}
 
             {settingsTab === "mcp" && (
               <SettingsPage>
@@ -4436,7 +4701,10 @@ export default function App() {
                     </form>
                   </SettingsCard>
                 </SettingsSection>
-                {/* Inbound webhooks belong to 例行任务 (was rendered outside the tab conditional → leaked onto every settings page). */}
+              </SettingsPage>
+            )}
+
+
                 <SettingsSection title="入站 Webhook（Slack / GitHub）">
                   <SettingsHint>
                     创建 Hook 后把返回的 URL 配到 Slack Event Subscriptions 或 GitHub Webhooks。
@@ -4497,8 +4765,6 @@ export default function App() {
                     </div>
                   </SettingsCard>
                 </SettingsSection>
-              </SettingsPage>
-            )}
 
             {settingsTab === "sandbox" && (
               <SettingsPage>
@@ -5051,23 +5317,6 @@ export default function App() {
           </div>
         </div>
       )}
-      <CloneAgentModal
-        agent={cloneTarget}
-        onClose={() => setCloneTarget(null)}
-        onCloned={(res) => {
-          const created = res.agent;
-          void refreshAgents()
-            .then(() => {
-              setShowSettings(false);
-              void onSelectAgentRef.current(created.id);
-            })
-            .catch(() => {});
-          const extras: string[] = [];
-          if (res.memories_copied) extras.push(`${res.memories_copied} 条记忆`);
-          if (res.routines_copied) extras.push(`${res.routines_copied} 个例行任务（已暂停）`);
-          toast.success(`已复制为「${created.name}」${extras.length ? `，含 ${extras.join("、")}` : ""}`);
-        }}
-      />
       <SecretPromptModal
         request={secretPrompt}
         onClose={() => setSecretPrompt(null)}
