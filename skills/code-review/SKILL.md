@@ -44,3 +44,9 @@ Mysterious Name / Duplicated Code / Feature Envy / Data Clumps / Primitive Obses
 ## 为何两轴
 
 规范满分但做错需求 → Standards 过、Spec 不过；需求做对但破坏惯例 → 相反。分开报才不会互相掩盖。
+
+## 参考资料
+
+- `references/pre-commit-review.md`：提交前校验流水线（diff → 静态安全扫描 → 基线测试/lint → 冷读复审 JSON 结论 → 最多两轮修复 → 报告；commit/push 先问用户）。用户说「提交前帮我检查 / 能 commit 了吗」时用。
+- `references/verification-verdict.md`：独立验收三选一结论（通过 / 要求修改 / 上报用户），含按轮次切换的审阅视角。验收编码 CLI、其他 bot 或 PR 作者交付的工作时用。
+- 以上两份改编自 Hermes Agent（MIT）。需要时 `load_skill(name="code-review", path="references/<文件名>")`。

@@ -19,6 +19,12 @@ description: Query files on a connected computer with compact summaries (largest
 
 需要选机时先 `list_machines`，再传 `machine_id` 给 `host_shell`。
 
+## 空结果 / 失败纪律
+
+- 输出为空或条数过少：先改查询（换目录、放宽扩展名、去掉过严的路径过滤），再下结论；不要编造文件名与大小。
+- 命令失败：换一条更短、更稳的只读命令再试；不要重复同一条。
+- 不要凭记忆或旧摘要报「最大的是 xxx」。
+
 ## 何时仍 load 本 skill
 
 定制查询、或模型需要看 `scripts/` 正文时：`load_skill` **不会**自动执行 `scripts/`；取到脚本后用 **`host_shell`** 在目标机跑（是否确认由 Auto-review 看命令行，不看脚本正文）。
@@ -56,7 +62,3 @@ bash -c 'SCRIPT_BODY' -- "$HOME/Downloads" mp4 10
 - 用记忆或摘要编造文件名与大小
 - 在无已连接电脑时硬调本机工具；应如实说明需先打开桌面应用
 - 对用户提及内部运行环境路径或架构词
-
-## 安全
-
-`host_shell` 与 skill 脚本都不绕过 Auto-review：硬拒绝始终有效；命令行含重定向、`rm`、装包等仍确认。内容经 `load_skill` 可见，便于审计。

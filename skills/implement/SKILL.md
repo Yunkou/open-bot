@@ -11,7 +11,7 @@ description: Implement a piece of work from a spec or tickets with small verifie
 
 1. 先对齐范围与验收标准；路径不清就问。
 2. 能测的部分优先 `load_skill tdd`，在约定 seam 上红绿推进。
-3. 本机改代码：`list_machines` → `host_ls` / `host_read` / `host_write` / `host_shell`。
+3. 本机改代码：`list_machines` → `host_ls` / `host_read` / `host_write` / `host_shell`；反复改同一处失败时 `load_skill coding-edit`。
 4. 定期跑类型检查与单测；结束前跑一轮相关测试套件（或说明为何不能跑）。
 5. 完成后 `load_skill code-review`，对照规格与仓库惯例自审。
 6. 用户要求提交时再 `host_shell` 走 git；不要擅自 force push / 改历史。

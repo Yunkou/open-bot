@@ -51,6 +51,8 @@ description: Connect to remote hosts headlessly over SSH/SFTP from a connected d
 - `agent`：`empty` / `unavailable` / `tried_n` 等
 - `encrypted`：私钥有口令，当前不支持弹口令；可建议无口令钥或用户自行 `ssh-add`
 
+失败后按错误换参数再试（换 Host 别名、补 `user`/`port`、换已连接电脑的 `machine_id`）；不要重复同一条无效调用，不要编造「已连上」。
+空列表/空文件内容时先确认路径与主机，再下结论。
 不要编造「权限 600 / 我先不走 agent 再测」之类旁白。客户端已自动找钥并试连。
 
 ## 禁止

@@ -38,3 +38,7 @@ TDD 是红 → 绿循环。每轮都要对照：好测试长什么样、测在�
 - 本机跑测：`host_shell`（如 `pnpm test`、`go test`、`pytest`）
 - 生成/改测试文件：`host_read` / `host_write`；危险写入等确认卡
 - 没有已连接电脑时说明限制，不要编造测试结果
+
+## 参考资料
+
+- `references/iron-law.md`：TDD 铁律细则（「没有先失败的测试就不写生产代码」、Verify RED / GREEN 必做步骤、常见自我合理化与红旗清单、完成前核对表、交给编码 CLI / 其他 bot 时如何写 TDD 要求）。改编自 Hermes Agent（MIT）。需要时 `load_skill(name="tdd", path="references/iron-law.md")`。

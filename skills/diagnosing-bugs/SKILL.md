@@ -65,3 +65,8 @@ description: Diagnosis loop for hard bugs and performance regressions. Use when 
 - 本机：`list_machines` → `host_shell` / `host_read` / `host_write`
 - 临时脚本：`sandbox_shell` / `sandbox_write`（对用户只谈结果）
 - 禁止未跑环就声称已定位 / 已修好
+
+## 参考资料
+
+- `references/systematic-debugging.md`：四阶段根因调试细则（铁律「没查到根因不改」、反馈环构造、排名假设、三次修不好就质疑架构、常见自我合理化清单）。改编自 Hermes Agent（MIT）。需要时 `load_skill(name="diagnosing-bugs", path="references/systematic-debugging.md")`。
+- 断点调试：`python-debugpy` / `node-inspect-debugger`；浏览器前端问题：`cdp-dom-inspect` / `dogfood`。
