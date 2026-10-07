@@ -1,6 +1,6 @@
 # open-bot local dev helpers
-.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop check-desktop \
-	build-web build-admin sync-mobile dev-mobile-ios open-mobile-android sandbox-image sandbox-image-desktop \
+.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop build-desktop-windows build-desktop-macos build-desktop-linux check-desktop \
+	build-web build-admin sync-mobile build-android build-android-debug build-android-release dev-mobile-ios open-mobile-android build-ios sandbox-image sandbox-image-desktop \
 	stop-api stop-runtime stop-web stop-worker stop-dev \
 	e2e-install e2e e2e-web e2e-admin backfill-embeddings dream-user
 
@@ -112,6 +112,19 @@ build-desktop:
 	set -a && [ -f .env ] && . ./.env; set +a && \
 	  pnpm --dir apps/desktop tauri build
 
+# Platform-specific desktop builds (Tauri targets)
+build-desktop-windows:
+	set -a && [ -f .env ] && . ./.env; set +a && \
+	  pnpm --dir apps/desktop tauri build --target x86_64-pc-windows-msvc
+
+build-desktop-macos:
+	set -a && [ -f .env ] && . ./.env; set +a && \
+	  pnpm --dir apps/desktop tauri build --target x86_64-apple-darwin
+
+build-desktop-linux:
+	set -a && [ -f .env ] && . ./.env; set +a && \
+	  pnpm --dir apps/desktop tauri build --target x86_64-unknown-linux-gnu
+
 check-desktop:
 	cd apps/desktop/src-tauri && cargo check
 
@@ -135,6 +148,27 @@ dev-mobile-ios: sync-mobile
 
 open-mobile-android: sync-mobile
 	cd apps/mobile && npx cap open android
+
+# Android APK builds (requires Android SDK + Gradle)
+build-android: sync-mobile
+	cd apps/mobile/android && ./gradlew assembleDebug
+	@echo "APK: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+
+build-android-debug: sync-mobile
+	cd apps/mobile/android && ./gradlew assembleDebug
+	@echo "APK: apps/mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+
+build-android-release: sync-mobile
+	cd apps/mobile/android && ./gradlew assembleRelease
+	@echo "APK: apps/mobile/android/app/build/outputs/apk/release/app-release-unsigned.apk"
+
+# iOS build (macOS only, requires Xcode)
+build-ios: sync-mobile
+	@if [ "$$(uname)" != "Darwin" ]; then \
+		echo "iOS builds require macOS"; exit 1; \
+	fi
+	cd apps/mobile/ios/App && xcodebuild -scheme App -configuration Debug -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
+	@echo "iOS build complete"
 
 # Phase-1 sandbox computer image (debian bookworm-slim + bash/curl/python3/git)
 SANDBOX_IMAGE ?= openbot-sandbox:dev

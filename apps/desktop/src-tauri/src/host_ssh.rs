@@ -540,37 +540,100 @@ async fn authenticate(session: &mut client::Handle<SshHandler>, target: &Resolve
         "unavailable".to_string()
     };
     if !target.identities_only {
-        match keys::agent::client::AgentClient::connect_env().await {
-            Ok(mut agent) => match agent.request_identities().await {
-                Ok(identities) if identities.is_empty() => {
-                    agent_status = "empty".into();
-                }
-                Ok(identities) => {
-                    let public_keys: Vec<keys::PublicKey> = identities
-                        .into_iter()
-                        .map(|item| item.public_key().into_owned())
-                        .collect();
-                    agent_status = format!("tried_{}", public_keys.len());
-                    for (index, key) in public_keys.into_iter().enumerate() {
-                        let label = format!("agent#{index}");
-                        match session
-                            .authenticate_publickey_with(&target.user, key, hash_alg, &mut agent)
-                            .await
-                        {
-                            Ok(result) if result.success() => {
-                                return Ok(AuthOk {
-                                    method: "agent",
-                                    key: label,
-                                });
+        #[cfg(unix)]
+        {
+            match keys::agent::client::AgentClient::connect_env().await {
+                Ok(mut agent) => match agent.request_identities().await {
+                    Ok(identities) if identities.is_empty() => {
+                        agent_status = "empty".into();
+                    }
+                    Ok(identities) => {
+                        let public_keys: Vec<keys::PublicKey> = identities
+                            .into_iter()
+                            .map(|item| item.public_key().into_owned())
+                            .collect();
+                        agent_status = format!("tried_{}", public_keys.len());
+                        for (index, key) in public_keys.into_iter().enumerate() {
+                            let label = format!("agent#{index}");
+                            match session
+                                .authenticate_publickey_with(&target.user, key, hash_alg, &mut agent)
+                                .await
+                            {
+                                Ok(result) if result.success() => {
+                                    return Ok(AuthOk {
+                                        method: "agent",
+                                        key: label,
+                                    });
+                                }
+                                Ok(_) => tried.push(json!({ "path": label, "result": "rejected" })),
+                                Err(_) => tried.push(json!({ "path": label, "result": "error" })),
                             }
-                            Ok(_) => tried.push(json!({ "path": label, "result": "rejected" })),
-                            Err(_) => tried.push(json!({ "path": label, "result": "error" })),
+                        }
+                    }
+                    Err(_) => agent_status = "unavailable".into(),
+                },
+                Err(_) => agent_status = "unavailable".into(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            if let Ok(mut agent) = keys::agent::client::AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+                if let Ok(identities) = agent.request_identities().await {
+                    if identities.is_empty() {
+                        agent_status = "empty".into();
+                    } else {
+                        let public_keys: Vec<keys::PublicKey> = identities
+                            .into_iter()
+                            .map(|item| item.public_key().into_owned())
+                            .collect();
+                        agent_status = format!("tried_{}", public_keys.len());
+                        for (index, key) in public_keys.into_iter().enumerate() {
+                            let label = format!("agent#{index}");
+                            match session
+                                .authenticate_publickey_with(&target.user, key, hash_alg, &mut agent)
+                                .await
+                            {
+                                Ok(result) if result.success() => {
+                                    return Ok(AuthOk {
+                                        method: "agent",
+                                        key: label,
+                                    });
+                                }
+                                Ok(_) => tried.push(json!({ "path": label, "result": "rejected" })),
+                                Err(_) => tried.push(json!({ "path": label, "result": "error" })),
+                            }
                         }
                     }
                 }
-                Err(_) => agent_status = "unavailable".into(),
-            },
-            Err(_) => agent_status = "unavailable".into(),
+            } else if let Ok(mut agent) = keys::agent::client::AgentClient::connect_pageant().await {
+                if let Ok(identities) = agent.request_identities().await {
+                    if identities.is_empty() {
+                        agent_status = "empty".into();
+                    } else {
+                        let public_keys: Vec<keys::PublicKey> = identities
+                            .into_iter()
+                            .map(|item| item.public_key().into_owned())
+                            .collect();
+                        agent_status = format!("tried_{}", public_keys.len());
+                        for (index, key) in public_keys.into_iter().enumerate() {
+                            let label = format!("agent#{index}");
+                            match session
+                                .authenticate_publickey_with(&target.user, key, hash_alg, &mut agent)
+                                .await
+                            {
+                                Ok(result) if result.success() => {
+                                    return Ok(AuthOk {
+                                        method: "agent",
+                                        key: label,
+                                    });
+                                }
+                                Ok(_) => tried.push(json!({ "path": label, "result": "rejected" })),
+                                Err(_) => tried.push(json!({ "path": label, "result": "error" })),
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
