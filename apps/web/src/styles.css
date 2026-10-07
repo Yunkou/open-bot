@@ -5404,12 +5404,15 @@ html.touch-ui .diagram-menu-item {
   min-height: 64px;
 }
 
-.settings-hub-row-logout {
+.settings-hub-row.settings-hub-row-logout {
   justify-content: center;
-  color: #dc2626;
+  color: var(--danger);
   font-size: 16px;
   font-weight: 600;
   min-height: 52px;
+}
+[data-theme="dark"] .settings-hub-row.settings-hub-row-logout {
+  color: #f87171;
 }
 
 /* Optional A: quote × ≥44 under touch-ui (wide coarse tablets too) */
