@@ -60,6 +60,24 @@ def _connected(machine: dict[str, Any]) -> bool:
     return bool(machine.get("online"))
 
 
+def _host_eligible(machine: dict[str, Any]) -> bool:
+    """Phones are login-only; only desktop may host (API host_eligible / device_type)."""
+    if "host_eligible" in machine:
+        return bool(machine.get("host_eligible"))
+    dt = str(machine.get("device_type") or "").strip().lower()
+    if dt == "mobile":
+        return False
+    if dt in ("desktop", "browser"):
+        return True
+    plat = str(machine.get("platform") or "").strip().lower()
+    if plat in ("ios", "android", "iphone", "ipad"):
+        return False
+    app = str(machine.get("app") or "").strip().lower()
+    if app == "capacitor":
+        return False
+    return True
+
+
 def usual_work_machine(machines: list[dict[str, Any]]) -> dict[str, Any] | None:
     best: dict[str, Any] | None = None
     best_count = 0
@@ -99,11 +117,21 @@ def select_machine(
 
     offline_current = "当前电脑未连接，本地文件和命令暂时不可用。请在客户端连上后再试。"
     browser_need_host = "本地能力需要在已连接的桌面客户端里操作。请换到已连接的电脑再试。"
+    mobile_not_host = "手机只用来登录，不能作为本机执行通道。请换到已连接的电脑再试。"
 
     if explicit:
         chosen = by_id.get(explicit)
         if chosen is None:
             return {"ok": False, "error": "没有这台已登记的电脑", "machines": rows}
+        if not _host_eligible(chosen):
+            label = str(chosen.get("label") or "那台设备")
+            return {
+                "ok": False,
+                "error": mobile_not_host,
+                "machine_id": explicit,
+                "label": label,
+                "machines": rows,
+            }
         if not _connected(chosen):
             label = str(chosen.get("label") or "那台电脑")
             return {
@@ -118,11 +146,22 @@ def select_machine(
     # Session host pinned for this message/run: present ⇒ use or fail (no fallback).
     if current:
         chosen = by_id.get(current)
+        if chosen is not None and not _host_eligible(chosen):
+            label = str(chosen.get("label") or "")
+            out: dict[str, Any] = {
+                "ok": False,
+                "error": mobile_not_host,
+                "machine_id": current,
+                "machines": rows,
+            }
+            if label:
+                out["label"] = label
+            return out
         if chosen is None or not _connected(chosen):
             label = ""
             if chosen is not None:
                 label = str(chosen.get("label") or "")
-            out: dict[str, Any] = {
+            out = {
                 "ok": False,
                 "error": offline_current,
                 "machine_id": current,
@@ -133,13 +172,13 @@ def select_machine(
             return out
         return {"ok": True, "machine": chosen}
 
-    # Browser / no session machine: preferred → sole → prompt.
+    # Browser / no session machine: preferred → sole → prompt (desktop hosts only).
     if preferred:
         chosen = by_id.get(preferred)
-        if chosen is not None and _connected(chosen):
+        if chosen is not None and _host_eligible(chosen) and _connected(chosen):
             return {"ok": True, "machine": chosen}
 
-    connected = [m for m in rows if _connected(m)]
+    connected = [m for m in rows if _connected(m) and _host_eligible(m)]
     if len(connected) == 1:
         return {"ok": True, "machine": connected[0]}
     if not connected:
