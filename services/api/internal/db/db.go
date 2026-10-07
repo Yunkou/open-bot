@@ -390,6 +390,7 @@ CREATE TABLE IF NOT EXISTS user_machines (
 CREATE INDEX IF NOT EXISTS idx_user_machines_user ON user_machines(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_machines_last_seen ON user_machines(user_id, last_seen DESC);
 ALTER TABLE user_machines ADD COLUMN IF NOT EXISTS file_op_count BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE user_machines ADD COLUMN IF NOT EXISTS device_type TEXT NOT NULL DEFAULT 'desktop';
 
 CREATE TABLE IF NOT EXISTS conversation_tasks (
   id TEXT PRIMARY KEY,

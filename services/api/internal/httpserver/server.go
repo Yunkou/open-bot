@@ -307,7 +307,7 @@ func withCORS(next http.Handler) http.Handler {
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Internal-Token")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Internal-Token, ngrok-skip-browser-warning")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -323,13 +323,17 @@ func isLocalDevOrigin(origin string) bool {
 		"http://tauri.localhost",
 		"https://tauri.localhost",
 		"capacitor://localhost",
-		"ionic://localhost":
-		// Packaged Tauri (macOS/Linux) and Capacitor shells. WKWebView reports a
-		// rejected preflight as "Load failed".
+		"ionic://localhost",
+		// Capacitor Android WebView default (androidScheme https).
+		"https://localhost",
+		"http://localhost":
+		// Packaged Tauri / Capacitor shells. Rejected preflight shows as Load failed.
 		return true
 	}
 	return strings.HasPrefix(o, "http://localhost:") ||
+		strings.HasPrefix(o, "https://localhost:") ||
 		strings.HasPrefix(o, "http://127.0.0.1:") ||
+		strings.HasPrefix(o, "https://127.0.0.1:") ||
 		strings.HasPrefix(o, "http://[::1]:")
 }
 
@@ -784,6 +788,12 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "machine not found"})
 				return
 			}
+			if errors.Is(e2, db.ErrMobileNotHost) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "mobile devices cannot be preferred hosts",
+				})
+				return
+			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": e2.Error()})
 			return
 		}
@@ -839,6 +849,12 @@ func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 		if e2 != nil {
 			if errors.Is(e2, db.ErrNotFound) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "machine not found"})
+				return
+			}
+			if errors.Is(e2, db.ErrMobileNotHost) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "mobile devices cannot be preferred hosts",
+				})
 				return
 			}
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": e2.Error()})
@@ -1336,10 +1352,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Session host for green-dot / host routing: desktop client_env.machine_id.
 	if mid := clientEnvMachineID(body.Client); mid != "" {
-		if err := s.db.SetConversationLastMachineID(uid, conv.ID, mid); err == nil {
-			conv.LastMachineID = mid
-			if a, gerr := s.db.GetAgent(uid, conv.AgentID); gerr == nil && a != nil {
-				s.publishAgentOnlineSessionFlip(uid, a, mid, false)
+		// Phones are login-only: never stamp mobile as conversation session host.
+		if m, merr := s.db.GetMachine(uid, mid); merr == nil && m != nil && db.IsHostEligible(*m) {
+			if err := s.db.SetConversationLastMachineID(uid, conv.ID, mid); err == nil {
+				conv.LastMachineID = mid
+				if a, gerr := s.db.GetAgent(uid, conv.AgentID); gerr == nil && a != nil {
+					s.publishAgentOnlineSessionFlip(uid, a, mid, false)
+				}
 			}
 		}
 	}

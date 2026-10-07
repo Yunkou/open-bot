@@ -15,6 +15,8 @@ func TestCORSAllowsShellOrigins(t *testing.T) {
 		"http://tauri.localhost",
 		"https://tauri.localhost",
 		"capacitor://localhost",
+		"https://localhost",
+		"http://localhost",
 		"http://127.0.0.1:5173",
 	}
 	for _, origin := range allowed {

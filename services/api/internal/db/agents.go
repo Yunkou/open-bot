@@ -336,8 +336,12 @@ func (d *DB) SetAgentMachineID(userID, id, machineID string) (*Agent, error) {
 		return nil, errors.New("user_id and agent id required")
 	}
 	if machineID != "" {
-		if _, err := d.GetMachine(userID, machineID); err != nil {
+		m, err := d.GetMachine(userID, machineID)
+		if err != nil {
 			return nil, err
+		}
+		if m == nil || !IsHostEligible(*m) {
+			return nil, ErrMobileNotHost
 		}
 	}
 	a, err := d.GetAgent(userID, id)

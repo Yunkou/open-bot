@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,6 +45,22 @@ func TestMachineHostOnline(t *testing.T) {
 			name: "connected_zero_last_seen",
 			m:    db.Machine{Connected: true},
 			want: false,
+		},
+		{
+			name: "mobile_connected_fresh_not_host",
+			m: db.Machine{
+				Connected: true, LastSeen: now.Add(-10 * time.Second),
+				DeviceType: db.DeviceTypeMobile,
+			},
+			want: false,
+		},
+		{
+			name: "desktop_connected_fresh",
+			m: db.Machine{
+				Connected: true, LastSeen: now.Add(-10 * time.Second),
+				DeviceType: db.DeviceTypeDesktop,
+			},
+			want: true,
 		},
 	}
 	if db.MachineOfflineAfter != 90*time.Second {
@@ -577,5 +594,182 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sess-"+uid[:8], org.ID, db.RoleMember
 	}
 	if s.agentHostOnline(uid, a) {
 		t.Fatal("preferred down, no session arg → ListAgents offline")
+	}
+}
+
+func TestAnyUserMachineOnlineIgnoresMobile(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-mobile-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+
+	s := &Server{db: d, hosts: newHostHub()}
+	mobile, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "phone-" + uid[:8], Label: "Phone", Platform: "android", DeviceType: "mobile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mobile.DeviceType != db.DeviceTypeMobile || mobile.HostEligible {
+		t.Fatalf("mobile register: %+v", mobile)
+	}
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, mobile.ID)] = &hostSession{userID: uid, machineID: mobile.ID}
+	s.hosts.mu.Unlock()
+
+	if s.anyUserMachineOnline(uid) {
+		t.Fatal("mobile-only Connected must not count as anyUserMachineOnline")
+	}
+	if s.machineIDHostOnline(uid, mobile.ID) {
+		t.Fatal("machineIDHostOnline must be false for mobile")
+	}
+
+	desk, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "desk-" + uid[:8], Label: "Mac", Platform: "macos",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.hosts.mu.Lock()
+	s.hosts.sessions[hostKey(uid, desk.ID)] = &hostSession{userID: uid, machineID: desk.ID}
+	s.hosts.mu.Unlock()
+	if !s.anyUserMachineOnline(uid) {
+		t.Fatal("desktop Connected should light anyUserMachineOnline")
+	}
+}
+
+func TestSetAgentMachineIDRejectsMobile(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "pref-mobile-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "cloud", "#118ab2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mobile, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "m-" + uid[:8], Platform: "ios", DeviceType: "mobile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.SetAgentMachineID(uid, a.ID, mobile.ID)
+	if !errors.Is(err, db.ErrMobileNotHost) {
+		t.Fatalf("want ErrMobileNotHost, got %v", err)
+	}
+}
+
+func TestAttachPreferredMachineOmitsMobile(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "pref-omit-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM agents WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "drop", "#9b5de5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	desk, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "d-" + uid[:8], Platform: "macos",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetAgentMachineID(uid, a.ID, desk.ID); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: d}
+	payload := map[string]any{}
+	s.attachPreferredMachine(payload, uid, a.ID)
+	if payload["preferred_machine_id"] != desk.ID {
+		t.Fatalf("desktop preferred missing: %v", payload)
+	}
+	// Force-bind mobile via SQL (bypass SetAgentMachineID) to simulate legacy bad row.
+	mobile, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "p-" + uid[:8], Platform: "android", DeviceType: "mobile",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SQL.Exec(`UPDATE agents SET machine_id=$1, machine_id_source='user' WHERE id=$2`, mobile.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	payload = map[string]any{}
+	s.attachPreferredMachine(payload, uid, a.ID)
+	if _, ok := payload["preferred_machine_id"]; ok {
+		t.Fatalf("mobile preferred must be omitted: %v", payload)
+	}
+}
+
+func TestInferRegisterDeviceTypeFromPlatform(t *testing.T) {
+	d, err := db.Open("")
+	if err != nil {
+		t.Skip(err)
+	}
+	defer d.Close()
+	org, err := d.EnsureDefaultOrg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uuid.NewString()
+	if _, err := d.SQL.Exec(`INSERT INTO users (id, username, password_hash, org_id, role, created_at)
+VALUES ($1,$2,'x',$3,$4,$5)`, uid, "infer-"+uid[:8], org.ID, db.RoleMember, db.Now()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
+		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
+	})
+	m, err := d.RegisterMachine(uid, db.MachineRegisterInput{
+		MachineKey: "cap-" + uid[:8], Platform: "android", App: "capacitor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.DeviceType != db.DeviceTypeMobile || m.HostEligible {
+		t.Fatalf("inferred mobile: %+v", m)
 	}
 }

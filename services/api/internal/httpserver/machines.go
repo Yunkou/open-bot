@@ -23,6 +23,7 @@ type machineRegisterBody struct {
 	Arch       string `json:"arch"`
 	App        string `json:"app"`
 	AppVersion string `json:"app_version"`
+	DeviceType string `json:"device_type"` // optional: desktop | mobile; inferred if empty
 }
 
 type internalListMachinesBody struct {
@@ -62,6 +63,7 @@ func (s *Server) handleRegisterMachine(w http.ResponseWriter, r *http.Request) {
 		Arch:       body.Arch,
 		App:        body.App,
 		AppVersion: body.AppVersion,
+		DeviceType: body.DeviceType,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -172,6 +174,8 @@ func (s *Server) handleInternalListMachines(w http.ResponseWriter, r *http.Reque
 			"connected":     m.Connected,
 			"file_op_count": m.FileOpCount,
 			"exec_policy":   db.NormalizeMachineExecPolicy(m.ExecPolicy),
+			"device_type":   m.DeviceType,
+			"host_eligible": m.HostEligible,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"machines": slim, "count": len(slim)})
@@ -201,6 +205,12 @@ func (s *Server) handleHostExecWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !db.IsHostEligible(*m) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "mobile devices cannot host exec; phones are login-only",
+		})
 		return
 	}
 	conn, err := busUpgrader.Upgrade(w, r, nil)
@@ -331,6 +341,13 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if !db.IsHostEligible(*m) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok": false, "error": "mobile devices cannot run host exec",
+			"machine_id": mid, "device_type": m.DeviceType,
+		})
 		return
 	}
 	if !s.hosts.Connected(uid, mid) {

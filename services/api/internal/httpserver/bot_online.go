@@ -24,7 +24,11 @@ import (
 // pass session host via agentHostOnlineSession.
 
 // machineHostOnline is the pure host check used for Bot green-dot online.
+// Mobile devices are never host-online (login-only).
 func machineHostOnline(m db.Machine, now time.Time) bool {
+	if !db.IsHostEligible(m) {
+		return false
+	}
 	if !m.Connected {
 		return false
 	}

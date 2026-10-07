@@ -30,6 +30,10 @@ type Machine struct {
 	// ExecPolicy: allow | ask | deny — whether the bot may run host ops on this machine.
 	// Auto-review still applies when allow/ask.
 	ExecPolicy string `json:"exec_policy"`
+	// DeviceType: desktop | mobile. Phones are login-only (not hosts). Default desktop.
+	DeviceType string `json:"device_type"`
+	// HostEligible is computed: device_type == desktop. Not stored.
+	HostEligible bool `json:"host_eligible"`
 	// Connected is set by the API from the live exec socket, not stored.
 	Connected bool `json:"connected"`
 }
@@ -42,6 +46,7 @@ type MachineRegisterInput struct {
 	Arch       string
 	App        string
 	AppVersion string
+	DeviceType string // optional; empty → InferDeviceType(platform, os, app)
 }
 
 func (m *Machine) ApplyOnlineStatus(now time.Time) {
@@ -55,10 +60,11 @@ func scanMachine(sc interface{ Scan(dest ...any) error }) (Machine, error) {
 	err := sc.Scan(
 		&m.ID, &m.UserID, &m.MachineKey, &m.Label, &m.Platform, &m.OS, &m.Arch,
 		&m.App, &m.AppVersion, &m.Status, &m.LastSeen, &m.CreatedAt, &m.UpdatedAt,
-		&m.FileOpCount, &m.ExecPolicy,
+		&m.FileOpCount, &m.ExecPolicy, &m.DeviceType,
 	)
 	if err == nil {
 		m.ExecPolicy = NormalizeMachineExecPolicy(m.ExecPolicy)
+		m.ApplyDeviceFields()
 	}
 	return m, err
 }
@@ -67,7 +73,7 @@ func (d *DB) ListMachines(userID string) ([]Machine, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
 		        status, last_seen, created_at, updated_at, file_op_count,
-		        COALESCE(exec_policy, 'allow')
+		        COALESCE(exec_policy, 'allow'), COALESCE(device_type, 'desktop')
 		 FROM user_machines WHERE user_id = $1 ORDER BY last_seen DESC`,
 		userID,
 	)
@@ -92,7 +98,7 @@ func (d *DB) GetMachine(userID, id string) (*Machine, error) {
 	row := d.SQL.QueryRow(
 		`SELECT id, user_id, machine_key, label, platform, os, arch, app, app_version,
 		        status, last_seen, created_at, updated_at, file_op_count,
-		        COALESCE(exec_policy, 'allow')
+		        COALESCE(exec_policy, 'allow'), COALESCE(device_type, 'desktop')
 		 FROM user_machines WHERE user_id = $1 AND id = $2`,
 		userID, id,
 	)
@@ -120,6 +126,7 @@ func (d *DB) RegisterMachine(userID string, in MachineRegisterInput) (*Machine, 
 	if platform == "" {
 		platform = "unknown"
 	}
+	deviceType := ResolveDeviceType(in.DeviceType, platform, in.OS, in.App)
 	now := Now()
 	// Upsert by (user_id, machine_key)
 	var existingID string
@@ -131,17 +138,19 @@ func (d *DB) RegisterMachine(userID string, in MachineRegisterInput) (*Machine, 
 		return nil, err
 	}
 	if existingID != "" {
-		// Keep user-renamed label; only refresh platform metadata + online status.
+		// Keep user-renamed label; only refresh platform metadata + online status + device_type.
 		_, err = d.SQL.Exec(
 			`UPDATE user_machines SET
 			   platform = $1, os = $2, arch = $3, app = $4, app_version = $5,
-			   status = 'online', last_seen = $6, updated_at = $6
-			 WHERE id = $7 AND user_id = $8`,
+			   device_type = $6,
+			   status = 'online', last_seen = $7, updated_at = $7
+			 WHERE id = $8 AND user_id = $9`,
 			platform,
 			strings.TrimSpace(in.OS),
 			strings.TrimSpace(in.Arch),
 			strings.TrimSpace(in.App),
 			strings.TrimSpace(in.AppVersion),
+			deviceType,
 			now,
 			existingID,
 			userID,
@@ -161,18 +170,20 @@ func (d *DB) RegisterMachine(userID string, in MachineRegisterInput) (*Machine, 
 		Arch:       strings.TrimSpace(in.Arch),
 		App:        strings.TrimSpace(in.App),
 		AppVersion: strings.TrimSpace(in.AppVersion),
+		DeviceType: deviceType,
 		Status:     "online",
 		LastSeen:   now,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
+	m.ApplyDeviceFields()
 	_, err = d.SQL.Exec(
 		`INSERT INTO user_machines (
 		   id, user_id, machine_key, label, platform, os, arch, app, app_version,
-		   status, last_seen, created_at, updated_at
-		 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		   status, last_seen, created_at, updated_at, device_type
+		 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		m.ID, m.UserID, m.MachineKey, m.Label, m.Platform, m.OS, m.Arch, m.App, m.AppVersion,
-		m.Status, m.LastSeen, m.CreatedAt, m.UpdatedAt,
+		m.Status, m.LastSeen, m.CreatedAt, m.UpdatedAt, m.DeviceType,
 	)
 	if err != nil {
 		return nil, err
@@ -222,6 +233,9 @@ func (d *DB) UsualWorkMachine(userID string) (*Machine, error) {
 	var best *Machine
 	for i := range list {
 		m := &list[i]
+		if !IsHostEligible(*m) {
+			continue
+		}
 		if m.FileOpCount <= 0 {
 			continue
 		}
