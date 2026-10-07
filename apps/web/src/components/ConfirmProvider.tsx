@@ -33,11 +33,20 @@ type ConfirmFn = (options: ConfirmOptions) => Promise<boolean>;
 
 const ConfirmContext = createContext<ConfirmFn | null>(null);
 
+/** Returns true if a confirm was open and is now dismissed (resolved false). */
+type DismissConfirmFn = () => boolean;
+
+const DismissConfirmContext = createContext<DismissConfirmFn>(() => false);
+
+const ConfirmOpenContext = createContext<() => boolean>(() => false);
+
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const [options, setOptions] = useState<ConfirmOptions | null>(null);
   const resolveRef = useRef<((value: boolean) => void) | null>(null);
   const resultRef = useRef<boolean | null>(null);
+  const openRef = useRef(false);
+  openRef.current = open;
   const sheetUi = useSheetFormUi();
 
   const confirm = useCallback<ConfirmFn>((opts) => {
@@ -58,6 +67,14 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     resolve(value);
   }, []);
 
+  const dismiss = useCallback<DismissConfirmFn>(() => {
+    if (!openRef.current || !resolveRef.current) return false;
+    settle(false);
+    return true;
+  }, [settle]);
+
+  const isOpen = useCallback(() => openRef.current, []);
+
   useEffect(() => {
     if (!open || !sheetUi) return;
     const onKey = (e: KeyboardEvent) => {
@@ -77,6 +94,8 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
   return (
     <ConfirmContext.Provider value={confirm}>
+      <DismissConfirmContext.Provider value={dismiss}>
+        <ConfirmOpenContext.Provider value={isOpen}>
       {children}
       {sheetUi ? (
         open && options ? (
@@ -161,6 +180,8 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
           </AlertDialogContent>
         </AlertDialog>
       )}
+        </ConfirmOpenContext.Provider>
+      </DismissConfirmContext.Provider>
     </ConfirmContext.Provider>
   );
 }
@@ -171,4 +192,13 @@ export function useConfirm(): ConfirmFn {
     throw new Error("useConfirm must be used within ConfirmProvider");
   }
   return ctx;
+}
+
+/** System-back / gesture: dismiss open confirm as cancel. Safe outside provider (no-op). */
+export function useDismissConfirm(): DismissConfirmFn {
+  return useContext(DismissConfirmContext);
+}
+
+export function useConfirmIsOpen(): () => boolean {
+  return useContext(ConfirmOpenContext);
 }

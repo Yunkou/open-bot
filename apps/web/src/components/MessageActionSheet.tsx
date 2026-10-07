@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { REACTION_EMOJIS } from "../api";
+import { OPENBOT_SYSTEM_BACK_EVENT } from "../lib/mobileSystemBack";
 import { IconCopy, IconFlag, IconReply, IconSmile } from "./MsgActionIcons";
 
 type Props = {
@@ -37,11 +38,17 @@ export function MessageActionSheet({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
+    const onSystemBack = (e: Event) => {
+      e.preventDefault();
+      onClose();
+    };
     document.addEventListener("keydown", onKey);
+    document.addEventListener(OPENBOT_SYSTEM_BACK_EVENT, onSystemBack);
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => {
       document.removeEventListener("keydown", onKey);
+      document.removeEventListener(OPENBOT_SYSTEM_BACK_EVENT, onSystemBack);
       document.body.style.overflow = prev;
     };
   }, [open, onClose]);

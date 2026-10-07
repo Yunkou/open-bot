@@ -1,6 +1,6 @@
 import { FormEvent, MouseEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useConfirm } from "./components/ConfirmProvider";
+import { useConfirm, useDismissConfirm } from "./components/ConfirmProvider";
 import {
   Agent,
   API_BASE,
@@ -121,6 +121,14 @@ import {
   resolveDefaultMachineLabel,
 } from "./lib/clientEnv";
 import { installSafeAreaInsets } from "./lib/safeAreaInsets";
+import {
+  EXIT_TOAST_COPY,
+  LIST_ROOT_EXIT_WINDOW_MS,
+  handleSystemBack,
+  installCapacitorBackButton,
+  notifySystemBackOverlays,
+  type SystemBackResult,
+} from "./lib/mobileSystemBack";
 import {
   effectiveTimezone,
   normalizeMachineExecPolicy,
@@ -530,6 +538,7 @@ export default function App() {
 
   const [compactCfg, setCompactCfg] = useState<CompactConfig | null>(null);
   const confirm = useConfirm();
+  const dismissConfirm = useDismissConfirm();
   const touchUi = useIsTouchUi();
   const sheetForm = useSheetFormUi();
 
@@ -706,6 +715,100 @@ export default function App() {
   const [botSecrets, setBotSecrets] = useState<BotSecretMeta[]>([]);
   const [secretRequests, setSecretRequests] = useState<BotSecretRequest[]>([]);
   const [secretPrompt, setSecretPrompt] = useState<BotSecretRequest | null>(null);
+
+  /* Mobile system back / gesture — same stack as UI ← (bot-mobile-back-gesture-v1) */
+  const lastListRootBackAtRef = useRef<number | null>(null);
+  const systemBackStateRef = useRef({
+    dismissConfirm,
+    secretPromptOpen: false,
+    dismissSecretPrompt: () => {},
+    feedbackOpen: false,
+    dismissFeedback: () => {},
+    trainOpen: false,
+    dismissTrain: () => {},
+    avatarSettingsOpen: false,
+    dismissAvatarSettings: () => {},
+    createSheetOpen: false,
+    dismissCreateSheet: () => {},
+    newChatOpen: false,
+    dismissNewChat: () => {},
+    convSheetOpen: false,
+    dismissConvSheet: () => {},
+    showSettings: false,
+    settingsShellHub: true,
+    setSettingsShellHub,
+    closeSettings: () => {},
+    mobileView: "list" as "list" | "chat",
+    setMobileView,
+    isNarrowLayout: false,
+  });
+  systemBackStateRef.current = {
+    dismissConfirm,
+    secretPromptOpen: Boolean(secretPrompt),
+    dismissSecretPrompt: () => setSecretPrompt(null),
+    feedbackOpen: Boolean(feedbackTarget),
+    dismissFeedback: () => setFeedbackTarget(null),
+    trainOpen: Boolean(trainAgent),
+    dismissTrain: () => setTrainAgent(null),
+    avatarSettingsOpen: Boolean(avatarSettingsAgent),
+    dismissAvatarSettings: () => setAvatarSettingsAgent(null),
+    createSheetOpen,
+    dismissCreateSheet: () => setCreateSheetOpen(false),
+    newChatOpen: showNewChat,
+    dismissNewChat: () => {
+      setShowNewChat(false);
+      setNewChatInitialMode("list");
+    },
+    convSheetOpen: Boolean(convSheet),
+    dismissConvSheet: () => setConvSheet(null),
+    showSettings,
+    settingsShellHub,
+    setSettingsShellHub,
+    closeSettings: () => setShowSettings(false),
+    mobileView,
+    setMobileView,
+    isNarrowLayout,
+  };
+
+  const runSystemBack = useCallback((): SystemBackResult => {
+    const result = handleSystemBack(systemBackStateRef.current, {
+      lastListRootBackAt: lastListRootBackAtRef.current,
+      onExitPrompt: () => {
+        lastListRootBackAtRef.current = Date.now();
+        toast.message(EXIT_TOAST_COPY, { duration: LIST_ROOT_EXIT_WINDOW_MS });
+      },
+      notifyChildOverlays: notifySystemBackOverlays,
+    });
+    if (result.action === "exit-ready") {
+      lastListRootBackAtRef.current = null;
+    }
+    return result;
+  }, []);
+
+  useEffect(() => {
+    if (mobileView === "chat" || showSettings) {
+      lastListRootBackAtRef.current = null;
+    }
+  }, [mobileView, showSettings]);
+
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    let cancelled = false;
+    void installCapacitorBackButton({
+      onBack: () => runSystemBack(),
+    }).then((c) => {
+      if (cancelled) {
+        c();
+        return;
+      }
+      cleanup = c;
+    });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  }, [runSystemBack]);
+
   const [secretFormName, setSecretFormName] = useState("api_token");
   const [secretFormValue, setSecretFormValue] = useState("");
   const [secretFormOrigin, setSecretFormOrigin] = useState("https://api.github.com");
@@ -3907,7 +4010,9 @@ export default function App() {
             type="button"
             className="topbar-back"
             aria-label="返回"
-            onClick={() => setMobileView("list")}
+            onClick={() => {
+              void runSystemBack();
+            }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
               <path d="M15 18l-6-6 6-6" />
@@ -4204,7 +4309,9 @@ export default function App() {
                   type="button"
                   className="settings-shell-back"
                   aria-label="返回"
-                  onClick={() => setSettingsShellHub(true)}
+                  onClick={() => {
+                    void runSystemBack();
+                  }}
                 >
                   ←
                 </button>
