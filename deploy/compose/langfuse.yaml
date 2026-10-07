@@ -7,7 +7,7 @@
 services:
   langfuse-worker:
     profiles: [langfuse]
-    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    image: docker.io/langfuse/langfuse-worker:4
     restart: unless-stopped
     depends_on: &langfuse-depends-on
       langfuse-postgres:
@@ -64,7 +64,7 @@ services:
 
   langfuse-web:
     profiles: [langfuse]
-    image: docker.langfuse.com/langfuse/langfuse:4
+    image: docker.io/langfuse/langfuse:4
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     ports:
