@@ -1509,6 +1509,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			payloadMap["client"] = body.Client
 		}
 		attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+		s.attachPreferredMachine(payloadMap, uid, agentID)
 		recallCtx := &recallPersistContext{
 			UserID:         uid,
 			AgentID:        agentID,

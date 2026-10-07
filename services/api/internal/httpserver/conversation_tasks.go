@@ -274,6 +274,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(task.UserID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(task.UserID))
+	s.attachPreferredMachine(payloadMap, task.UserID, task.AgentID)
 
 	emit := func(event string, data any) {
 		if event != "status" {

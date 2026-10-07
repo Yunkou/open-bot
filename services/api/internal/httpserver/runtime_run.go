@@ -101,6 +101,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(userID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(userID))
+	s.attachPreferredMachine(payloadMap, userID, agentID)
 	payload, _ := json.Marshal(payloadMap)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))

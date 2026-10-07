@@ -753,7 +753,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "and report compact lines. "
                 "Default limit is small; response may set truncated=true with total. "
                 "Optional limit (1–200), sort (mtime|size|name), glob (e.g. *.mp4, name only). "
-                "Pass machine_id from list_machines; omit it to use the usual work computer. "
+                "Pass machine_id from list_machines; omit it to use the current session computer. "
                 "Empty path or ~ lists the home directory."
             ),
             "parameters": {
@@ -786,7 +786,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "name": "host_read",
             "description": (
                 "Read a text file on a connected computer. Absolute paths and ~/... are allowed. "
-                "Pass machine_id when the user named a computer; otherwise omit it to use the usual work computer."
+                "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
             ),
             "parameters": {
                 "type": "object",
@@ -875,7 +875,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "description": (
                 "Open an application on a connected computer, such as 微信, Safari, or Visual Studio Code. "
                 "Pass the app name the user said. Runs immediately on that computer. "
-                "Pass machine_id when the user named a computer; otherwise omit it to use the usual work computer."
+                "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
             ),
             "parameters": {
                 "type": "object",

@@ -364,14 +364,14 @@ export function NewChatPopover({
                 ))}
               </div>
               <label className="new-chat-field">
-                运行主机（可选）
+                优先电脑（可选）
                 <select
                   className="bot-machine-select"
                   value={botMachineId}
                   onChange={(e) => setBotMachineId(e.target.value)}
                   disabled={busy}
                 >
-                  <option value="">未绑定</option>
+                  <option value="">不指定（在你发消息的那台电脑上运行）</option>
                   {machines.map((m) => (
                     <option key={m.id} value={m.id}>
                       {(m.label || m.id) +
@@ -386,8 +386,14 @@ export function NewChatPopover({
                 </select>
               </label>
               {machines.length === 0 ? (
-                <div className="muted small">暂无已注册电脑，请先在客户端连接主机</div>
-              ) : null}
+                <div className="muted small">
+                  还没有已连接的电脑。先创建也可以，连上电脑后再用本地能力。
+                </div>
+              ) : (
+                <div className="muted small">
+                  读文件、跑命令会在你当前发消息的电脑上执行。这里只是可选的默认优先机。
+                </div>
+              )}
             </div>
             {error ? <div className="new-chat-error">{error}</div> : null}
             <button

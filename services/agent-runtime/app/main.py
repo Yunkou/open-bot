@@ -94,6 +94,7 @@ class RunRequest(BaseModel):
     decision: DecisionSettings | None = None
     enabled_skills: list[str] | None = None
     client: dict[str, Any] | None = None
+    preferred_machine_id: str = ""
     max_tool_rounds: int | None = None
     # Slack/Grok-style thread (Go injects reply context into content/messages).
     reply_to_id: str | None = None
@@ -635,6 +636,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 request=request,
                 max_tool_rounds=clamp_tool_rounds(body.max_tool_rounds),
                 client=client_ctx,
+                preferred_machine_id=str(body.preferred_machine_id or ""),
                 mem_store=mem,
                 reply_to_id=body.reply_to_id,
                 thread_root_id=body.thread_root_id,
@@ -723,6 +725,7 @@ async def openai_path(
     request: Request | None = None,
     max_tool_rounds: int = 12,
     client: ClientContext | None = None,
+    preferred_machine_id: str = "",
     mem_store: MemoryStore | None = None,
     reply_to_id: str | None = None,
     thread_root_id: str | None = None,
@@ -984,6 +987,7 @@ async def openai_path(
                 rows,
                 explicit_id=str(args.get("machine_id") or ""),
                 current_id=(client.machine_id if client else ""),
+                preferred_id=str(preferred_machine_id or ""),
             )
             if not chosen.get("ok"):
                 return json.dumps(chosen, ensure_ascii=False)

@@ -161,7 +161,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
           </div>
 
           <label className="bot-avatar-label" htmlFor="bot-machine-select">
-            运行主机
+            优先电脑
           </label>
           <select
             id="bot-machine-select"
@@ -170,7 +170,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
             onChange={(e) => setMachineId(e.target.value)}
             disabled={busy}
           >
-            <option value="">未绑定</option>
+            <option value="">不指定（跟发消息的电脑）</option>
             {machines.map((m) => (
               <option key={m.id} value={m.id}>
                 {(m.label || m.id) + " · " + machineHint(m)}
@@ -178,9 +178,9 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
             ))}
           </select>
           {machinesLoaded && machines.length === 0 ? (
-            <div className="muted small">暂无已注册电脑，请先在客户端连接主机</div>
+            <div className="muted small">还没有已连接的电脑。先保存也可以，连上电脑后再用本地能力。</div>
           ) : (
-            <div className="muted small">绑定后，主机在线且心跳≤90s 时绿点才会亮（由后端 online 决定）</div>
+            <div className="muted small">本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。</div>
           )}
 
           {err ? <div className="auth-error">{err}</div> : null}

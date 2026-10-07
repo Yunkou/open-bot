@@ -115,8 +115,8 @@ def format_environment_block(
         lines.append(
             "本机文件只在已连接的电脑上读写；可用绝对路径或 ~/...。"
             "用户点名某台电脑时，用 list_machines 里对应且 connected 的 machine_id（以 label 识别）。"
-            "没点名时用最常用的工作设备；它没连接就说明要打开那台，不要改到当前手机。"
-            "还没有常用设备时才用当前 machine_id；浏览器且只有一台已连接电脑时用那一台。"
+            "没点名时：有当前会话 machine_id（发消息的那台）就用它；它没连接就说明要打开那台，不要改到别的电脑。"
+            "浏览器没有 machine_id 时：用可选的优先电脑，否则仅一台已连接时用那一台；多台且无优先则先问用户。"
             "对不上或有多台都像时先问用户。"
             "本机命令、文件查询、远程 SSH：先 load_skill（host-shell / host-file-query / host-ssh）再按说明执行。"
             "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小。"
@@ -219,7 +219,7 @@ def _usual_machine_lines(machines: list[dict[str, Any]] | None) -> list[str]:
         label = str(best.get("label") or "工作设备")
         mid = str(best.get("id") or "")
         state = "已连接" if (best.get("connected") or best.get("online")) else "未连接"
-        lines.append(f"最常用的工作设备：{label}（machine_id={mid}，{state}）。")
+        lines.append(f"历史上文件操作较多的电脑：{label}（machine_id={mid}，{state}；路由不优先它）。")
     return lines
 
 
@@ -240,13 +240,22 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
         )
     if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
-            "主机：先 list_machines 看 connected；点名用对应 machine_id，没点名用最常用工作设备。"
-            "本机命令、文件查询、远程 SSH 的用法不写在系统提示里——需要时 load_skill"
-            "（host-shell / host-file-query / host-ssh），读完再调用工具。"
+            "主机：先 list_machines 看 connected；点名用对应 machine_id；没点名用当前会话机，浏览器再走优先电脑/唯一在线。"
+            "本机命令、文件查询、远程 SSH 的用法不写在系统提示里——"
+            "目录有匹配技能时，动手前必须 load_skill"
+            "（host-shell / host-file-query / host-ssh），读完再调用工具；禁止跳过 load 直接调。"
             "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
         )
+    if "clone_agent" in names:
+        lines.append(
+            "复制助手：用户在单聊里明确要复制/克隆你，或「复制后把副本改成… / 让副本去做…」时调用 clone_agent；"
+            "改副本的要求一次放进参数，让副本做的事放 follow_up（副本自己执行，你不要代做）；"
+            "默认会复制本助手专属记忆（copy_memory 默认 true）；当新任务与过去工作相关或设置了 follow_up 时必定复制记忆，"
+            "以便副本承接旧上下文；例行任务只在用户要求时复制；完成后告诉用户新助手名称，它已出现在左侧助手列表。群聊里不要复制。"
+        )
     lines.append(
-        "Skills：需要做法时 load_skill，读完自己执行；load_skill 不会自动跑脚本。"
+        "Skills：目录有匹配技能时，动手（工具/本机命令）前必须 load_skill(name)，读完自己执行；"
+        "无匹配则不必 load；禁止每条回复无条件 load；load_skill 不会自动跑脚本。"
     )
     return "\n".join(lines)
 
@@ -280,6 +289,7 @@ TOOL_DISPLAY_ALIASES: dict[str, str] = {
     "send_to_agent": "发送给助手",
     "request_secret": "请求密钥",
     "secret_http": "带密钥请求",
+    "clone_agent": "复制助手",
 }
 
 

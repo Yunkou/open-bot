@@ -79,17 +79,27 @@ def select_machine(
     *,
     explicit_id: str = "",
     current_id: str = "",
+    preferred_id: str = "",
 ) -> dict[str, Any]:
-    """Pick the host for a file op.
+    """Pick the host for a local/file op.
 
-    Named machine_id wins. Otherwise the most-used work machine when it is
-    connected. With no history, fall back to the current device, then the only
-    connected computer.
+    Order (product 2026-10-07):
+      1. Tool-named machine_id (explicit)
+      2. Current session machine (client_env.machine_id) — if set, use it or
+         fail; never silently switch to another host mid-rules
+      3. Optional preferred (agents.machine_id / 「优先电脑」) when connected
+      4. Sole connected machine
+      5. Else ask / refuse (no「最常用工作设备」override)
     """
     rows = [m for m in machines if isinstance(m, dict) and str(m.get("id") or "").strip()]
     by_id = {str(m["id"]): m for m in rows}
     explicit = (explicit_id or "").strip()
     current = (current_id or "").strip()
+    preferred = (preferred_id or "").strip()
+
+    offline_current = "当前电脑未连接，本地文件和命令暂时不可用。请在客户端连上后再试。"
+    browser_need_host = "本地能力需要在已连接的桌面客户端里操作。请换到已连接的电脑再试。"
+
     if explicit:
         chosen = by_id.get(explicit)
         if chosen is None:
@@ -98,37 +108,46 @@ def select_machine(
             label = str(chosen.get("label") or "那台电脑")
             return {
                 "ok": False,
-                "error": f"「{label}」的应用没开着，请先在那台电脑上打开",
+                "error": f"「{label}」未连接，本地文件和命令暂时不可用。请在客户端连上后再试。",
                 "machine_id": explicit,
                 "label": label,
                 "machines": rows,
             }
         return {"ok": True, "machine": chosen}
 
-    usual = usual_work_machine(rows)
-    if usual is not None:
-        label = str(usual.get("label") or "最常用的工作设备")
-        if not _connected(usual):
-            return {
+    # Session host pinned for this message/run: present ⇒ use or fail (no fallback).
+    if current:
+        chosen = by_id.get(current)
+        if chosen is None or not _connected(chosen):
+            label = ""
+            if chosen is not None:
+                label = str(chosen.get("label") or "")
+            out: dict[str, Any] = {
                 "ok": False,
-                "error": f"最常用的工作设备「{label}」没开着，请先打开它，不要改到当前这台手机",
-                "machine_id": str(usual.get("id") or ""),
-                "label": label,
+                "error": offline_current,
+                "machine_id": current,
                 "machines": rows,
             }
-        return {"ok": True, "machine": usual}
+            if label:
+                out["label"] = label
+            return out
+        return {"ok": True, "machine": chosen}
+
+    # Browser / no session machine: preferred → sole → prompt.
+    if preferred:
+        chosen = by_id.get(preferred)
+        if chosen is not None and _connected(chosen):
+            return {"ok": True, "machine": chosen}
 
     connected = [m for m in rows if _connected(m)]
-    if current and current in by_id and _connected(by_id[current]):
-        return {"ok": True, "machine": by_id[current]}
     if len(connected) == 1:
         return {"ok": True, "machine": connected[0]}
     if not connected:
-        return {"ok": False, "error": "没有已打开的电脑应用，无法访问本机文件", "machines": rows}
+        return {"ok": False, "error": browser_need_host, "machines": rows}
     labels = "、".join(str(m.get("label") or m.get("id")) for m in connected)
     return {
         "ok": False,
-        "error": f"有多台电脑开着（{labels}），请说明要操作哪一台",
+        "error": f"有多台电脑已连接（{labels}），请说明要操作哪一台，或在设置里选一台优先电脑。",
         "machines": rows,
     }
 
