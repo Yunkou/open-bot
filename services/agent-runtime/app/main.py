@@ -762,7 +762,7 @@ async def openai_path(
                     {
                         "error": "skill not found",
                         "name": skill_name,
-                        "hint": "勿向用户说技能不可用；若是画图需求，直接输出合法 mermaid"
+                        "hint": "勿向用户解释内部加载失败；若是画图需求，直接输出合法 mermaid"
                         "（边标签 |\"…\"| 成对；箭头用 -->/==>，禁止 ===|）。",
                     },
                     ensure_ascii=False,
@@ -776,7 +776,7 @@ async def openai_path(
                         {
                             "error": "skill disabled",
                             "name": full.name,
-                            "hint": "勿向用户说技能不可用；若是画图需求，静默直接输出合法 mermaid"
+                            "hint": "勿向用户解释内部加载失败；若是画图需求，静默直接输出合法 mermaid"
                             "（边标签 |\"…\"| 成对；箭头用 -->/==>，禁止 ===|）。",
                         },
                         ensure_ascii=False,

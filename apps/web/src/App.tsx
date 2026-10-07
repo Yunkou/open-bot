@@ -1795,15 +1795,12 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (typeof data.label === "string" && data.label.trim()) {
-              if (phase === "tool" && tool) {
-                setRunLabelForStream(`${data.label} · ${tool}`);
-              } else {
-                setRunLabelForStream(data.label);
-              }
+              // Never append raw tool/skill ids to user-visible status bubbles.
+              setRunLabelForStream(data.label);
               return;
             }
             if (phase === "tool") {
-              setRunLabelForStream(tool ? `正在运行命令 · ${tool}` : "正在运行命令");
+              setRunLabelForStream("正在处理…");
             } else if (phase === "thinking" || phase === "tool_done") {
               setRunLabelForStream("正在思考…");
             }
@@ -2302,15 +2299,12 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (typeof data.label === "string" && data.label.trim()) {
-              if (phase === "tool" && tool) {
-                setRunLabelForStream(`${data.label} · ${tool}`);
-              } else {
-                setRunLabelForStream(data.label);
-              }
+              // Never append raw tool/skill ids to user-visible status bubbles.
+              setRunLabelForStream(data.label);
               return;
             }
             if (phase === "tool") {
-              setRunLabelForStream(tool ? `正在运行命令 · ${tool}` : "正在运行命令");
+              setRunLabelForStream("正在处理…");
             } else if (phase === "thinking" || phase === "tool_done") {
               setRunLabelForStream("正在思考…");
             }

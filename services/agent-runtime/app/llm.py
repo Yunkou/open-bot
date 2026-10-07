@@ -481,6 +481,15 @@ SYSTEM_PERSONA_BASE = (
     "给用户的回复用中文，短，只讲结果；不要提 sandbox/Docker/容器或内部路径，不要假装调用工具。"
 )
 
+# Never leak internal mechanism words into user-visible reply text.
+USER_FACING_INTERNAL_HIDE = (
+    "对用户可见的正文、过程说明、错误提示里："
+    "禁止出现 skill、skills、tool、tools、load_skill、function call、mcp__、"
+    "「技能」「工具」「加载技能」「调用工具」「技能不可用」「未启用技能」等字样；"
+    "需要做事时用自然语言，例如「我画一张图」「我查一下」「我打开这个文件」。"
+    "内部仍可通过函数调用与技能目录完成工作，只是不要写进给用户看的文字。"
+)
+
 # When tools are off, models often roleplay fake tool calls in plain text — block that.
 TOOLS_DISABLED_RULE = (
     "当前会话未启用函数调用；禁止假装调用工具、禁止写「请稍等 / 正在调用 xxx / mcp__…」；"
@@ -491,12 +500,13 @@ TOOLS_DISABLED_RULE = (
 # Diagram asks: load on-demand skill「画图」; keep prompt thin.
 DIAGRAM_SKILL_TRIGGER = (
     "当用户要求画图、流程图、架构图、时序图、关系图、人物关系图、状态图、组织图、对比表或同类示意图时："
-    "若工具可用且目录含「画图」，先 load_skill「画图」再按其规则输出；"
-    "若工具不可用、load 失败或技能未启用：静默按规则直接输出，禁止对用户说「技能不可用」；"
+    "若可用函数调用且目录含「画图」，先内部加载「画图」全文再按其规则输出；"
+    "若无法加载：静默按已知规则直接画，不要向用户解释加载失败；"
     "结构类图默认 ```mermaid ；用户点名 HTML/对比表/卡片墙时用 ```html （禁脚本、内联 CSS、无外联）；"
-    "本轮无生图工具，禁止假装出图片 URL；"
+    "本轮不能生成位图，禁止假装出图片 URL；"
     "边标签 |\"...\"| 引号必须成对；箭头只用 --> / ==> / -.-> ，禁止 === 与 ===| ；"
-    "禁止用空格/符号/emoji 拼字符画或伪表格代替图。"
+    "禁止用空格/符号/emoji 拼字符画或伪表格代替图；"
+    "对用户只说「我画一张图」之类，不要提内部加载过程。"
 )
 
 TOOL_DEFS: list[dict[str, Any]] = [
@@ -1053,6 +1063,7 @@ def build_system_prompt(
 ) -> str:
     parts = [
         SYSTEM_PERSONA_BASE,
+        USER_FACING_INTERNAL_HIDE,
         DIAGRAM_SKILL_TRIGGER,
         f"当前 agent_id: {agent_id or 'open-bot'}。",
         format_environment_block(client, machines),
@@ -1336,7 +1347,7 @@ async def run_tool_loop(
     chat completions in this loop, or None if the gateway omitted usage.
 
     Optional on_status receives dicts like
-    {"phase":"tool","label":"正在运行命令","tool":"<name>"} while tools run.
+    {"phase":"tool","label":"正在运行命令"} while tools run (no raw tool id).
     """
     from .langfuse_trace import merge_usage_details, parse_usage_details
 
@@ -1522,7 +1533,6 @@ async def run_tool_loop(
                         {
                             "phase": "tool",
                             "label": tool_display_label(name),
-                            "tool": name,
                         }
                     )
                 await _checkpoint()
@@ -1542,7 +1552,6 @@ async def run_tool_loop(
                         {
                             "phase": "tool_done",
                             "label": "正在思考…",
-                            "tool": name,
                         }
                     )
                 msgs.append(

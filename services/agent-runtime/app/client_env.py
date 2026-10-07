@@ -283,7 +283,7 @@ TOOL_DISPLAY_ALIASES: dict[str, str] = {
     "get_current_time": "获取当前时间",
     "calculator": "计算",
     "http_fetch": "获取网页",
-    "load_skill": "加载技能",
+    "load_skill": "正在准备…",
     "memory_write": "写入记忆",
     "memory_recall": "回忆",
     "send_to_agent": "发送给助手",
@@ -294,11 +294,14 @@ TOOL_DISPLAY_ALIASES: dict[str, str] = {
 
 
 def tool_display_label(name: str) -> str:
+    """Status bubble text for users — never expose raw tool/skill ids."""
     n = (name or "").strip()
     if not n:
-        return "正在运行命令"
+        return "正在处理…"
     if n in TOOL_DISPLAY_ALIASES:
         return TOOL_DISPLAY_ALIASES[n]
     if n.startswith("mcp__"):
-        return f"调用 MCP · {n.removeprefix('mcp__')}"
-    return f"正在运行 · {n}"
+        return "正在处理…"
+    if "skill" in n.lower():
+        return "正在准备…"
+    return "正在处理…"
