@@ -106,9 +106,13 @@ def test_system_prompt_routing() -> None:
     _ok("必须 host_ls" not in prompt, "no longer forces host_ls for largest/newest")
     _ok("load_skill" in prompt, "always-on prompt points at load_skill")
     _ok("host-file-query" in prompt or "host-shell" in prompt, "routing names host skills to load")
+    _ok("必须" in prompt and "动手前必须" in prompt, "Hermes-style: must load_skill before acting on match")
+    _ok("需要时 load_skill" not in prompt and "需要做法时" not in prompt, "soft optional load_skill phrasing removed")
+    _ok("无匹配" in prompt or "不必" in prompt, "still not load before every reply regardless of match")
     _ok("find/du" not in prompt.lower() and "host_ls 只用于" not in prompt, "no find/du or host_ls how-to recipe")
     _ok("paths 一次" not in prompt and "硬危险命令" not in prompt, "no delete-paths / auto-review how-to")
     _ok("load_skill 不会自动执行" not in prompt and "脚本要你再用" not in prompt, "no host-file-query script recipe in prompt")
+    _ok("skill_view" not in prompt, "keeps open-bot tool name load_skill not skill_view")
 
 
 

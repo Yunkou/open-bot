@@ -24,7 +24,7 @@ HOST_LIST_TOOLS = frozenset({
 # Fed back into the same run. Not shown to the user and not matched against
 # the model's previous sentence.
 CONTINUE_WORK = (
-    "这一轮还没做完。请直接调用工具把文件改完，"
+    "这一轮还没做完。请直接调用工具把文件改完，不要只说下一步计划；"
     "完成后在回复里给出可打开的文件链接。"
     "如果确实不需要改文件，就用一句话回答，不要再说稍后。"
 )
@@ -38,7 +38,8 @@ CONTINUE_HOST_DELETE = (
 CONTINUE_HOST_LIST = (
     "用户在问本机目录/文件（如最大、最新、排行），但本轮还没有调用 "
     "list_machines / host_shell / load_skill / host_ls（或对应 host_ssh_ls）。"
-    "请先 load_skill（如 host-file-query）再按技能说明查询；禁止根据摘要或记忆编造文件名和大小。"
+    "请先 load_skill（如 host-file-query）再按技能说明查询；"
+    "结果为空时先改查询再下结论；禁止根据摘要或记忆编造文件名和大小。"
 )
 
 _CONTINUE_MARKERS = frozenset({CONTINUE_WORK, CONTINUE_HOST_DELETE, CONTINUE_HOST_LIST})

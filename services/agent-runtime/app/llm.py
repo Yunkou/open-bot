@@ -12,7 +12,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from .builtin_tools import BUILTIN_TOOL_DEFS
-from .openbot_api import ROUTINE_TOOL_DEFS
+from .openbot_api import AGENT_TOOL_DEFS, ROUTINE_TOOL_DEFS
 from .deferral import CONTINUE_WORK, host_followup_prompt, last_real_user_text, turn_unfinished
 from .client_env import (
     ClientContext,
@@ -1031,7 +1031,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
     },
 ]
 # Append built-in utility tools (time / calculator / http_fetch).
-TOOL_DEFS = list(TOOL_DEFS) + list(BUILTIN_TOOL_DEFS) + list(ROUTINE_TOOL_DEFS)
+TOOL_DEFS = list(TOOL_DEFS) + list(BUILTIN_TOOL_DEFS) + list(ROUTINE_TOOL_DEFS) + list(AGENT_TOOL_DEFS)
 
 
 def openai_config(override: LLMOverride | None = None) -> tuple[str, str, str]:
