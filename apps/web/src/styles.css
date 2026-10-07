@@ -3790,7 +3790,7 @@ html.touch-ui .composer-quote-bar {
   position: relative;
   background: #fff;
   border-radius: 16px 16px 0 0;
-  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px));
   box-shadow: 0 -8px 32px rgba(0,0,0,0.18);
   max-height: min(78vh, 560px);
   overflow: auto;
@@ -4885,7 +4885,7 @@ html.touch-ui .diagram-menu-item {
 
 .sidebar-shell-head {
   flex-shrink: 0;
-  padding: 8px 12px 4px;
+  padding: max(12px, env(safe-area-inset-top, 0px)) 12px 4px;
 }
 
 .sidebar-shell-topbar {
@@ -5065,7 +5065,7 @@ html.touch-ui .diagram-menu-item {
 }
 
 .shell-narrow .sidebar-foot {
-  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px));
 }
 
 /* C-1 create action sheet row leading icon */
@@ -5085,7 +5085,7 @@ html.touch-ui .diagram-menu-item {
 
 /* C-4 bottom confirm dual buttons */
 .confirm-action-sheet {
-  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
 }
 
 .confirm-sheet-title {
@@ -5182,7 +5182,7 @@ html.touch-ui .diagram-menu-item {
 
 .settings-dialog-shell .settings-main-body {
   background: transparent;
-  padding: 8px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 16px max(16px, env(safe-area-inset-bottom, 0px));
 }
 
 .settings-dialog-shell .settings-card {
@@ -5220,7 +5220,7 @@ html.touch-ui .diagram-menu-item {
   grid-template-columns: 44px 1fr 44px;
   align-items: center;
   gap: 4px;
-  padding: 8px 8px 4px;
+  padding: max(12px, env(safe-area-inset-top, 0px)) 8px 4px;
   background: #f2f2f7;
 }
 
@@ -5267,8 +5267,9 @@ html.touch-ui .diagram-menu-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px 6px;
+  padding: max(12px, env(safe-area-inset-top, 0px)) 12px 8px;
   min-height: 52px;
+  box-sizing: content-box;
 }
 
 .settings-hub-title {
@@ -5280,8 +5281,10 @@ html.touch-ui .diagram-menu-item {
 }
 
 .settings-hub-close {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
   border: none;
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.06);
@@ -5289,6 +5292,7 @@ html.touch-ui .diagram-menu-item {
   place-items: center;
   cursor: pointer;
   color: var(--text);
+  flex-shrink: 0;
 }
 
 .settings-hub-scroll {
@@ -5296,7 +5300,7 @@ html.touch-ui .diagram-menu-item {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 8px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 16px 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -5321,17 +5325,20 @@ html.touch-ui .diagram-menu-item {
 
 .settings-hub-row {
   width: 100%;
-  min-height: 54px;
+  min-height: 56px;
+  height: auto;
   border: none;
   background: transparent;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 14px;
+  padding: 12px 14px;
   text-align: left;
   cursor: pointer;
   color: var(--text);
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  overflow: visible;
+  box-sizing: border-box;
 }
 
 [data-theme="dark"] .settings-hub-row {
@@ -5351,16 +5358,20 @@ html.touch-ui .diagram-menu-item {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  justify-content: center;
+  gap: 3px;
+  overflow: visible;
 }
 
 .settings-hub-row-title {
   font-size: 16px;
   font-weight: 550;
+  line-height: 1.35;
 }
 
 .settings-hub-row-sub {
-  font-size: 12px;
+  font-size: 13px;
+  line-height: 1.35;
   color: #6b7280;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5413,6 +5424,60 @@ html.touch-ui .diagram-menu-item {
 }
 [data-theme="dark"] .settings-hub-row.settings-hub-row-logout {
   color: #f87171;
+}
+
+/* ---- Mobile safe-area hotfixes (§7 · status bar / home indicator) ---- */
+
+/* Top: max(12px, env(safe-area-inset-top)) — chat topbar (hub/list/subhead set above) */
+.shell-narrow .topbar {
+  padding-top: max(12px, env(safe-area-inset-top, 0px));
+}
+
+.shell-narrow .topbar-back {
+  /* whole control ≥44 and sits in padded topbar below status bar */
+  min-width: 44px;
+  min-height: 44px;
+  padding: 10px 8px;
+  box-sizing: border-box;
+}
+
+/* Settings drill-down close hit ≥44 (grid cell already 44) */
+.settings-dialog-shell .settings-shell-subhead .settings-close {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+  border: none;
+  background: transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  color: var(--text);
+  padding: 0;
+}
+
+/* Bottom: max(8px, env(safe-area-inset-bottom)) — + sheet / delete confirm */
+.create-action-sheet.action-sheet,
+.action-sheet.create-action-sheet,
+.confirm-action-sheet.action-sheet,
+.confirm-action-sheet {
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+}
+
+/* Logout: §7 — last hub card clears home indicator (scroll pad + card margin) */
+.settings-hub-scroll > .settings-hub-card:last-child {
+  margin-bottom: max(8px, env(safe-area-inset-bottom, 0px));
+}
+
+/* Composer / sticky bottom CTAs on shell */
+.shell-narrow .composer-wrap {
+  padding-bottom: max(20px, env(safe-area-inset-bottom, 0px));
+}
+
+.shell-narrow .feedback-actions,
+.touch-ui .feedback-actions {
+  padding-bottom: max(8px, env(safe-area-inset-bottom, 0px));
 }
 
 /* Optional A: quote × ≥44 under touch-ui (wide coarse tablets too) */
