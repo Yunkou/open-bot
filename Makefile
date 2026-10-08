@@ -11,6 +11,15 @@ AGENT_RUNTIME_URL ?= http://127.0.0.1:8001
 API_PORT ?= 18080
 RUNTIME_PORT ?= 8001
 
+# Cross-platform venv activate script
+ifeq ($(OS),Windows_NT)
+  VENV_ACTIVATE := .venv/Scripts/activate
+  AIR_CONFIG := .air.windows.toml
+else
+  VENV_ACTIVATE := .venv/bin/activate
+  AIR_CONFIG := .air.toml
+endif
+
 
 # Single compose entry: deploy/compose.yaml (profiles: casdoor, langfuse)
 COMPOSE ?= docker compose -f deploy/compose.yaml --project-directory deploy
@@ -57,14 +66,14 @@ dev-api:
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) go run ./cmd/api
 
-# Live-reload API (no global air install). Config: services/api/.air.toml.
+# Live-reload API (no global air install). Config: services/api/.air.toml or .air.windows.toml.
 AIR_VERSION ?= v1.67.4
 
 dev-api-air:
 	cd services/api && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) \
-	  go run github.com/air-verse/air@$(AIR_VERSION) -c .air.toml
+	  go run github.com/air-verse/air@$(AIR_VERSION) -c $(AIR_CONFIG)
 
 # Routines worker (optional). Set ROUTINES_INPROCESS=0 on API to avoid double-fire.
 dev-worker:
@@ -75,7 +84,7 @@ dev-worker:
 dev-runtime:
 	cd services/agent-runtime && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  . .venv/bin/activate && \
+	  . $(VENV_ACTIVATE) && \
 	  uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 
 # API (air hot reload, dev-api-air) + agent-runtime (uvicorn --reload) in one terminal.
@@ -231,7 +240,7 @@ e2e-admin:
 backfill-embeddings:
 	cd services/agent-runtime && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  . .venv/bin/activate && \
+	  . $(VENV_ACTIVATE) && \
 	  python -m app.backfill_embeddings $(BACKFILL_ARGS)
 
 # Ops escape hatch: force one-shot local Dream (normal chat auto-runs when enabled).
@@ -239,5 +248,5 @@ backfill-embeddings:
 dream-user:
 	cd services/agent-runtime && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  . .venv/bin/activate && \
+	  . $(VENV_ACTIVATE) && \
 	  MEM0_DREAM_ENABLED=1 python -m app.dream --user-id "$(USER_ID)"
