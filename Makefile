@@ -52,10 +52,14 @@ compose-casdoor-down:
 	env -u DATABASE_URL $(COMPOSE) --profile casdoor stop casdoor casdoor-postgres
 	-$(COMPOSE) rm -f casdoor casdoor-postgres
 
+# Go and Python paths (Windows compatibility)
+GO ?= $(shell which go 2>/dev/null || echo "D:/go/bin/go")
+PYTHON ?= $(shell which python3 2>/dev/null || which python 2>/dev/null || echo "C:/Users/Administrator/AppData/Local/Programs/Python/Python312/python")
+
 dev-api:
 	cd services/api && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) go run ./cmd/api
+	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) $(GO) run ./cmd/api
 
 # Live-reload API (no global air install). Config: services/api/.air.toml.
 AIR_VERSION ?= v1.67.4
@@ -64,18 +68,18 @@ dev-api-air:
 	cd services/api && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) API_ADDR=$(API_ADDR) AGENT_RUNTIME_URL=$(AGENT_RUNTIME_URL) \
-	  go run github.com/air-verse/air@$(AIR_VERSION) -c .air.toml
+	  $(GO) run github.com/air-verse/air@$(AIR_VERSION) -c .air.toml
 
 # Routines worker (optional). Set ROUTINES_INPROCESS=0 on API to avoid double-fire.
 dev-worker:
 	cd services/api && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) go run ./cmd/worker
+	  OPEN_BOT_ROOT=$$(cd ../.. && pwd) $(GO) run ./cmd/worker
 
 dev-runtime:
 	cd services/agent-runtime && \
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
-	  . .venv/bin/activate && \
+	  if [ -f .venv/bin/activate ]; then . .venv/bin/activate; elif [ -f .venv/Scripts/activate ]; then . .venv/Scripts/activate; fi && \
 	  uvicorn app.main:app --reload --host 127.0.0.1 --port 8001
 
 # API (air hot reload, dev-api-air) + agent-runtime (uvicorn --reload) in one terminal.
