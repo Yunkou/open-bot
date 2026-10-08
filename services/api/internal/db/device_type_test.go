@@ -45,12 +45,18 @@ func TestInferDeviceType(t *testing.T) {
 }
 
 func TestResolveDeviceType(t *testing.T) {
-	// Explicit wins over platform hint.
-	if got := ResolveDeviceType("desktop", "android", "", ""); got != DeviceTypeDesktop {
-		t.Fatalf("explicit desktop on android platform: %q", got)
+	// Phone signals win over a buggy explicit "desktop" (rule A: login-only).
+	if got := ResolveDeviceType("desktop", "android", "android", "capacitor"); got != DeviceTypeMobile {
+		t.Fatalf("android+capacitor must be mobile, got %q", got)
+	}
+	if got := ResolveDeviceType("desktop", "ios", "", ""); got != DeviceTypeMobile {
+		t.Fatalf("ios must be mobile even if explicit desktop: %q", got)
 	}
 	if got := ResolveDeviceType("mobile", "macos", "", ""); got != DeviceTypeMobile {
 		t.Fatalf("explicit mobile on macos: %q", got)
+	}
+	if got := ResolveDeviceType("desktop", "macos", "darwin", "tauri"); got != DeviceTypeDesktop {
+		t.Fatalf("explicit desktop on macos: %q", got)
 	}
 	if got := ResolveDeviceType("", "android", "", "app"); got != DeviceTypeMobile {
 		t.Fatalf("infer android: %q", got)

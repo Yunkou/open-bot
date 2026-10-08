@@ -268,6 +268,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		"messages":        historyForRuntime(msgs),
 		"enabled_skills":  enabledSkills,
 		"max_tool_rounds": 16,
+		"request_id":      task.ID,
 	}
 	if llmPayload != nil {
 		payloadMap["llm"] = llmPayload

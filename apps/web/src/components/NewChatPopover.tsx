@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Agent, Machine } from "../api";
 import { listMachines } from "../api";
-import { preferHostMachines } from "../lib/clientEnv";
+import { machinePresenceLabel, preferHostMachines } from "../lib/clientEnv";
 import { AgentAvatar } from "./AgentAvatar";
 import {
   AVATAR_COLOR_PALETTE,
@@ -430,13 +430,7 @@ export function NewChatPopover({
                     <option value="">不指定（在你发消息的那台电脑上运行）</option>
                     {machines.map((m) => (
                       <option key={m.id} value={m.id}>
-                        {(m.label || m.id) +
-                          " · " +
-                          (m.connected === true
-                            ? "已连接"
-                            : typeof m.status === "string" && m.status.trim()
-                              ? m.status
-                              : "未连接")}
+                        {(m.label || m.id) + " · " + machinePresenceLabel(m)}
                       </option>
                     ))}
                   </select>

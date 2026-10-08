@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tangxin/open-bot/services/api/internal/auth"
 	"github.com/tangxin/open-bot/services/api/internal/db"
 	"github.com/tangxin/open-bot/services/api/internal/sandbox"
@@ -191,6 +192,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /v1/conversations/{id}/host-confirms/{msgId}", s.requireAuth(s.handleDecideHostConfirm))
 	mux.HandleFunc("POST /v1/conversations/{id}/messages", s.requireAuth(s.handleSendMessage))
 	mux.HandleFunc("POST /v1/conversations/{id}/cancel", s.requireAuth(s.handleCancelConversationRun))
+	mux.HandleFunc("POST /v1/conversations/{id}/steer", s.requireAuth(s.handleConversationSteer))
+	mux.HandleFunc("POST /v1/conversations/{id}/approve", s.requireAuth(s.handleConversationApprove))
 	mux.HandleFunc("GET /v1/conversations/{id}/events", s.requireAuth(s.handleConversationEvents))
 	mux.HandleFunc("GET /v1/conversations/{id}/run", s.requireAuth(s.handleConversationRunStatus))
 	mux.HandleFunc("POST /v1/conversations/{id}/attachments", s.requireAuth(s.handleUploadAttachment))
@@ -1246,6 +1249,17 @@ func (s *Server) handleCancelConversationRun(w http.ResponseWriter, r *http.Requ
 	}
 	_ = s.runs.cancel(id)
 	_, _ = s.cancelTasksAndNotify(uid, conv, nil)
+	// Best-effort durable abort when client supplies request_id (LangGraph thread).
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if rid := strings.TrimSpace(body.RequestID); rid != "" && runtimeDurableEnabled() {
+		_, _, _ = s.postRuntimeJSON(r.Context(), "/v1/runs/abort", map[string]any{
+			"conversation_id": id,
+			"request_id":      rid,
+		})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1506,6 +1520,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if enabledSkills == nil {
 			enabledSkills = []string{}
 		}
+		requestID := uuid.NewString()
 		payloadMap := map[string]any{
 			"conversation_id": id,
 			"content":         runtimeContent,
@@ -1515,6 +1530,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"system_prompt":   systemPrompt,
 			"messages":        history,
 			"enabled_skills":  enabledSkills,
+			"request_id":      requestID,
 		}
 		if replyToID != "" {
 			payloadMap["reply_to_id"] = replyToID

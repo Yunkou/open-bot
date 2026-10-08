@@ -227,12 +227,23 @@ export function getOrCreateMachineKey(): string {
 }
 
 /**
+ * Reject unusable native ids (esp. Xiaomi/emulator ANDROID_ID all zeros).
+ * Writing these into machine_key creates colliding or orphan rows on re-register.
+ */
+export function isUsableMachineKey(id: string | null | undefined): boolean {
+  const s = (id || "").trim();
+  if (s.length < 8) return false;
+  if (/^0+$/i.test(s)) return false;
+  return true;
+}
+
+/**
  * Stable machine_key priority:
- * 1. Capacitor: Device.getId().identifier (ANDROID_ID / identifierForVendor)
+ * 1. Capacitor: Device.getId().identifier (ANDROID_ID / identifierForVendor) when usable
  * 2. Tauri: invoke("host_machine_id") when desktop ships it (IOPlatformUUID / MachineGuid /etc/machine-id)
  * 3. Fallback: localStorage UUID (openbot_machine_key)
- * Migration: native id wins when available and is written back to localStorage so upsert merges;
- * if native unavailable, keep prior localStorage key.
+ * Migration: usable native id wins and is written back to localStorage so upsert merges;
+ * if native unavailable/invalid, keep a prior *usable* localStorage key (never keep all-zeros).
  *
  * Desktop Tauri exposes host_machine_id (IOPlatformUUID / MachineGuid / machine-id).
  * If invoke fails (old build), falls back to localStorage UUID.
@@ -244,19 +255,19 @@ export async function resolveMachineKey(
 
   if (client.app === "capacitor") {
     const nativeId = await tryCapacitorDeviceIdentifier();
-    if (nativeId) {
+    if (nativeId && isUsableMachineKey(nativeId)) {
       writeStoredMachineKey(nativeId);
       return nativeId;
     }
   } else if (client.app === "tauri") {
     const nativeId = await tryTauriMachineId();
-    if (nativeId) {
+    if (nativeId && isUsableMachineKey(nativeId)) {
       writeStoredMachineKey(nativeId);
       return nativeId;
     }
   }
 
-  if (existing) return existing;
+  if (existing && isUsableMachineKey(existing)) return existing;
   const key = newLocalMachineKey();
   writeStoredMachineKey(key);
   return key;
@@ -327,6 +338,22 @@ export function isLoginOnlyMachine(m: {
   if (plat === "ios" || plat === "android") return true;
   if ((m.app || "").toLowerCase() === "capacitor") return true;
   return false;
+}
+
+/** Presence from register/heartbeat (API ApplyOnlineStatus, ~90s). Not host-exec socket. */
+export function machineIsOnline(m: { status?: string | null }): boolean {
+  return (m.status || "").toLowerCase() === "online";
+}
+
+/** Short presence label for selects / hints (all clients). */
+export function machinePresenceLabel(m: {
+  status?: string | null;
+  connected?: boolean | null;
+}): string {
+  if (machineIsOnline(m)) {
+    return m.connected === true ? "在线 · 可操作" : "在线";
+  }
+  return m.connected === true ? "可操作" : "离线";
 }
 
 /** Prefer-computer / 优先电脑 dropdown: desktop hosts only. */

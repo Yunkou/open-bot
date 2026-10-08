@@ -35,12 +35,19 @@ func InferDeviceType(platform, osName, app string) string {
 	return DeviceTypeDesktop
 }
 
-// ResolveDeviceType prefers an explicit client device_type; otherwise infers.
+// ResolveDeviceType maps register input to desktop|mobile.
+// If platform/os/app clearly look like a phone (android/ios/capacitor), always
+// return mobile — even if a buggy client sends device_type=desktop. Phones are
+// login-only and must never become prefer-host targets.
 func ResolveDeviceType(explicit, platform, osName, app string) string {
+	inferred := InferDeviceType(platform, osName, app)
+	if inferred == DeviceTypeMobile {
+		return DeviceTypeMobile
+	}
 	if strings.TrimSpace(explicit) != "" {
 		return NormalizeDeviceType(explicit)
 	}
-	return InferDeviceType(platform, osName, app)
+	return inferred
 }
 
 // IsHostEligible is true only for desktop machines (host exec / green-dot / preferred).

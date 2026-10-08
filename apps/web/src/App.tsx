@@ -114,6 +114,7 @@ import {
   resolveMachineKey,
   resolveClientDeviceType,
   isLoginOnlyMachine,
+  machineIsOnline,
   getStoredMachineId,
   setStoredMachineId,
   clearStoredMachineId,
@@ -188,9 +189,9 @@ const SETTINGS_TITLE: Record<SettingsTab, string> = {
   general: "通用",
   bot: "当前 Bot",
   llm: "模型",
-  skills: "Skills",
+  skills: "扩展能力包",
   mcp: "插件 / MCP",
-  compact: "压缩",
+  compact: "数据与压缩",
   routines: "例行任务",
   sandbox: "运行环境",
   machines: "电脑",
@@ -474,6 +475,8 @@ export default function App() {
   const [mobileView, setMobileView] = useState<"list" | "chat">("list");
   /** Mobile settings hub (C-2); true = Grok-style grouped home. */
   const [settingsShellHub, setSettingsShellHub] = useState(true);
+  /** Mobile: `general` tab splits into account-only vs review/timezone-only. */
+  const [settingsGeneralPane, setSettingsGeneralPane] = useState<"account" | "review">("account");
   /** #6 shell list fold — default both expanded; persisted per user. */
   const [assistantsCollapsed, setAssistantsCollapsed] = useState(false);
   const [groupsCollapsed, setGroupsCollapsed] = useState(false);
@@ -3259,6 +3262,7 @@ export default function App() {
     setShowSettings(true);
     // touch / layout-narrow: AccountMenu "设置" → hub; deep links (更改模型) skip hub.
     setSettingsShellHub(Boolean(sheetForm && tab === "general"));
+    if (tab === "general") setSettingsGeneralPane("account");
     setSettingsTab(tab);
     setLLMMsg("");
     setSkillsMsg("");
@@ -4303,7 +4307,6 @@ export default function App() {
                 username={user?.username || "账户"}
                 email={user?.email}
                 accountInitials={accountInitials(user?.username || "")}
-                focusBot={activeAgent || agents[0] || null}
                 preferredMachineLabel={(() => {
                   const focus = activeAgent || agents[0];
                   const mid = focus?.machine_id;
@@ -4312,44 +4315,40 @@ export default function App() {
                   return m?.label || mid;
                 })()}
                 onClose={() => setShowSettings(false)}
-                onOpenBotAvatar={() => {
-                  const focus = activeAgent || agents[0];
-                  if (focus) {
-                    setShowSettings(false);
-                    openAvatarSettings(focus);
-                  } else {
-                    setSettingsShellHub(false);
-                    setSettingsTab("bot");
-                  }
-                }}
                 onLogout={() => {
                   setShowSettings(false);
                   onLogout();
                 }}
                 onNavigate={(tab: SettingsHubNav) => {
-                  const mapped: SettingsTab =
-                    tab === "account" ? "general" : (tab as SettingsTab);
-                  setSettingsTab(mapped);
+                  if (tab === "account") {
+                    setSettingsGeneralPane("account");
+                    setSettingsTab("general");
+                  } else if (tab === "general") {
+                    setSettingsGeneralPane("review");
+                    setSettingsTab("general");
+                  } else {
+                    setSettingsTab(tab);
+                  }
                   setSettingsShellHub(false);
-                  if (mapped === "mcp") {
+                  if (tab === "mcp") {
                     void refreshMCP().catch((err) =>
                       setMcpMsg(err instanceof Error ? err.message : String(err)),
                     );
-                  } else if (mapped === "compact") {
+                  } else if (tab === "compact") {
                     void refreshCompact();
-                  } else if (mapped === "routines") {
+                  } else if (tab === "routines") {
                     void refreshRoutines().catch((err) =>
                       setRoutinesMsg(err instanceof Error ? err.message : String(err)),
                     );
-                  } else if (mapped === "sandbox") {
+                  } else if (tab === "sandbox") {
                     void refreshSandbox().catch((err) =>
                       setSandboxMsg(err instanceof Error ? err.message : String(err)),
                     );
-                  } else if (mapped === "machines") {
+                  } else if (tab === "machines") {
                     void refreshMachines().catch((err) =>
                       setMachinesMsg(err instanceof Error ? err.message : String(err)),
                     );
-                  } else if (mapped === "secrets") {
+                  } else if (tab === "secrets") {
                     void refreshSecrets();
                   }
                 }}
@@ -4365,9 +4364,17 @@ export default function App() {
                     void runSystemBack();
                   }}
                 >
-                  ←
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                    <path d="M15 18l-6-6 6-6" />
+                  </svg>
                 </button>
-                <h2>{SETTINGS_TITLE[settingsTab]}</h2>
+                <h2>
+                  {settingsTab === "general"
+                    ? settingsGeneralPane === "account"
+                      ? "账户"
+                      : "审核与时区"
+                    : SETTINGS_TITLE[settingsTab]}
+                </h2>
                 <button
                   type="button"
                   className="settings-close"
@@ -4450,59 +4457,73 @@ export default function App() {
               <div className="settings-main-body">
             {settingsTab === "general" && (
               <SettingsPage>
-                <SettingsSection title="账户">
-                  <SettingsCard className="settings-account">
-                    <div className="settings-account-avatar" aria-hidden>
-                      {accountInitials(user?.username || "")}
-                    </div>
-                    <div className="settings-account-main">
-                      <div className="settings-account-name">{user?.username || "账户"}</div>
-                      {user?.email ? (
-                        <div className="settings-account-email">
-                          <span>{user.email}</span>
-                          <button
-                            type="button"
-                            className="settings-icon-btn"
-                            title={emailCopied ? "已复制" : "复制邮箱"}
-                            aria-label="复制邮箱"
-                            onClick={() => {
-                              void navigator.clipboard.writeText(user.email || "").then(() => {
-                                setEmailCopied(true);
-                                window.setTimeout(() => setEmailCopied(false), 1200);
-                              });
-                            }}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
-                              <rect x="8" y="8" width="12" height="12" rx="2" />
-                              <path d="M4 16V6a2 2 0 0 1 2-2h10" />
-                            </svg>
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                    <button type="button" className="settings-pill" onClick={onLogout}>
-                      退出登录
-                    </button>
-                  </SettingsCard>
-                </SettingsSection>
-                <SettingsSection title="模型">
-                  <SettingsCard>
-                    <div className="settings-row">
-                      <span>默认模型</span>
-                      <button type="button" className="settings-pill" onClick={() => setSettingsTab("llm")}>
-                        {defaultLLM?.model || defaultLLM?.name || "未配置"}
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-                          <path d="M6 9l6 6 6-6" />
-                        </svg>
+                {(!sheetForm || settingsGeneralPane === "account") && (
+                  <SettingsSection title={sheetForm ? undefined : "账户"}>
+                    <SettingsCard className="settings-account">
+                      <div className="settings-account-avatar" aria-hidden>
+                        {accountInitials(user?.username || "")}
+                      </div>
+                      <div className="settings-account-main">
+                        <div className="settings-account-name">{user?.username || "账户"}</div>
+                        {user?.email ? (
+                          <div className="settings-account-email">
+                            <span>{user.email}</span>
+                            <button
+                              type="button"
+                              className="settings-icon-btn"
+                              title={emailCopied ? "已复制" : "复制邮箱"}
+                              aria-label="复制邮箱"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(user.email || "").then(() => {
+                                  setEmailCopied(true);
+                                  window.setTimeout(() => setEmailCopied(false), 1200);
+                                });
+                              }}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+                                <rect x="8" y="8" width="12" height="12" rx="2" />
+                                <path d="M4 16V6a2 2 0 0 1 2-2h10" />
+                              </svg>
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                      <button type="button" className="settings-pill" onClick={onLogout}>
+                        退出登录
                       </button>
-                    </div>
-                  </SettingsCard>
-                </SettingsSection>
-                <GeneralBotSettings
-                  onSettingsChange={(s) => {
-                    setHostExecUserSettings(s);
-                  }}
-                />
+                    </SettingsCard>
+                  </SettingsSection>
+                )}
+                {!sheetForm ? (
+                  <SettingsSection title="模型">
+                    <SettingsCard>
+                      <div className="settings-row">
+                        <span>默认模型</span>
+                        <button type="button" className="settings-pill" onClick={() => setSettingsTab("llm")}>
+                          {defaultLLM?.model || defaultLLM?.name || "未配置"}
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                            <path d="M6 9l6 6 6-6" />
+                          </svg>
+                        </button>
+                      </div>
+                    </SettingsCard>
+                  </SettingsSection>
+                ) : null}
+                {(!sheetForm || settingsGeneralPane === "review") && (
+                  <>
+                    {sheetForm ? (
+                      <SettingsHint>
+                        时区用于报告与例行任务；自动审核在执行本机操作前检查规则，必要时询问你。
+                      </SettingsHint>
+                    ) : null}
+                    <GeneralBotSettings
+                      sectionTitle={sheetForm ? undefined : "审核与时区"}
+                      onSettingsChange={(s) => {
+                        setHostExecUserSettings(s);
+                      }}
+                    />
+                  </>
+                )}
               </SettingsPage>
             )}
 
@@ -5249,10 +5270,6 @@ export default function App() {
                     </form>
                   </SettingsCard>
                 </SettingsSection>
-              </SettingsPage>
-            )}
-
-
                 <SettingsSection title="入站 Webhook（Slack / GitHub）">
                   <SettingsHint>
                     创建 Hook 后把返回的 URL 配到 Slack Event Subscriptions 或 GitHub Webhooks。
@@ -5313,6 +5330,8 @@ export default function App() {
                     </div>
                   </SettingsCard>
                 </SettingsSection>
+              </SettingsPage>
+            )}
 
             {settingsTab === "sandbox" && (
               <SettingsPage>
@@ -5480,6 +5499,13 @@ export default function App() {
                                 </div>
                               </div>
                               <span className="tag machine-login-only">仅登录</span>
+                              {current ? (
+                                machineIsOnline(current) ? (
+                                  <span className="tag machine-online">在线</span>
+                                ) : (
+                                  <span className="tag machine-offline">离线</span>
+                                )
+                              ) : null}
                             </div>
                             {!current ? (
                               <div className="bot-settings-desc">
@@ -5592,7 +5618,9 @@ export default function App() {
                             </div>
                           ) : (
                             <div className="bot-settings-desc">
-                              状态：{current.connected ? "可操作" : "未连接"}
+                              状态：
+                              {machineIsOnline(current) ? "在线" : "离线"}
+                              {current.connected ? " · 可操作" : ""}
                               {current.platform ? ` · ${current.platform}` : ""}
                               {hostWritesOn ? "" : " · 本机写入已关"}
                             </div>
@@ -5709,9 +5737,15 @@ export default function App() {
                                   {m.label}{" "}
                                   {isLoginOnlyMachine(m) ? (
                                     <span className="tag machine-login-only">仅登录</span>
+                                  ) : null}
+                                  {machineIsOnline(m) ? (
+                                    <span className="tag machine-online">在线</span>
                                   ) : (
-                                    <span className="tag">{m.connected ? "可操作" : "未连接"}</span>
+                                    <span className="tag machine-offline">离线</span>
                                   )}
+                                  {!isLoginOnlyMachine(m) && m.connected ? (
+                                    <span className="tag machine-host-ready">可操作</span>
+                                  ) : null}
                                   {hostMachineId === m.id ? <span className="tag">当前</span> : null}
                                 </div>
                               )}

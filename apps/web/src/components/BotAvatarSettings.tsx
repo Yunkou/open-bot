@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import type { Agent, Machine } from "../api";
 import { listMachines } from "../api";
-import { isLoginOnlyMachine, preferHostMachines } from "../lib/clientEnv";
+import { isLoginOnlyMachine, machinePresenceLabel, preferHostMachines } from "../lib/clientEnv";
 import {
   AVATAR_COLOR_PALETTE,
   AVATAR_SHAPES,
@@ -32,9 +32,7 @@ const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
 ];
 
 function machineHint(m: Machine): string {
-  if (m.connected === true) return "已连接";
-  if (typeof m.status === "string" && m.status.trim()) return m.status;
-  return "未连接";
+  return machinePresenceLabel(m);
 }
 
 /**

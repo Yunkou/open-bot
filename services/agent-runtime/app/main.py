@@ -36,6 +36,7 @@ from .memory import (
     MemoryStore,
     get_store,
     build_recall_payload,
+    merge_scoped_snippets,
     resolve_write_scope,
     scene_kind,
 )
@@ -51,6 +52,10 @@ from .skills import SkillRegistry, registry_for_user
 from . import langfuse_trace as lf
 from .presence import PresencePublisher
 from .reply_quote import apply_reply_quote
+from .tool_dispatch import bind_tool_handler, reset_tool_handler
+from .harness import durable_enabled, run_durable_events
+from .harness.config import thread_id_for
+from .harness.checkpointer import get_checkpointer, close_checkpointer
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 load_dotenv(_REPO_ROOT / ".env")
@@ -104,6 +109,8 @@ class RunRequest(BaseModel):
     thread_root_id: str | None = None
     # Augmented recall query: replied snippet + recent thread turns + user text.
     reply_context: str | None = None
+    # Idempotent durable run key (LangGraph thread suffix). Go may send request_id.
+    request_id: str | None = None
 
 
 class MemoryCreate(BaseModel):
@@ -196,6 +203,16 @@ def _override_from_body(llm: LLMConfig | None) -> LLMOverride | None:
 @app.on_event("startup")
 async def _startup() -> None:
     skills.reload()
+    if durable_enabled():
+        try:
+            await get_checkpointer()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    await close_checkpointer()
 
 
 @app.get("/healthz")
@@ -465,50 +482,12 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
         lf.update_obs(root_obs, metadata={"run_id": run_id, "langfuse_trace_id": langfuse_trace_id})
     decision_token = bind_decision(body.decision)
     try:
-        scene = scene_kind(body.channel_id, body.peer_agent_id)
-        recall_query = (body.reply_context or "").strip() or (user_text or "")
-        recalled_buckets = mem.recall_buckets(
-            recall_query,
-            agent_id=body.agent_id,
-            channel_id=body.channel_id or "",
-            peer_agent_id=body.peer_agent_id or "",
-        )
-        mem0_by_scope: dict[str, list[str]] = {}
-        mem0_hits: list[str] = []
-        if body.user_id and str(body.user_id).strip() and mem0_store.mem0_wanted():
-            uid = str(body.user_id).strip()
-            for scope_name in recalled_buckets:
-                aid = body.agent_id if scope_name in ("bot", "agent_pair") else ""
-                cid = (body.channel_id or "") if scope_name == "channel" else ""
-                peer = (body.peer_agent_id or "") if scope_name == "agent_pair" else ""
-                hits = mem0_store.search_for_scope(
-                    uid,
-                    recall_query,
-                    scope=scope_name,
-                    agent_id=aid,
-                    channel_id=cid,
-                    peer_agent_id=peer,
-                )
-                mem0_by_scope[scope_name] = hits
-                mem0_hits.extend(hits)
-        recalled = [item for items in recalled_buckets.values() for item in items]
-        recall_payload = build_recall_payload(
-            recalled_buckets,
-            mem0_by_scope,
-            scene,
-            recalled=recalled,
-            mem0_hits=mem0_hits,
-        )
-        recall_payload["run_id"] = run_id
-        if langfuse_trace_id:
-            recall_payload["langfuse_trace_id"] = langfuse_trace_id
-        memory_snippets = [r["snippet"] for r in recall_payload["items"]]
+        # Prefer client request_id for durable idempotency / resume.
+        if body.request_id and str(body.request_id).strip():
+            run_id = str(body.request_id).strip()
 
-        # None = all skills (legacy); explicit list (incl. empty) = filter.
         enabled = body.enabled_skills
         skill_reg = skills_for(body.user_id)
-        active_skills = skill_reg.filter_meta(enabled)
-
         tools_on = tools_enabled(override)
         mcp_servers: list[mcp_client.MCPServerConfig] = []
         mcp_extra_tools: list[dict[str, Any]] = []
@@ -542,71 +521,155 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             listed = machines_mod.list_machines(str(body.user_id))
             if isinstance(listed.get("machines"), list):
                 host_machines = listed["machines"]
-        system = build_system_prompt(
-            agent_id=body.agent_id,
-            skills_catalog=skill_reg.catalog_for_prompt(enabled),
-            memory_snippets=memory_snippets,
-            tools_enabled=tools_on,
-            available_tool_names=available_tool_names,
-            client=client_ctx,
-            machines=host_machines,
-        )
-        # Confirmed lessons only (pending/ignored never inject; feedback ≠ memory).
-        injected_lessons: list[dict[str, Any]] = []
-        try:
-            from . import lessons as lessons_mod
-
-            injected_lessons, lesson_block = lessons_mod.active_lessons_with_block(
-                str(body.user_id or ""),
-                str(body.agent_id or "open-bot"),
-            )
-            if lesson_block:
-                system = system + "\n\n" + lesson_block
-        except Exception:  # noqa: BLE001
-            injected_lessons = []
-        if body.system_prompt and body.system_prompt.strip():
-            system = body.system_prompt.strip() + "\n\n" + system
-
-        dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
-
-        async def _summarize(msgs: list[dict[str, Any]]) -> str:
-            return await chat_text(msgs, api_key=api_key or "", override=override)
 
         llm_cw = body.llm.context_window if body.llm else None
         llm_model = (body.llm.model if body.llm else None) or model
-        compacted, compact_meta = await compact_mod.compact_messages(
-            dialog,
-            api_key=api_key or None,
-            chat_fn=_summarize if api_key else None,
-            context_window=llm_cw,
-            model=llm_model,
-        )
 
-        llm_messages: list[dict[str, Any]] = assemble_llm_messages(system, compacted)
+        if api_key and durable_enabled():
+            lf.update_obs(
+                root_obs,
+                metadata={
+                    "mode": "openai",
+                    "model": model,
+                    "tools_enabled": tools_on,
+                    "history_count": history_count,
+                    "durable": True,
+                },
+            )
+            async for chunk in openai_path(
+                [],
+                api_key,
+                override,
+                mem,
+                enabled_skills=enabled,
+                user_id=body.user_id,
+                agent_id=body.agent_id,
+                channel_id=body.channel_id,
+                peer_agent_id=body.peer_agent_id,
+                conversation_id=body.conversation_id,
+                skill_reg=skill_reg,
+                mcp_servers=mcp_servers,
+                mcp_extra_tools=mcp_extra_tools,
+                root_obs=root_obs,
+                request=request,
+                max_tool_rounds=clamp_tool_rounds(body.max_tool_rounds),
+                client=client_ctx,
+                preferred_machine_id=str(body.preferred_machine_id or ""),
+                mem_store=mem,
+                reply_to_id=body.reply_to_id,
+                thread_root_id=body.thread_root_id,
+                reply_context=body.reply_context,
+                durable=True,
+                durable_body=body,
+                durable_history=history,
+                durable_run_id=run_id,
+                durable_langfuse_trace_id=langfuse_trace_id or "",
+                durable_host_machines=host_machines,
+                durable_available_tool_names=available_tool_names,
+                durable_tools_on=tools_on,
+                durable_llm_cw=llm_cw,
+                durable_llm_model=llm_model,
+            ):
+                yield chunk
+        elif api_key:
+            scene = scene_kind(body.channel_id, body.peer_agent_id)
+            recall_query = (body.reply_context or "").strip() or (user_text or "")
+            recalled_buckets = mem.recall_buckets(
+                recall_query,
+                agent_id=body.agent_id,
+                channel_id=body.channel_id or "",
+                peer_agent_id=body.peer_agent_id or "",
+            )
+            mem0_by_scope: dict[str, list[str]] = {}
+            mem0_hits: list[str] = []
+            if body.user_id and str(body.user_id).strip() and mem0_store.mem0_wanted():
+                uid = str(body.user_id).strip()
+                for scope_name in recalled_buckets:
+                    aid = body.agent_id if scope_name in ("bot", "agent_pair") else ""
+                    cid = (body.channel_id or "") if scope_name == "channel" else ""
+                    peer = (body.peer_agent_id or "") if scope_name == "agent_pair" else ""
+                    hits = mem0_store.search_for_scope(
+                        uid,
+                        recall_query,
+                        scope=scope_name,
+                        agent_id=aid,
+                        channel_id=cid,
+                        peer_agent_id=peer,
+                    )
+                    mem0_by_scope[scope_name] = hits
+                    mem0_hits.extend(hits)
+            recalled = [item for items in recalled_buckets.values() for item in items]
+            recall_payload = build_recall_payload(
+                recalled_buckets,
+                mem0_by_scope,
+                scene,
+                recalled=recalled,
+                mem0_hits=mem0_hits,
+            )
+            recall_payload["run_id"] = run_id
+            if langfuse_trace_id:
+                recall_payload["langfuse_trace_id"] = langfuse_trace_id
+            memory_snippets = [r["snippet"] for r in recall_payload["items"]]
+            active_skills = skill_reg.filter_meta(enabled)
+            system = build_system_prompt(
+                agent_id=body.agent_id,
+                skills_catalog=skill_reg.catalog_for_prompt(enabled),
+                memory_snippets=memory_snippets,
+                tools_enabled=tools_on,
+                available_tool_names=available_tool_names,
+                client=client_ctx,
+                machines=host_machines,
+            )
+            injected_lessons: list[dict[str, Any]] = []
+            try:
+                from . import lessons as lessons_mod
 
-        meta = {
-            "conversation_id": body.conversation_id,
-            "agent_id": body.agent_id,
-            "history_count": history_count,
-            "skills_count": len(active_skills),
-            "enabled_skills": [s.name for s in active_skills],
-            "memory_recalled": len(recalled),
-            "mem0_recalled": len(mem0_hits),
-            "memory_recall": recall_payload,
-            "compacted": compact_meta.get("compacted", False),
-            "compact_reason": compact_meta.get("compact_reason") or "",
-            "summary_new": bool(compact_meta.get("summary_new")),
-            "llm_override": override is not None,
-            "compact_thresholds": compact_meta.get("thresholds") or compact_mod.compact_config(context_window=llm_cw, model=llm_model),
-            "tools_enabled": tools_on,
-            "lessons_injected": len(injected_lessons),
-            "lesson_ids": [str(x.get("id") or "") for x in injected_lessons],
-            "run_id": run_id,
-        }
-        if compact_meta.get("summary_new") and compact_meta.get("summary"):
-            meta["summary"] = compact_meta["summary"]
+                injected_lessons, lesson_block = lessons_mod.active_lessons_with_block(
+                    str(body.user_id or ""),
+                    str(body.agent_id or "open-bot"),
+                )
+                if lesson_block:
+                    system = system + "\n\n" + lesson_block
+            except Exception:  # noqa: BLE001
+                injected_lessons = []
+            if body.system_prompt and body.system_prompt.strip():
+                system = body.system_prompt.strip() + "\n\n" + system
 
-        if api_key:
+            dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
+
+            async def _summarize(msgs: list[dict[str, Any]]) -> str:
+                return await chat_text(msgs, api_key=api_key or "", override=override)
+
+            compacted, compact_meta = await compact_mod.compact_messages(
+                dialog,
+                api_key=api_key or None,
+                chat_fn=_summarize if api_key else None,
+                context_window=llm_cw,
+                model=llm_model,
+            )
+            llm_messages: list[dict[str, Any]] = assemble_llm_messages(system, compacted)
+            meta = {
+                "conversation_id": body.conversation_id,
+                "agent_id": body.agent_id,
+                "history_count": history_count,
+                "skills_count": len(active_skills),
+                "enabled_skills": [s.name for s in active_skills],
+                "memory_recalled": len(recalled),
+                "mem0_recalled": len(mem0_hits),
+                "memory_recall": recall_payload,
+                "compacted": compact_meta.get("compacted", False),
+                "compact_reason": compact_meta.get("compact_reason") or "",
+                "summary_new": bool(compact_meta.get("summary_new")),
+                "llm_override": override is not None,
+                "compact_thresholds": compact_meta.get("thresholds")
+                or compact_mod.compact_config(context_window=llm_cw, model=llm_model),
+                "tools_enabled": tools_on,
+                "lessons_injected": len(injected_lessons),
+                "lesson_ids": [str(x.get("id") or "") for x in injected_lessons],
+                "run_id": run_id,
+            }
+            if compact_meta.get("summary_new") and compact_meta.get("summary"):
+                meta["summary"] = compact_meta["summary"]
             meta.update({"mode": "openai", "model": model, "base_url": base})
             lf.update_obs(
                 root_obs,
@@ -644,6 +707,26 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
             ):
                 yield chunk
         else:
+            active_skills = skill_reg.filter_meta(enabled)
+            system = build_system_prompt(
+                agent_id=body.agent_id,
+                skills_catalog=skill_reg.catalog_for_prompt(enabled),
+                memory_snippets=[],
+                tools_enabled=False,
+                client=client_ctx,
+                machines=host_machines,
+            )
+            dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
+            llm_messages = assemble_llm_messages(system, dialog)
+            meta = {
+                "conversation_id": body.conversation_id,
+                "agent_id": body.agent_id,
+                "history_count": history_count,
+                "skills_count": len(active_skills),
+                "enabled_skills": [s.name for s in active_skills],
+                "run_id": run_id,
+                "mode": "echo",
+            }
             meta["mode"] = "echo"
             lf.update_obs(root_obs, metadata={"mode": "echo"})
             yield sse("meta", meta)
@@ -730,6 +813,17 @@ async def openai_path(
     reply_to_id: str | None = None,
     thread_root_id: str | None = None,
     reply_context: str | None = None,
+    *,
+    durable: bool = False,
+    durable_body: RunRequest | None = None,
+    durable_history: list[dict[str, Any]] | None = None,
+    durable_run_id: str | None = None,
+    durable_langfuse_trace_id: str = "",
+    durable_host_machines: list[dict[str, Any]] | None = None,
+    durable_available_tool_names: list[str] | None = None,
+    durable_tools_on: bool | None = None,
+    durable_llm_cw: int | None = None,
+    durable_llm_model: str | None = None,
 ) -> AsyncIterator[str]:
     allow = set(enabled_skills) if enabled_skills is not None else None
     skill_reg = skill_reg or skills_for(user_id)
@@ -1214,6 +1308,44 @@ async def openai_path(
             return json.dumps(result, ensure_ascii=False)
         return json.dumps({"error": f"unknown tool {name}"})
 
+    if durable:
+        token = bind_tool_handler(tool_handler)
+        try:
+            async for chunk in run_durable_events(
+                body=durable_body or RunRequest(conversation_id=str(conversation_id or "x")),
+                history=list(durable_history or llm_messages),
+                api_key=api_key,
+                override=override,
+                run_id=durable_run_id,
+                request_id=getattr(durable_body, "request_id", None) if durable_body else None,
+                langfuse_trace_id=durable_langfuse_trace_id,
+                root_obs=root_obs,
+                max_tool_rounds=max_tool_rounds,
+                configurable_extra={
+                    "extra_tools": mcp_extra_tools,
+                    "user_id": user_id,
+                    "agent_id": agent_id,
+                    "conversation_id": conversation_id,
+                    "channel_id": channel_id,
+                    "peer_agent_id": peer_agent_id,
+                    "mem_store": mem_store or mem,
+                    "skill_reg": skill_reg,
+                    "enabled_skills": enabled_skills,
+                    "client": client,
+                    "host_machines": durable_host_machines,
+                    "available_tool_names": durable_available_tool_names,
+                    "tools_on": tools_on if durable_tools_on is None else durable_tools_on,
+                    "llm_context_window": durable_llm_cw,
+                    "llm_model": durable_llm_model or model_name,
+                },
+            ):
+                if request is not None and await request.is_disconnected():
+                    raise asyncio.CancelledError()
+                yield chunk
+        finally:
+            reset_tool_handler(token)
+        return
+
     presence = PresencePublisher(
         conversation_id,
         agent_id,
@@ -1371,6 +1503,62 @@ async def openai_path(
         yield sse("error", {"message": str(e)})
         yield sse("done", {"ok": False, "mode": "openai"})
 
+
+
+class SteerRequest(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1)
+    mode: str = Field(default="follow_up")  # follow_up | steer
+
+
+class AbortRequest(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1)
+
+
+class ApproveRequest(BaseModel):
+    conversation_id: str = Field(..., min_length=1)
+    request_id: str = Field(..., min_length=1)
+    approve: bool = True
+    reason: str = ""
+
+
+@app.post("/v1/runs/steer")
+async def runs_steer(body: SteerRequest) -> dict:
+    from .harness import steer as steer_mod
+
+    tid = thread_id_for(conversation_id=body.conversation_id, request_id=body.request_id)
+    return await steer_mod.steer_thread(tid, text=body.text, mode=body.mode)
+
+
+@app.post("/v1/runs/abort")
+async def runs_abort(body: AbortRequest) -> dict:
+    from .harness import steer as steer_mod
+
+    tid = thread_id_for(conversation_id=body.conversation_id, request_id=body.request_id)
+    return await steer_mod.abort_thread(tid)
+
+
+@app.post("/v1/runs/approve")
+async def runs_approve(body: ApproveRequest) -> dict:
+    from .harness import steer as steer_mod
+
+    tid = thread_id_for(conversation_id=body.conversation_id, request_id=body.request_id)
+    return await steer_mod.approve_thread(
+        tid, approve=body.approve, reason=body.reason
+    )
+
+
+@app.get("/v1/runs/state")
+async def runs_state(
+    conversation_id: str = Query(..., min_length=1),
+    request_id: str = Query(..., min_length=1),
+) -> dict:
+    from .harness import steer as steer_mod
+
+    tid = thread_id_for(conversation_id=conversation_id, request_id=request_id)
+    return await steer_mod.get_thread_state(tid)
 
 
 def sse(event: str, data: dict) -> str:

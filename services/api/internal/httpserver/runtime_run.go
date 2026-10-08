@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tangxin/open-bot/services/api/internal/db"
 )
 
@@ -86,6 +87,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		enabledSkills = []string{}
 	}
 
+	requestID := uuid.NewString()
 	payloadMap := map[string]any{
 		"conversation_id": conv.ID,
 		"content":         content,
@@ -95,6 +97,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		"system_prompt":   systemPrompt,
 		"messages":        history,
 		"enabled_skills":  enabledSkills,
+		"request_id":      requestID,
 	}
 	if llmPayload != nil {
 		payloadMap["llm"] = llmPayload

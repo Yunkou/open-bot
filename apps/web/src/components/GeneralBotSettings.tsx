@@ -16,6 +16,8 @@ import { SettingsCard, SettingsSection } from "./SettingsLayout";
 
 type Props = {
   onSettingsChange?: (s: UserSettings) => void;
+  /** Section heading; omit on mobile dedicated「审核与时区」page (title is already in chrome). */
+  sectionTitle?: string;
 };
 
 function newRuleId(): string {
@@ -26,7 +28,7 @@ function newRuleId(): string {
   }
 }
 
-export function GeneralBotSettings({ onSettingsChange }: Props) {
+export function GeneralBotSettings({ onSettingsChange, sectionTitle = "审核与时区" }: Props) {
   const [timezone, setTimezone] = useState("");
   const [autoReview, setAutoReview] = useState(true);
   const [rules, setRules] = useState<AutoReviewRule[]>([]);
@@ -103,7 +105,7 @@ export function GeneralBotSettings({ onSettingsChange }: Props) {
     : `自动检测（当前 ${detected}）`;
 
   return (
-    <SettingsSection title="Bot">
+    <SettingsSection title={sectionTitle || undefined}>
       <SettingsCard padded>
         <div className="bot-general-settings">
           <div className="settings-row bot-settings-row">

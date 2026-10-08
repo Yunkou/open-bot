@@ -1651,6 +1651,29 @@ button.ghost {
   color: var(--muted, #6b7280);
   font-weight: 500;
 }
+.tag.machine-online {
+  background: rgba(16, 185, 129, 0.14);
+  color: #047857;
+  font-weight: 550;
+}
+.tag.machine-offline {
+  background: rgba(107, 114, 128, 0.12);
+  color: var(--muted, #6b7280);
+  font-weight: 500;
+}
+.tag.machine-host-ready {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--accent, #3b82f6);
+  font-weight: 550;
+}
+[data-theme="dark"] .tag.machine-online {
+  background: rgba(16, 185, 129, 0.22);
+  color: #6ee7b7;
+}
+[data-theme="dark"] .tag.machine-host-ready {
+  background: rgba(59, 130, 246, 0.22);
+  color: #93c5fd;
+}
 
 .llm-form {
   display: flex;
@@ -4921,7 +4944,8 @@ html.capacitor-native {
 
 .sidebar-shell-head {
   flex-shrink: 0;
-  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 4px;
+  /* Same top inset as chat floating ← (safe + 12), so list chrome lines up with the thread */
+  padding: max(16px, calc(var(--safe-top, 0px) + 12px)) 12px 4px;
 }
 
 .sidebar-shell-topbar {
@@ -4964,6 +4988,8 @@ html.capacitor-native {
   height: 44px;
   min-width: 44px;
   min-height: 44px;
+  margin: 0;
+  padding: 0;
   border-radius: 50%;
   background: var(--bg-soft, #f3f4f6);
   display: grid;
@@ -5270,7 +5296,8 @@ html.capacitor-native {
   grid-template-columns: 44px 1fr 44px;
   align-items: center;
   gap: 4px;
-  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 8px 4px;
+  /* Match chat ← top: max(16, safe+12), horizontal 12 */
+  padding: max(16px, calc(var(--safe-top, 0px) + 12px)) 12px 8px;
   background: #f2f2f7;
 }
 
@@ -5311,6 +5338,10 @@ html.capacitor-native {
 .settings-shell-back:active {
   background: var(--bg-hover, #eceef1);
 }
+.settings-shell-back svg {
+  opacity: 0.85;
+  display: block;
+}
 
 .settings-hub {
   display: flex;
@@ -5331,9 +5362,10 @@ html.capacitor-native {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 8px;
-  min-height: 52px;
-  box-sizing: content-box;
+  /* border-box so the 44px close sits on the same line as chat ← (no extra content-box centering) */
+  box-sizing: border-box;
+  padding: max(16px, calc(var(--safe-top, 0px) + 12px)) 12px 8px;
+  min-height: calc(max(16px, calc(var(--safe-top, 0px) + 12px)) + 44px + 8px);
 }
 
 .settings-hub-title {
@@ -5371,6 +5403,12 @@ html.capacitor-native {
   flex-direction: column;
   gap: 16px; /* #7: card gap 16 */
 }
+/* Column flex shrinks cards to the viewport and overflow:hidden clips row text.
+   Keep every card at its content height so the list scrolls instead. */
+.settings-hub-scroll > .settings-hub-card,
+.settings-hub-scroll > .settings-hub-section-label {
+  flex-shrink: 0;
+}
 
 .settings-hub-section-label {
   font-size: 13px;
@@ -5406,17 +5444,39 @@ html.capacitor-native {
   overflow: visible;
   box-sizing: border-box;
 }
+/* Hub rows live inside .modal; beat `.modal button` (margin, 12px type, 8px radius, border). */
+.modal.settings-dialog .settings-hub-row,
+.modal.settings-dialog-shell .settings-hub-row {
+  width: 100%;
+  height: auto;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  background: transparent;
+  box-shadow: none;
+  padding: 14px;
+  font-size: 16px;
+  font-weight: 550;
+  line-height: 1.35;
+  color: var(--text);
+  text-align: left;
+}
 .settings-hub-row:has(.settings-hub-row-sub) {
   min-height: 64px;
   padding-top: 12px;
   padding-bottom: 12px;
 }
 
-[data-theme="dark"] .settings-hub-row {
+[data-theme="dark"] .settings-hub-row,
+[data-theme="dark"] .modal.settings-dialog .settings-hub-row,
+[data-theme="dark"] .modal.settings-dialog-shell .settings-hub-row {
   border-bottom-color: rgba(255, 255, 255, 0.08);
 }
 
-.settings-hub-card > .settings-hub-row:last-child {
+.settings-hub-card > .settings-hub-row:last-child,
+.modal.settings-dialog .settings-hub-card > .settings-hub-row:last-child,
+.modal.settings-dialog-shell .settings-hub-card > .settings-hub-row:last-child {
   border-bottom: none;
 }
 
@@ -5490,7 +5550,9 @@ html.capacitor-native {
   min-height: 64px;
 }
 
-.settings-hub-row.settings-hub-row-logout {
+.settings-hub-row.settings-hub-row-logout,
+.modal.settings-dialog .settings-hub-row.settings-hub-row-logout,
+.modal.settings-dialog-shell .settings-hub-row.settings-hub-row-logout {
   justify-content: center;
   color: var(--danger);
   font-size: 16px;
@@ -5609,6 +5671,8 @@ html.touch-ui .composer-quote-clear {
   height: 44px;
   min-width: 44px;
   min-height: 44px;
+  margin: 0;
+  padding: 0;
   border-radius: 50%;
   background: var(--bg-soft, #f3f4f6);
   border: none;
@@ -5995,10 +6059,10 @@ html.touch-ui .composer-quote-clear {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* Subhead grid already 44 | 1fr | 44; reinforce side pad */
+/* Subhead grid already 44 | 1fr | 44; same top inset as chat ← */
 .settings-dialog-shell .settings-shell-subhead,
 .bot-avatar-modal-shell .settings-shell-subhead {
-  padding: max(16px, calc(var(--safe-top, 0px) + 8px)) 12px 8px;
+  padding: max(16px, calc(var(--safe-top, 0px) + 12px)) 12px 8px;
   background: #f2f2f7;
 }
 
@@ -6150,52 +6214,39 @@ html.touch-ui .composer-quote-clear {
   resize: vertical;
 }
 
-/* Push last-section form CTA toward bottom when content is short */
-.settings-dialog-shell .settings-page > .settings-section:last-of-type {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
+/*
+ * Form CTA: in-flow footer (NOT sticky + flex-stretch).
+ * Sticky + flex:1 on the form clipped mid-fields (模型 / 例行任务) and
+ * stacked secondary actions over body copy.
+ */
+.settings-dialog-shell .settings-page > .settings-section:last-of-type,
+.settings-dialog-shell .settings-page > .settings-section:last-of-type > .settings-card,
+.settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form {
+  flex: none;
   min-height: 0;
-}
-.settings-dialog-shell .settings-page > .settings-section:last-of-type > .settings-card {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
+  display: block;
 }
 .settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form {
-  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  min-height: 0;
 }
 
-/* --- Sticky full-width primary CTA (form actions only, not list-row actions) --- */
 .settings-dialog-shell .llm-form > .llm-actions {
   display: flex;
   flex-direction: column-reverse; /* DOM: primary first → visual bottom */
   align-items: stretch;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 16px;
   margin-left: -16px;
   margin-right: -16px;
-  margin-bottom: 0;
-  padding: 12px 16px;
-  position: sticky;
-  bottom: 0;
-  z-index: 4;
+  margin-bottom: -16px;
+  padding: 12px 16px max(16px, var(--safe-bottom, 0px));
+  position: static;
+  z-index: auto;
   background: #f2f2f7;
   border-top: 0.5px solid rgba(60, 60, 67, 0.12);
   box-sizing: border-box;
-  border-radius: 0 0 16px 16px; /* mid-page: stay at card foot */
-}
-
-/* Last section form: true page-bottom sticky + safe-area */
-.settings-dialog-shell .settings-page > .settings-section:last-of-type .llm-form > .llm-actions {
-  margin-top: auto;
-  margin-bottom: -16px;
-  padding: 12px 16px max(12px, var(--safe-bottom, 0px));
-  border-radius: 0;
+  border-radius: 0 0 16px 16px;
 }
 
 [data-theme="dark"] .settings-dialog-shell .llm-form > .llm-actions {
@@ -6203,7 +6254,6 @@ html.touch-ui .composer-quote-clear {
   border-top-color: rgba(255, 255, 255, 0.1);
 }
 
-/* When form sits in non-padded card (.settings-card > .llm-form has own pad) */
 .settings-dialog-shell .settings-card > .llm-form > .llm-actions {
   margin-left: -16px;
   margin-right: -16px;
@@ -6222,24 +6272,31 @@ html.touch-ui .composer-quote-clear {
   margin: 0;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .settings-dialog-shell .llm-form > .llm-actions > button:not(.primary) {
   width: 100%;
   min-height: 44px;
   margin: 0;
-  border: none;
+  border: 1px solid var(--border, #e5e7eb);
   border-radius: 12px;
-  background: transparent;
-  color: var(--accent, #3b82f6);
+  background: #fff;
+  color: var(--text);
   font-size: 15px;
   font-weight: 500;
-  padding: 8px 12px;
+  padding: 10px 12px;
   box-shadow: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .settings-dialog-shell .llm-form > .llm-actions > button:not(.primary):active {
-  background: rgba(59, 130, 246, 0.08);
+  background: var(--bg-soft, #f3f4f6);
+}
+
+[data-theme="dark"] .settings-dialog-shell .llm-form > .llm-actions > button:not(.primary) {
+  background: #2c2c2e;
+  border-color: rgba(255, 255, 255, 0.12);
 }
 
 /* List-row actions stay compact horizontal (设默认 / 编辑 / 删除) */
@@ -6254,6 +6311,7 @@ html.touch-ui .composer-quote-clear {
   position: static;
   background: transparent;
   border: none;
+  border-radius: 0;
 }
 .settings-dialog-shell .llm-item .llm-actions > button,
 .settings-dialog-shell .llm-list .llm-actions > button {
@@ -6266,6 +6324,7 @@ html.touch-ui .composer-quote-clear {
   color: var(--text);
   font-size: 12px;
   padding: 6px 10px;
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* Machines name+save: stack on shell instead of side-by-side flat */
@@ -6282,6 +6341,191 @@ html.touch-ui .composer-quote-clear {
   border-radius: 14px;
   font-size: 16px;
   margin: 0;
+}
+
+/* ---- Shell settings lists: wrap copy, no fixed 72px crush ---- */
+.settings-dialog-shell .settings-card > .llm-list > .llm-item,
+.settings-dialog-shell .llm-list > .llm-item {
+  height: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 14px 16px;
+  box-sizing: border-box;
+}
+.settings-dialog-shell .llm-item > div:first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+.settings-dialog-shell .agent-name {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.4;
+  font-size: 15px;
+}
+.settings-dialog-shell .agent-desc {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  margin-top: 6px;
+  font-size: 13px;
+}
+/* Checkbox left + copy right (Bot 启用的技能) — beat .llm-item { column } */
+.settings-dialog-shell .llm-list > .llm-item.bot-skill-row,
+.settings-dialog-shell .settings-card > .llm-list > .llm-item.bot-skill-row {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+}
+.settings-dialog-shell .bot-skill-row .skill-toggle {
+  flex-shrink: 0;
+  margin-top: 3px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+}
+.settings-dialog-shell .bot-skill-row .skill-toggle input {
+  width: 20px;
+  height: 20px;
+}
+.settings-dialog-shell .bot-skill-main {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.settings-dialog-shell .bot-skill-main .agent-desc {
+  margin-top: 0;
+}
+.settings-dialog-shell .bot-skill-source,
+.settings-dialog-shell .llm-item .pill,
+.settings-dialog-shell .llm-item .tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--bg-soft, #f3f4f6);
+  color: var(--muted);
+  vertical-align: middle;
+}
+.settings-dialog-shell .skills-name-link {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-dialog-shell .llm-item .llm-actions .check,
+.settings-dialog-shell .llm-item .llm-actions .skill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.settings-dialog-shell .settings-section-actions button {
+  margin: 0;
+  min-height: 32px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-dialog-shell .settings-section-head {
+  align-items: center;
+  margin-bottom: 10px;
+}
+.settings-dialog-shell .llm-item .llm-actions {
+  width: 100%;
+  justify-content: flex-start;
+  margin-top: 0;
+}
+/* In-card primary (创建 Hook 等) — beat `.modal button` margin/size */
+.settings-dialog-shell .settings-card > .llm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 16px 16px;
+  padding: 0;
+  position: static;
+  background: transparent;
+  border: none;
+}
+.settings-dialog-shell .settings-card > .llm-actions > button {
+  margin: 0;
+  min-height: 44px;
+  border-radius: 12px;
+  font-size: 15px;
+  padding: 10px 14px;
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-dialog-shell .settings-card > .llm-actions > button.primary {
+  width: 100%;
+  min-height: 48px;
+  border: none;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-weight: 650;
+}
+
+/* Kill Android/WebView square blue tap flash on shell chrome + settings */
+.shell-narrow button,
+.shell-narrow .sidebar-shell-user,
+.shell-narrow .sidebar-shell-search-btn,
+.shell-narrow a,
+.settings-dialog-shell button,
+.settings-dialog-shell .settings-hub-row,
+.settings-hub button,
+.bot-avatar-modal-shell button {
+  -webkit-tap-highlight-color: transparent;
+}
+.shell-narrow .sidebar-shell-user:focus,
+.shell-narrow .sidebar-shell-user:focus-visible,
+.shell-narrow .sidebar-shell-search-btn:focus,
+.shell-narrow .icon-btn.sidebar-shell-plus:focus,
+.shell-narrow .icon-btn.sidebar-shell-plus:focus-visible,
+.shell-narrow .topbar-back:focus,
+.shell-narrow .topbar-back:focus-visible,
+.settings-dialog-shell .settings-hub-close:focus,
+.settings-dialog-shell .settings-hub-close:focus-visible,
+.settings-dialog-shell .settings-shell-back:focus,
+.settings-dialog-shell .settings-shell-back:focus-visible,
+.settings-dialog-shell .settings-shell-subhead .settings-close:focus,
+.settings-dialog-shell .settings-shell-subhead .settings-close:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+/* Soft press feedback instead of blue square */
+.shell-narrow .sidebar-shell-user:active .sidebar-shell-user-avatar,
+.shell-narrow .sidebar-shell-search-btn:active,
+.shell-narrow .icon-btn.sidebar-shell-plus:active,
+.settings-dialog-shell .settings-hub-close:active,
+.settings-dialog-shell .settings-shell-back:active,
+.settings-dialog-shell .settings-shell-subhead .settings-close:active {
+  filter: brightness(0.96);
 }
 
 /* --- Bot avatar / prefer-computer sheet = same shell tokens --- */
