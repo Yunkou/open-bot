@@ -1,26 +1,24 @@
-import {
-  Button,
-  Card,
-  Description,
-  FieldError,
-  Input,
-  Label,
-  Spinner,
-  TextField,
-  Typography,
-} from "heroui-native";
+import { Button, FieldError, Input, Spinner, TextField, Typography } from "heroui-native";
 import { useRouter } from "expo-router";
 import type { JSX } from "react";
 import { useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { API_BASE } from "@/api/config";
+import { Icon } from "@/components/Icon";
 import { useSession } from "@/providers/session";
 
+/**
+ * 登录 / 注册。
+ *
+ * 三个刻意的选择：
+ * - 不套 Card。整屏本来就空，再浮一个盒子只是把两条输入框装进框里，
+ *   并不能帮用户理解这是什么。
+ * - 字段不挂可见 label，靠 placeholder + `accessibilityLabel` 表达。
+ *   两个字段（用户名 / 密码）本身就说明了要填什么。
+ * - 页脚不显示 API 地址。那是部署配置，不是登录信息。
+ */
 export default function LoginScreen(): JSX.Element {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
   const { signIn, signUp, user, restoring } = useSession();
 
   const [mode, setMode] = useState<"in" | "up">("in");
@@ -44,7 +42,7 @@ export default function LoginScreen(): JSX.Element {
     try {
       await (mode === "in" ? signIn(username.trim(), password) : signUp(username.trim(), password));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "请求失败，请检查 API 地址与网络");
+      setError(err instanceof Error ? err.message : "请求失败，请检查网络后重试");
     } finally {
       setBusy(false);
     }
@@ -57,69 +55,67 @@ export default function LoginScreen(): JSX.Element {
     >
       <ScrollView
         className="flex-1"
-        contentContainerClassName="flex-grow justify-center px-5 py-10"
+        contentContainerClassName="flex-grow justify-center px-6 py-10"
         keyboardShouldPersistTaps="handled"
       >
-        <View className="gap-8" style={{ paddingBottom: insets.bottom }}>
-          <View className="gap-2">
-            <Typography.Heading type="h2">Open Bot</Typography.Heading>
-            <Typography.Paragraph color="muted">
-              登录后即可与你的助手对话
-            </Typography.Paragraph>
+        <View className="gap-9 pb-safe">
+          <View className="gap-3">
+            <View className="size-12 items-center justify-center rounded-2xl bg-accent">
+              <Icon name="flash" size={24} tone="accent-foreground" />
+            </View>
+            <View className="gap-1.5">
+              <Typography.Heading type="h2">Open Bot</Typography.Heading>
+              <Typography.Paragraph color="muted" className="text-sm">
+                登录后即可与你的助手对话
+              </Typography.Paragraph>
+            </View>
           </View>
 
-          <Card>
-            <Card.Body className="gap-5">
-              <TextField isInvalid={Boolean(error)}>
-                <Label>
-                  <Label.Text>用户名</Label.Text>
-                </Label>
-                <Input
-                  value={username}
-                  onChangeText={setUsername}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  placeholder="demo1"
-                  returnKeyType="next"
-                />
-              </TextField>
+          <View className="gap-4">
+            <TextField isInvalid={Boolean(error)}>
+              <Input
+                value={username}
+                onChangeText={setUsername}
+                autoCapitalize="none"
+                autoCorrect={false}
+                placeholder="用户名"
+                accessibilityLabel="用户名"
+                returnKeyType="next"
+              />
+            </TextField>
 
-              <TextField isInvalid={Boolean(error)}>
-                <Label>
-                  <Label.Text>密码</Label.Text>
-                </Label>
-                <Input
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry
-                  placeholder="••••••••"
-                  returnKeyType="go"
-                  onSubmitEditing={() => void submit()}
-                />
-                {error ? <FieldError isInvalid>{error}</FieldError> : null}
-              </TextField>
+            <TextField isInvalid={Boolean(error)}>
+              <Input
+                value={password}
+                onChangeText={setPassword}
+                secureTextEntry
+                placeholder="密码"
+                accessibilityLabel="密码"
+                returnKeyType="go"
+                onSubmitEditing={() => void submit()}
+              />
+              {error ? <FieldError isInvalid>{error}</FieldError> : null}
+            </TextField>
+          </View>
 
-              <Button onPress={() => void submit()} isDisabled={busy} size="lg">
-                {busy ? <Spinner size="sm" /> : null}
-                <Button.Label>{mode === "in" ? "登录" : "注册并登录"}</Button.Label>
-              </Button>
+          <View className="gap-2">
+            <Button size="lg" onPress={() => void submit()} isDisabled={busy}>
+              {busy ? <Spinner size="sm" /> : null}
+              <Button.Label>{mode === "in" ? "登录" : "注册并登录"}</Button.Label>
+            </Button>
 
-              <Button
-                variant="ghost"
-                size="sm"
-                onPress={() => {
-                  setMode(mode === "in" ? "up" : "in");
-                  setError(null);
-                }}
-              >
-                <Button.Label>
-                  {mode === "in" ? "还没有账号？去注册" : "已有账号？去登录"}
-                </Button.Label>
-              </Button>
-            </Card.Body>
-          </Card>
-
-          <Description className="text-center">API：{API_BASE}</Description>
+            <Button
+              variant="ghost"
+              onPress={() => {
+                setMode(mode === "in" ? "up" : "in");
+                setError(null);
+              }}
+            >
+              <Button.Label>
+                {mode === "in" ? "还没有账号？去注册" : "已有账号？去登录"}
+              </Button.Label>
+            </Button>
+          </View>
         </View>
       </ScrollView>
     </KeyboardAvoidingView>
