@@ -35,7 +35,8 @@ Open Bot 的 React Native 移动端。**独立于** `apps/mobile`（那是复用
 
 - Node ≥ 20.19.4、pnpm ≥ 10
 - 后端已启动：`make dev-runtime` + `make dev-api`（默认 `http://127.0.0.1:18080`）
-- **iOS 模拟器需要完整 Xcode**（本机当前只有 CommandLineTools，`xcrun simctl` 不可用）。装不了 Xcode 时用真机 + Expo Go。
+- **iOS 模拟器需要完整 Xcode**（本机当前只有 CommandLineTools，`xcrun simctl` 不可用）。
+- **完整功能需要 dev build**（MMKV 与 OIDC 都依赖 Expo Go 没有的能力）—— 详见下方「部署注意」。
 
 ## 启动
 
@@ -131,7 +132,32 @@ src/
 
 ## 部署注意
 
-**OIDC 需要把回调地址配成自定义 scheme。** 后端把 `redirect_uri` 烘焙进 `authorize_url`（见 `services/api/internal/auth/oidc.go`），所以必须：
+### ⚠️ 需要 dev build，不能用 Expo Go
+
+项目里有两处依赖**自定义原生模块 / scheme 回调**，Expo Go 都满足不了：
+
+| 依赖                   | 为什么 Expo Go 不行                                   | 缺了会怎样                                                  |
+| ---------------------- | ----------------------------------------------------- | ----------------------------------------------------------- |
+| `react-native-mmkv` v4 | 走 `react-native-nitro-modules`，是自定义原生模块     | 偏好数据降级为内存存储（**重启即丢**），应用能正常启动      |
+| OIDC / Casdoor 登录    | 自定义 scheme 回调需要注册 URL scheme，Expo Go 不支持 | 「用 Casdoor 登录」按钮点了没反应（用户名密码登录不受影响） |
+
+所以要拿到完整功能，必须用 dev build：
+
+```bash
+npx expo prebuild        # 生成 ios/ 与 android/ 原生工程
+npx expo run:ios         # 或 run:android
+# 或者用 EAS Build 打到真机
+```
+
+`lib/storage.ts` 做了兜底：MMKV 不可用时自动降级为内存存储并打一条 warning，
+**同步 API 契约不变、代码一行不用改**。之所以不降级到 AsyncStorage，是因为
+那一层对外是同步契约（zustand persist 的 storage 异步会让 hydrate 变异步，
+页面就会先闪一帧默认值 —— 正是换 MMKV 要消掉的问题）。宁可少一个持久化能力，
+也不把同步 API 换回异步。
+
+### OIDC 需要把回调地址配成自定义 scheme
+
+后端把 `redirect_uri` 烘焙进 `authorize_url`（见 `services/api/internal/auth/oidc.go`），所以必须：
 
 ```bash
 # .env
@@ -139,8 +165,6 @@ CASDOOR_REDIRECT_URI=openbot://auth/callback
 ```
 
 并把这个地址登记到 Casdoor 的回调白名单。scheme 见 `app.json` 的 `scheme: "openbot"`。
-
-另外，OIDC 的自定义 scheme 回调**在 Expo Go 里不生效**，必须用 dev build（`npx expo run:ios` / `run:android` 或 EAS build）才能跑通。用户名密码登录不受影响。
 
 技术债：
 
