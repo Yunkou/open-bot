@@ -343,7 +343,57 @@ export default function ChatScreen(): JSX.Element {
     await setOnboardingDismissed(onboardingStorageKey(conversationId, primaryAgent.id));
   }, [conversationId, primaryAgent]);
 
-  const onOnboardingOption = useCallback((opt: OnboardingOption) => void send(opt.prompt), [send]);
+  /**
+   * 引导卡必须**先落库再发消息**。
+   *
+   * 早期版本这里只 `send(opt.prompt)`，从没调过 `applyAgentOnboarding`，
+   * 结果用户在手机上选的 A–E 方向根本没写进 Bot 的岗位描述 / 人设 / 默认技能，
+   * 选完等于白选。Web 端一直是对的（apps/web/src/App.tsx 先 apply 再 send），
+   * RN 跟随时补上。落库失败按 Web 的做法：提示但不阻断发送。
+   */
+  const refreshAgentsAfterOnboarding = useCallback(async (): Promise<void> => {
+    const next = await api.listAgents().catch(() => null);
+    if (next) setAgents(next);
+  }, []);
+
+  const onOnboardingOption = useCallback(
+    (opt: OnboardingOption) => {
+      void (async () => {
+        if (primaryAgent) {
+          try {
+            await api.applyAgentOnboarding(primaryAgent.id, { focus: opt.letter });
+            await refreshAgentsAfterOnboarding();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "初始化助手失败");
+          }
+        }
+        await send(opt.prompt);
+      })();
+    },
+    [primaryAgent, refreshAgentsAfterOnboarding, send]
+  );
+
+  /** 自定义方向走 focus E：后端按「用户自定义」处理，同时把原文写进岗位描述。 */
+  const onOnboardingCustom = useCallback(
+    (text: string) => {
+      void (async () => {
+        if (primaryAgent) {
+          try {
+            await api.applyAgentOnboarding(primaryAgent.id, {
+              focus: "E",
+              description: text.slice(0, 400),
+              system_prompt: `用户自定义方向：${text}`,
+            });
+            await refreshAgentsAfterOnboarding();
+          } catch (err) {
+            setError(err instanceof Error ? err.message : "初始化助手失败");
+          }
+        }
+        await send(text);
+      })();
+    },
+    [primaryAgent, refreshAgentsAfterOnboarding, send]
+  );
 
   const mentionMembers = useMemo(() => mentionMembersOf(agents, memberIds), [agents, memberIds]);
 
@@ -393,7 +443,7 @@ export default function ChatScreen(): JSX.Element {
         {!loading && messages.length === 0 && !streaming ? (
           <BotOnboarding
             onSelectOption={onOnboardingOption}
-            onCustomSubmit={(t) => void send(t)}
+            onCustomSubmit={onOnboardingCustom}
             onDismiss={() => void dismissOnboarding()}
           />
         ) : null}

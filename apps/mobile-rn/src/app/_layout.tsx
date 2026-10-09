@@ -4,6 +4,7 @@ import type { JSX } from "react";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { ConfirmProvider } from "@/components/ConfirmDialog";
+import { RealtimeProvider } from "@/providers/realtime";
 import { SecretPromptProvider } from "@/providers/secretPrompt";
 import { SessionProvider } from "@/providers/session";
 
@@ -30,15 +31,19 @@ export default function RootLayout(): JSX.Element {
         <SessionProvider>
           {/* ConfirmProvider 必须挂 —— 所有破坏性操作都走 useConfirm()，缺了会直接 throw */}
           <ConfirmProvider>
-            {/* 密钥授权是全局的：助手随时可能发起请求，和当前在哪个页面无关 */}
-            <SecretPromptProvider>
-              <Stack screenOptions={{ headerShown: false }}>
-                <Stack.Screen name="login" />
-                <Stack.Screen name="chats" />
-                <Stack.Screen name="collab" />
-                <Stack.Screen name="settings" />
-              </Stack>
-            </SecretPromptProvider>
+            {/* 全局实时通道：在线绿点、presence、跨端表情、群聊他人回复 */}
+            <RealtimeProvider>
+              {/* 密钥授权是全局的：助手随时可能发起请求，和当前在哪个页面无关 */}
+              <SecretPromptProvider>
+                <Stack screenOptions={{ headerShown: false }}>
+                  <Stack.Screen name="login" />
+                  <Stack.Screen name="chats" />
+                  <Stack.Screen name="collab" />
+                  <Stack.Screen name="settings" />
+                  <Stack.Screen name="train" />
+                </Stack>
+              </SecretPromptProvider>
+            </RealtimeProvider>
           </ConfirmProvider>
         </SessionProvider>
       </HeroUINativeProvider>

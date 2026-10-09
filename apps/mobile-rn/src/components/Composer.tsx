@@ -9,6 +9,11 @@ import { validateAttachment, type PickedFile } from "@/lib/attachments";
 
 export type MentionMember = { id: string; name: string; description?: string };
 
+/** 被引用的消息；聊天页把它渲染成作曲框上方的引用条。 */
+export type QuoteTarget = { id: string; role: string; agentName?: string; content: string };
+
+export type SkillOption = { name: string; description?: string };
+
 type Props = {
   value: string;
   onChange: (value: string) => void;
@@ -26,15 +31,41 @@ type Props = {
   agentName?: string;
   /** 群聊时传入成员，启用 @ 点名 */
   mentionMembers?: MentionMember[];
+  /** 单聊时也能 @ 其它助手 —— Web 端叫「转交」，插入同样的 @名字 */
+  dmCandidates?: MentionMember[];
+  /** 群聊才提供 @所有人 */
+  allowEveryone?: boolean;
+  /** `/` 补全用：本 Bot 已启用的技能 */
+  skills?: SkillOption[];
+  /** `@routine:` 补全用 */
+  routines?: { name: string }[];
+  /** `@mcp:` 补全用 */
+  mcpServers?: { name: string }[];
+  /** 引用回复；非空时作曲框上方显示引用条 */
+  replyTo?: QuoteTarget | null;
+  onCancelReply?: () => void;
   /** 附件上传中，禁用一切交互 */
   busy?: boolean;
 };
 
 type MentionState = { start: number; query: string };
 
+/** `@` 候选。插入文本与 Web 端保持一致，后端按这些字面量解析。 */
+type MentionOption = {
+  key: string;
+  name: string;
+  sub?: string;
+  insert: string;
+  /** 助手候选才画头像 */
+  agentId?: string;
+};
+
 /**
  * 识别光标前的 `@`。规则照搬 Web 端 `detectMention`：
  * `@` 必须在行首或空白之后，且 `@` 与光标之间不能有空白。
+ *
+ * `@routine:` / `@mcp:` 里的冒号与斜杠不算空白，所以同一套规则天然覆盖，
+ * 不需要为它们再开一条分支。
  */
 function detectMention(value: string, caret: number): MentionState | null {
   const before = value.slice(0, caret);
@@ -47,6 +78,23 @@ function detectMention(value: string, caret: number): MentionState | null {
   const query = before.slice(at + 1);
   if (/\s/.test(query)) return null;
   return { start: at, query };
+}
+
+/**
+ * 识别光标前的 `/`，用于技能补全。规则与 `@` 对称：
+ * 必须在行首（`/foo`）或空白之后（`帮我 /foo`），且中间没有空白。
+ */
+function detectSlash(value: string, caret: number): MentionState | null {
+  const before = value.slice(0, caret);
+  const slash = before.lastIndexOf("/");
+  if (slash < 0) return null;
+  if (slash > 0) {
+    const prev = before[slash - 1];
+    if (prev && !/\s/.test(prev)) return null;
+  }
+  const query = before.slice(slash + 1);
+  if (/\s/.test(query)) return null;
+  return { start: slash, query };
 }
 
 /** 单个助手头像，和 Web 端 `AgentAvatar` 取色一致。 */
@@ -86,43 +134,119 @@ export function Composer({
   disabled,
   agentName,
   mentionMembers,
+  dmCandidates,
+  allowEveryone,
+  skills = [],
+  routines = [],
+  mcpServers = [],
+  replyTo,
+  onCancelReply,
   busy,
 }: Props): JSX.Element {
   const [mention, setMention] = useState<MentionState | null>(null);
+  const [slash, setSlash] = useState<MentionState | null>(null);
   const [caret, setCaret] = useState(0);
 
   const canSend = Boolean(value.trim() || files.length > 0);
   const locked = Boolean(disabled || busy);
 
-  const mentionOptions: MentionMember[] = (() => {
-    if (!mention || !mentionMembers?.length) return [];
+  const mentionOptions: MentionOption[] = (() => {
+    if (!mention) return [];
     const q = mention.query.trim().toLowerCase();
-    if (!q) return mentionMembers.slice(0, 8);
-    return mentionMembers
+
+    const agents: MentionOption[] = (mentionMembers ?? []).map((m) => ({
+      key: `agent:${m.id}`,
+      name: m.name,
+      sub: `@${m.id}`,
+      insert: `@${m.name} `,
+      agentId: m.id,
+    }));
+    const dm: MentionOption[] = (dmCandidates ?? [])
+      .filter((m) => !(mentionMembers ?? []).some((x) => x.id === m.id))
+      .map((m) => ({
+        key: `dm:${m.id}`,
+        name: m.name,
+        sub: "转交给这个助手",
+        insert: `@${m.name} `,
+        agentId: m.id,
+      }));
+    const everyone: MentionOption[] = allowEveryone
+      ? [
+          { key: "everyone", name: "@所有人", sub: "全体成员都回复", insert: "@everyone " },
+          { key: "all", name: "@all", sub: "同 @所有人", insert: "@all " },
+        ]
+      : [];
+    const routine: MentionOption[] =
+      q.startsWith("routine:") || !q
+        ? routines.map((r) => ({
+            key: `routine:${r.name}`,
+            name: `例行：${r.name}`,
+            sub: "@routine:",
+            insert: `@routine:${r.name} `,
+          }))
+        : [];
+    const mcp: MentionOption[] =
+      q.startsWith("mcp:") || !q
+        ? mcpServers.map((s) => ({
+            key: `mcp:${s.name}`,
+            name: `插件：${s.name}`,
+            sub: "@mcp:",
+            insert: `@mcp:${s.name} `,
+          }))
+        : [];
+
+    const all = [...agents, ...dm, ...everyone, ...routine, ...mcp];
+    if (!q) return all.slice(0, 10);
+    return all
+      .filter((o) => o.name.toLowerCase().includes(q) || (o.sub ?? "").toLowerCase().includes(q))
+      .slice(0, 10);
+  })();
+
+  const slashOptions: SkillOption[] = (() => {
+    if (!slash || skills.length === 0) return [];
+    const q = slash.query.trim().toLowerCase();
+    if (!q) return skills.slice(0, 8);
+    return skills
       .filter(
-        (m) =>
-          m.name.toLowerCase().includes(q) ||
-          m.id.toLowerCase().includes(q) ||
-          (m.description || "").toLowerCase().includes(q)
+        (s) => s.name.toLowerCase().includes(q) || (s.description ?? "").toLowerCase().includes(q)
       )
       .slice(0, 8);
   })();
 
-  const applyMention = (member: MentionMember): void => {
+  const applyMention = (option: MentionOption): void => {
     if (!mention) return;
-    const insert = `@${member.name} `;
     const before = value.slice(0, mention.start);
     const after = value.slice(caret);
-    const next = before + insert + after;
-    onChange(next);
+    onChange(before + option.insert + after);
     setMention(null);
   };
 
+  /**
+   * `/` 补全插入的是一句提示而不是裸路径 —— 后端把 `@mcp:` / `@routine:` 当作
+   * 作曲框提示文案，真正的执行仍走 Bot 自己的工具（见 docs/缺口与下一批.md）。
+   * 技能同理，插入「请 load_skill X」让助手自己决定怎么用。
+   */
+  const applySlash = (skill: SkillOption): void => {
+    if (!slash) return;
+    const before = value.slice(0, slash.start);
+    const after = value.slice(caret);
+    onChange(`${before}请 load_skill ${skill.name} ${after}`);
+    setSlash(null);
+  };
+
+  const hasMentionSources =
+    Boolean(mentionMembers?.length) ||
+    Boolean(dmCandidates?.length) ||
+    Boolean(allowEveryone) ||
+    routines.length > 0 ||
+    mcpServers.length > 0;
+
   const handleChange = (next: string): void => {
     onChange(next);
-    if (mentionMembers?.length) {
+    if (hasMentionSources) {
       setMention(detectMention(next, caret));
     }
+    setSlash(skills.length > 0 ? detectSlash(next, caret) : null);
   };
 
   const placeholder = mentionMembers?.length
@@ -131,6 +255,25 @@ export function Composer({
 
   return (
     <View className="gap-2 px-4 pt-3">
+      {/* 引用条。被引用的消息在发送后会带上 reply_to_id，助手能看到上下文。 */}
+      {replyTo ? (
+        <View className="flex-row items-center gap-2 rounded-xl bg-surface-secondary py-1.5 pr-1 pl-3">
+          <View className="flex-1 gap-0.5">
+            <Typography.Paragraph className="text-[10px] text-muted">
+              {replyTo.role === "user" ? "引用你的消息" : `引用 ${replyTo.agentName || "助手"}`}
+            </Typography.Paragraph>
+            <Typography.Paragraph className="text-xs" numberOfLines={1}>
+              {replyTo.content}
+            </Typography.Paragraph>
+          </View>
+          <CloseButton
+            isDisabled={sending || busy}
+            onPress={() => onCancelReply?.()}
+            accessibilityLabel="取消引用"
+          />
+        </View>
+      ) : null}
+
       {files.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View className="flex-row gap-2 pr-2">
@@ -172,19 +315,53 @@ export function Composer({
       {mention && mentionOptions.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View className="flex-row gap-2 pr-2">
-            {mentionOptions.map((m) => (
+            {mentionOptions.map((o) => (
               <Pressable
-                key={m.id}
-                onPress={() => applyMention(m)}
+                key={o.key}
+                onPress={() => applyMention(o)}
                 accessibilityRole="button"
+                accessibilityLabel={`插入 ${o.name}`}
                 className="flex-row items-center gap-2 rounded-xl bg-surface-secondary px-3 py-1.5"
               >
-                <MentionAvatar member={m} />
+                {o.agentId ? (
+                  <MentionAvatar member={{ id: o.agentId, name: o.name }} />
+                ) : (
+                  <Icon name="at-outline" size={16} tone="muted" />
+                )}
                 <View>
-                  <Typography.Paragraph className="text-xs">{m.name}</Typography.Paragraph>
-                  <Typography.Paragraph color="muted" className="text-[10px]">
-                    @{m.id}
-                  </Typography.Paragraph>
+                  <Typography.Paragraph className="text-xs">{o.name}</Typography.Paragraph>
+                  {o.sub ? (
+                    <Typography.Paragraph color="muted" className="text-[10px]">
+                      {o.sub}
+                    </Typography.Paragraph>
+                  ) : null}
+                </View>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
+      ) : null}
+
+      {/* `/` 技能补全。插入的是「请 load_skill X」，最终由助手自己决定怎么用。 */}
+      {slash && slashOptions.length > 0 ? (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View className="flex-row gap-2 pr-2">
+            {slashOptions.map((s) => (
+              <Pressable
+                key={s.name}
+                onPress={() => applySlash(s)}
+                accessibilityRole="button"
+                accessibilityLabel={`使用技能 ${s.name}`}
+                className="max-w-56 flex-row items-center gap-2 rounded-xl bg-surface-secondary px-3 py-1.5"
+              >
+                <Icon name="flash-outline" size={16} tone="muted" />
+                <View className="flex-1">
+                  <Typography.Paragraph className="text-xs">{s.name}</Typography.Paragraph>
+                  {s.description ? (
+                    <Typography.Paragraph color="muted" className="text-[10px]" numberOfLines={1}>
+                      {s.description}
+                    </Typography.Paragraph>
+                  ) : null}
                 </View>
               </Pressable>
             ))}
@@ -233,9 +410,10 @@ export function Composer({
           onSelectionChange={(e) => {
             const next = e.nativeEvent.selection.end;
             setCaret(next);
-            if (mentionMembers?.length) {
+            if (hasMentionSources) {
               setMention(detectMention(value, next));
             }
+            setSlash(skills.length > 0 ? detectSlash(value, next) : null);
           }}
           placeholder={placeholder}
           multiline
