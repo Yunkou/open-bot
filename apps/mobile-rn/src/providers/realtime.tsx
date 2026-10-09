@@ -60,12 +60,33 @@ const RealtimeContext = createContext<RealtimeState | null>(null);
 
 const RECONNECT_MS = 3000;
 
+/** 登出后展示用的空表。模块级常量，保证引用稳定，不会让下游 memo 失效。 */
+const EMPTY_MAP_BOOL: Record<string, boolean> = {};
+const EMPTY_MAP_STR: Record<string, string> = {};
+
 export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Element {
   const { user } = useSession();
+  const userId = user?.id ?? null;
+
+  /**
+   * 状态连同它属于哪个用户一起存。
+   *
+   * 退出登录时不必在 effect 里同步清空 —— 读的时候比对 `userId` 即可：
+   * 上一位用户的在线状态天然不可见，下一位登录也不会看到串号数据。
+   * 这比「登出就 setState({})」少一次级联渲染，也不用写 eslint-disable。
+   */
+  const [state, setState] = useState<{
+    userId: string | null;
+    online: Record<string, boolean>;
+    presence: Record<string, string>;
+    hostActivity: string | null;
+  }>({ userId: null, online: {}, presence: {}, hostActivity: null });
+
   const [connected, setConnected] = useState(false);
-  const [online, setOnline] = useState<Record<string, boolean>>({});
-  const [presence, setPresence] = useState<Record<string, string>>({});
-  const [hostActivity, setHostActivity] = useState<string | null>(null);
+
+  const online = state.userId === userId ? state.online : EMPTY_MAP_BOOL;
+  const presence = state.userId === userId ? state.presence : EMPTY_MAP_STR;
+  const hostActivity = state.userId === userId ? state.hostActivity : null;
 
   const listenersRef = useRef(new Set<(evt: ChatServerEvent) => void>());
   const socketRef = useRef<WebSocket | null>(null);
@@ -90,15 +111,12 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
   }, []);
 
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       socketRef.current?.close();
       socketRef.current = null;
-      setConnected(false);
-      setOnline({});
-      setPresence({});
-      setHostActivity(null);
       return;
     }
+    const scope = userId;
 
     let disposed = false;
     const generation = ++generationRef.current;
@@ -147,17 +165,32 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
         switch (evt.type) {
           case "bot_online": {
             const e = evt as BotOnlineEvent;
-            setOnline((prev) => ({ ...prev, [e.agent_id]: e.online }));
+            setState((prev) => ({
+              ...prev,
+              userId: scope,
+              online: { ...(prev.userId === scope ? prev.online : {}), [e.agent_id]: e.online },
+            }));
             break;
           }
           case "bot_presence": {
             const e = evt as BotPresenceEvent;
-            setPresence((prev) => ({ ...prev, [e.agent_id]: e.status }));
+            setState((prev) => ({
+              ...prev,
+              userId: scope,
+              presence: {
+                ...(prev.userId === scope ? prev.presence : {}),
+                [e.agent_id]: e.status,
+              },
+            }));
             break;
           }
           case "host_activity": {
             const e = evt as { active: boolean; label?: string };
-            setHostActivity(e.active ? (e.label ?? "正在操作中") : null);
+            setState((prev) => ({
+              ...prev,
+              userId: scope,
+              hostActivity: e.active ? (e.label ?? "正在操作中") : null,
+            }));
             break;
           }
           default:
@@ -203,7 +236,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [user, emit]);
+  }, [userId, emit]);
 
   const value = useMemo<RealtimeState>(
     () => ({ connected, online, presence, hostActivity, subscribe }),

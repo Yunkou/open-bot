@@ -623,8 +623,8 @@ export type Machine = {
   status: "online" | "offline" | string;
   /** 「在这台电脑上执行」策略。 */
   exec_policy?: "allow" | "ask" | "deny" | string;
-  /** 手机等仅登录设备：不能作为执行通道。 */
-  device_type?: "host" | "login_only" | string;
+  /** 后端枚举 desktop|mobile：手机是「仅登录」设备，不能作为执行通道。 */
+  device_type?: "desktop" | "mobile" | string;
   last_seen: string;
   created_at: string;
   updated_at?: string;

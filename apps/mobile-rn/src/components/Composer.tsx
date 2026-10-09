@@ -372,7 +372,10 @@ export function Composer({
       <View className="flex-row items-end gap-1">
         {/* 附件入口同时是底部动作表的 trigger —— 一个控件两段语义，
             比「点加号 → 弹 Dialog → 再选来源」少一次往返。 */}
-        <Menu>
+        {/* presentation 必须和 Menu.Content 一致：heroui-native 在 __DEV__ 下
+            会校验两者相等，不等直接 throw。Root 的默认值是 popover，
+            而这里要的是底部动作表，两处都得显式写。 */}
+        <Menu presentation="bottom-sheet">
           <Menu.Trigger isDisabled={locked || sending}>
             <Button
               isIconOnly

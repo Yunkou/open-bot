@@ -13,11 +13,13 @@ import { formatRelativeTime } from "@/lib/format";
 /**
  * 模型（LLM）连接管理。行为对齐 `apps/web/src/App.tsx` 的 `settingsTab === "llm"` 分区。
  *
- * 与 Web 端的两点结构差异：
+ * 与 Web 端的三点结构差异：
  * 1. Web 是「列表 + 同一个表单」上下排布，RN 上沿用同样结构 —— 移动端表单在下方，
  *    滚动到底部即可编辑，不需要再开一个二级路由。
  * 2. 密钥字段在服务端永不明文回传（只有 `api_key_set` / `api_key_hint`），
  *    所以编辑态的 api_key 一律从空串开始，留空代表「不修改」。
+ * 3. tools 能力的检测与保存校验完全对齐 Web：勾了 enable_tools 却拿不到支持时，
+ *    保存直接被拒（而不是先存进去再让用户去聊天里踩坑）。
  */
 
 /** 新建时的表单默认值，与 Web 端 `emptyLLMForm` 保持一致。 */
@@ -48,6 +50,10 @@ export default function LlmSettingsScreen(): JSX.Element {
   const [errors, setErrors] = useState<FieldErrors>({});
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  /** tools 探测中：与普通保存共用 busy 会让「检测」按钮跟着一起禁用，读起来像卡死 */
+  const [probing, setProbing] = useState(false);
+  /** 最近一次探测的中文结论，独立于 msg 显示，免得被下一次保存结果冲掉 */
+  const [probeMsg, setProbeMsg] = useState("");
 
   const load = useCallback(async (): Promise<LLMConnection[]> => {
     try {
@@ -77,6 +83,7 @@ export default function LlmSettingsScreen(): JSX.Element {
     setForm({ ...emptyLLMForm, is_default: !hasAny });
     setErrors({});
     setMsg("");
+    setProbeMsg("");
   }
 
   function patch(next: Partial<LLMInput>): void {
@@ -96,7 +103,42 @@ export default function LlmSettingsScreen(): JSX.Element {
       context_window: c.context_window ?? null,
     });
     setErrors({});
+    setProbeMsg("");
     setMsg(c.api_key_set ? `已保存密钥 ${c.api_key_hint || ""}（留空则不修改）` : "");
+  }
+
+  /**
+   * 探测当前表单的 tools / function calling 能力。
+   *
+   * 与 Web 的 `probeLLMFormTools` 同参数：编辑态传 `connection_id`，
+   * 让服务端复用已存的密钥（表单里此时是空的）。
+   */
+  async function probeTools(): Promise<{ ok: boolean; text: string }> {
+    setProbing(true);
+    setMsg("");
+    try {
+      const probe = await api.probeLLMTools({
+        base_url: form.base_url,
+        model: form.model,
+        ...(form.api_key?.trim() ? { api_key: form.api_key.trim() } : {}),
+        ...(editingId ? { connection_id: editingId } : {}),
+      });
+      const text = api.formatLLMToolsProbe(probe);
+      // 检测到不支持就把勾去掉：留着会让用户以为已经开着
+      if (!probe.can_enable_tools && form.enable_tools) {
+        setForm((prev) => ({ ...prev, enable_tools: false }));
+      }
+      setProbeMsg(text);
+      setMsg(text);
+      return { ok: probe.can_enable_tools, text };
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      setProbeMsg(text);
+      setMsg(text);
+      return { ok: false, text };
+    } finally {
+      setProbing(false);
+    }
   }
 
   async function save(): Promise<void> {
@@ -106,6 +148,18 @@ export default function LlmSettingsScreen(): JSX.Element {
       return;
     }
     setErrors({});
+
+    // 勾了 tools 但上游不支持时**拒绝保存**（与 Web 的 saveLLM 同一口径）。
+    // 存进去的后果是聊天时模型收不到工具定义，表现为工具调用静默失效，
+    // 排查成本远高于在这里多问一次上游。
+    if (form.enable_tools) {
+      const probe = await probeTools();
+      if (!probe.ok) {
+        setMsg(`已取消保存：${probe.text}`);
+        return;
+      }
+    }
+
     setBusy(true);
     setMsg("");
     try {
@@ -303,11 +357,19 @@ export default function LlmSettingsScreen(): JSX.Element {
             onValueChange={(v) => patch({ is_default: v })}
           />
 
+          {probeMsg ? <Typography.Paragraph color="muted">{probeMsg}</Typography.Paragraph> : null}
           {msg ? <Typography.Paragraph color="muted">{msg}</Typography.Paragraph> : null}
 
           <View className="flex-row gap-3">
-            <Button isDisabled={busy} onPress={() => void save()}>
+            <Button isDisabled={busy || probing} onPress={() => void save()}>
               <Button.Label>{busy ? "保存中…" : "保存"}</Button.Label>
+            </Button>
+            <Button
+              variant="secondary"
+              isDisabled={busy || probing}
+              onPress={() => void probeTools()}
+            >
+              <Button.Label>{probing ? "检测中…" : "检测 tools 能力"}</Button.Label>
             </Button>
             {editingId ? (
               <Button

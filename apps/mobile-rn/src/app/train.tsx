@@ -1,4 +1,4 @@
-import { Button, Dialog, Separator, Spinner, Typography } from "heroui-native";
+import { Button, Dialog, Spinner, Typography } from "heroui-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import type { JSX } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -7,7 +7,7 @@ import { ScrollView, View } from "react-native";
 import * as api from "@/api";
 import type { BotLesson, LessonStatus } from "@/api/types";
 import { useConfirm } from "@/components/ConfirmDialog";
-import { FormField, SectionTitle } from "@/components/FormField";
+import { FormField } from "@/components/FormField";
 import { ScreenHeader } from "@/components/ScreenScaffold";
 import { EmptyState, ErrorAlert, ListSkeleton } from "@/components/states";
 import { formatRelativeTime } from "@/lib/format";
@@ -68,6 +68,10 @@ export default function TrainScreen(): JSX.Element {
   }, [id]);
 
   useEffect(() => {
+    // 豁免 react-hooks/set-state-in-effect：load 内的 setState 全部发生在
+    // `await api.listAgentLessons()` 之后（网络往返完成才写状态），
+    // 不是渲染期同步更新。规则无法跨 async 边界证明这点，只能显式说明。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
