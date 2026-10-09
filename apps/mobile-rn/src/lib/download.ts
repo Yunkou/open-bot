@@ -26,7 +26,9 @@ export class ShareUnavailableError extends Error {
 
 function safeFileName(name: string): string {
   // 文件名里不能带路径分隔符，否则 File 构造会把它当子目录
-  const base = previewTitleFromPath(name).replace(/[/\\:*?"<>|]/g, "_").trim();
+  const base = previewTitleFromPath(name)
+    .replace(/[/\\:*?"<>|]/g, "_")
+    .trim();
   return base || "download";
 }
 

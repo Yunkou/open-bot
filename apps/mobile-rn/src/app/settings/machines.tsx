@@ -76,7 +76,6 @@ function errText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
 }
 
-
 export default function MachinesScreen(): JSX.Element {
   const { confirm } = useConfirm();
 
@@ -251,8 +250,8 @@ export default function MachinesScreen(): JSX.Element {
     >
       {/* 这条说明必须常驻：RN 端最容易误解的就是「手机上也能让 Bot 执行命令」 */}
       <Typography.Paragraph color="muted">
-        浏览器与手机都不能作为执行通道 —— 本地文件和命令只会在已连接的**电脑**上跑。
-        当前客户端：{client.platform} / {client.app}
+        浏览器与手机都不能作为执行通道 —— 本地文件和命令只会在已连接的**电脑**上跑。 当前客户端：
+        {client.platform} / {client.app}
         {AUTO_REGISTER ? "（手机，可登记为仅登录设备）" : "（浏览器，不登记）"}。
       </Typography.Paragraph>
 
@@ -356,7 +355,9 @@ export default function MachinesScreen(): JSX.Element {
                     <Chip
                       key={opt.value}
                       size="sm"
-                      variant={normalizePolicy(self.exec_policy) === opt.value ? "soft" : "secondary"}
+                      variant={
+                        normalizePolicy(self.exec_policy) === opt.value ? "soft" : "secondary"
+                      }
                       color={normalizePolicy(self.exec_policy) === opt.value ? "accent" : "default"}
                       disabled={busy}
                       onPress={() => void setPolicy(self, opt.value)}
@@ -440,9 +441,7 @@ export default function MachinesScreen(): JSX.Element {
                     </View>
                   ) : (
                     <>
-                      {[m.platform, m.os, m.arch, m.app, m.app_version]
-                        .filter(Boolean)
-                        .join(" · ")}
+                      {[m.platform, m.os, m.arch, m.app, m.app_version].filter(Boolean).join(" · ")}
                       {m.device_type ? ` · ${m.device_type}` : ""}
                       {` · 策略 ${policyLabel(m.exec_policy)}`}
                       {m.last_seen ? ` · 最近 ${formatRelativeTime(m.last_seen)}` : ""}
@@ -459,9 +458,7 @@ export default function MachinesScreen(): JSX.Element {
                         variant={
                           normalizePolicy(m.exec_policy) === opt.value ? "soft" : "secondary"
                         }
-                        color={
-                          normalizePolicy(m.exec_policy) === opt.value ? "accent" : "default"
-                        }
+                        color={normalizePolicy(m.exec_policy) === opt.value ? "accent" : "default"}
                         disabled={busy}
                         onPress={() => void setPolicy(m, opt.value)}
                         accessibilityRole="button"
@@ -518,4 +515,3 @@ export default function MachinesScreen(): JSX.Element {
     </ScreenScaffold>
   );
 }
-

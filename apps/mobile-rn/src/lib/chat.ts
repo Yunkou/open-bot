@@ -63,3 +63,67 @@ export function firstAttachmentIssue(files: PickedFile[]): string | null {
   }
   return null;
 }
+
+/* ------------------------------------------------------------------ 图表分段 */
+
+/**
+ * 把一条助手回复切成「正文 / 图表」交替的片段，**保持原始顺序**。
+ *
+ * 为什么不能简单地「正文照渲染、图表堆到末尾」：助手经常先讲结论再给图，
+ * 堆到末尾会让图和解释它的文字脱节。所以这里按围栏出现的位置切段，
+ * 渲染时逐段输出，图的相对位置就和助手写出来的顺序一致。
+ *
+ * 规则对齐 Web 端 `lib/mermaidFence.ts`：
+ * - 围栏标记是 3 个以上反引号或波浪号
+ * - 语言标注只认 mermaid / html（大小写不敏感）
+ * - 没闭合的围栏（流式输出中很常见）也切出来，但标记 pending —— 卡片据此
+ *   提示「生成中」，而不是把半截源码当完整图表渲染
+ */
+export type ContentSegment =
+  | { kind: "text"; text: string }
+  | { kind: "diagram"; lang: "mermaid" | "html"; source: string; pending: boolean };
+
+const DIAGRAM_LANGS = new Set(["mermaid", "html"]);
+
+export function splitDiagrams(content: string): ContentSegment[] {
+  const text = content || "";
+  if (!text) return [];
+
+  // 开围栏：行首 0-3 个空格 + 3+ 个 ` 或 ~ + 语言
+  const open = /^ {0,3}(`{3,}|~{3,})[ \t]*(mermaid|html)[ \t]*$/gim;
+  const segments: ContentSegment[] = [];
+  let cursor = 0;
+  let m: RegExpExecArray | null;
+
+  while ((m = open.exec(text)) !== null) {
+    const marker = m[1]!;
+    const lang = m[2]!.toLowerCase() as "mermaid" | "html";
+    if (!DIAGRAM_LANGS.has(lang)) continue;
+
+    const bodyStart = m.index + m[0].length + 1; // +1 跳过围栏行尾换行
+    const close = new RegExp(
+      `^ {0,3}${marker[0] === "`" ? "`" : "~"}{${marker.length},}[ \\t]*$`,
+      "m"
+    );
+    const rest = text.slice(bodyStart);
+    const end = close.exec(rest);
+
+    if (m.index > cursor) {
+      segments.push({ kind: "text", text: text.slice(cursor, m.index) });
+    }
+    segments.push({
+      kind: "diagram",
+      lang,
+      source: (end ? rest.slice(0, end.index) : rest).replace(/\n$/, ""),
+      pending: !end,
+    });
+
+    cursor = end ? bodyStart + end.index + end[0].length : text.length;
+    open.lastIndex = cursor;
+  }
+
+  if (cursor < text.length) {
+    segments.push({ kind: "text", text: text.slice(cursor) });
+  }
+  return segments;
+}

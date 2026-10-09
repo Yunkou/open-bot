@@ -329,7 +329,11 @@ export default function CollabScreen(): JSX.Element {
       }
       empty={
         messages.length === 0 ? (
-          <EmptyState icon="chatbubbles-outline" title="还没有协作消息" hint="在下方选一个助手，往总线上投递一条消息" />
+          <EmptyState
+            icon="chatbubbles-outline"
+            title="还没有协作消息"
+            hint="在下方选一个助手，往总线上投递一条消息"
+          />
         ) : undefined
       }
     >

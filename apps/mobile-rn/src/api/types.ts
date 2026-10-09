@@ -55,12 +55,7 @@ export type AgentPatch = Partial<AgentInput>;
 
 /* ------------------------------------------------------------------ 形象 / 在线 */
 
-export type BotPresenceStatus =
-  | "idle"
-  | "thinking"
-  | "working"
-  | "awaiting_approval"
-  | "error";
+export type BotPresenceStatus = "idle" | "thinking" | "working" | "awaiting_approval" | "error";
 
 export type BotPresenceEvent = {
   type?: "bot_presence" | string;
@@ -120,17 +115,7 @@ export type ReactionSummary = {
 };
 
 /** P0 白名单，需与后端 AllowedReactionEmojis 保持一致。 */
-export const REACTION_EMOJIS = [
-  "👍",
-  "❤️",
-  "😂",
-  "🎉",
-  "👀",
-  "🙏",
-  "✅",
-  "❌",
-  "👎",
-] as const;
+export const REACTION_EMOJIS = ["👍", "❤️", "😂", "🎉", "👀", "🙏", "✅", "❌", "👎"] as const;
 
 /** 在助手回复上新增这几个表情会顺带弹出反馈弹窗（仅新增时；取消不触发）。 */
 export const NEGATIVE_REACTION_EMOJIS = ["👎", "❌"] as const;

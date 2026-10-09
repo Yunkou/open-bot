@@ -41,9 +41,6 @@ type Props = {
   routines?: { name: string }[];
   /** `@mcp:` 补全用 */
   mcpServers?: { name: string }[];
-  /** 引用回复；非空时作曲框上方显示引用条 */
-  replyTo?: QuoteTarget | null;
-  onCancelReply?: () => void;
   /** 附件上传中，禁用一切交互 */
   busy?: boolean;
 };
@@ -105,10 +102,7 @@ function MentionAvatar({ member }: { member: MentionMember }): JSX.Element {
       className="size-6 items-center justify-center rounded-full"
       style={{ backgroundColor: bg }}
     >
-      <Typography.Paragraph
-        className="text-[10px]"
-        style={{ color: avatarForeground(bg) }}
-      >
+      <Typography.Paragraph className="text-[10px]" style={{ color: avatarForeground(bg) }}>
         {avatarInitials(member.name)}
       </Typography.Paragraph>
     </View>
@@ -139,8 +133,6 @@ export function Composer({
   skills = [],
   routines = [],
   mcpServers = [],
-  replyTo,
-  onCancelReply,
   busy,
 }: Props): JSX.Element {
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -255,25 +247,6 @@ export function Composer({
 
   return (
     <View className="gap-2 px-4 pt-3">
-      {/* 引用条。被引用的消息在发送后会带上 reply_to_id，助手能看到上下文。 */}
-      {replyTo ? (
-        <View className="flex-row items-center gap-2 rounded-xl bg-surface-secondary py-1.5 pr-1 pl-3">
-          <View className="flex-1 gap-0.5">
-            <Typography.Paragraph className="text-[10px] text-muted">
-              {replyTo.role === "user" ? "引用你的消息" : `引用 ${replyTo.agentName || "助手"}`}
-            </Typography.Paragraph>
-            <Typography.Paragraph className="text-xs" numberOfLines={1}>
-              {replyTo.content}
-            </Typography.Paragraph>
-          </View>
-          <CloseButton
-            isDisabled={sending || busy}
-            onPress={() => onCancelReply?.()}
-            accessibilityLabel="取消引用"
-          />
-        </View>
-      ) : null}
-
       {files.length > 0 ? (
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
           <View className="flex-row gap-2 pr-2">

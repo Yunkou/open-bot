@@ -148,7 +148,13 @@ function AgentForm({
           <View className="gap-2.5">
             <SectionTitle>形象</SectionTitle>
             <View className="flex-row items-center gap-3">
-              <AgentAvatar id={agent?.id} name={previewName} size={48} shape={shape} color={color} />
+              <AgentAvatar
+                id={agent?.id}
+                name={previewName}
+                size={48}
+                shape={shape}
+                color={color}
+              />
               <Typography.Paragraph color="muted" className="flex-1 text-xs">
                 选一个剪影和主色，桌面和手机上会显示成同一个样子。
               </Typography.Paragraph>

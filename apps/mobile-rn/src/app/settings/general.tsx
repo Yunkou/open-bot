@@ -126,7 +126,12 @@ export default function GeneralSettingsScreen(): JSX.Element {
     if (!when || !settings) return;
     setDraftWhen("");
     void persist(
-      { auto_review_rules: [...settings.auto_review_rules, { id: newRuleId(), when, action: draftAction }] },
+      {
+        auto_review_rules: [
+          ...settings.auto_review_rules,
+          { id: newRuleId(), when, action: draftAction },
+        ],
+      },
       "已添加规则"
     );
   }

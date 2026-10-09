@@ -243,11 +243,7 @@ export default function ChatsScreen(): JSX.Element {
   const visibleAgents = useMemo(
     () =>
       agentRows.filter((r) =>
-        matchQuery(query, [
-          r.title,
-          r.subtitle,
-          agents.find((a) => a.id === r.id)?.description,
-        ])
+        matchQuery(query, [r.title, r.subtitle, agents.find((a) => a.id === r.id)?.description])
       ),
     [agentRows, agents, query]
   );
@@ -291,7 +287,9 @@ export default function ChatsScreen(): JSX.Element {
             <Menu.Trigger>
               <Avatar className="ml-1">
                 <Avatar.Fallback>
-                  <Typography.Paragraph weight="medium">{user?.username?.[0] ?? "?"}</Typography.Paragraph>
+                  <Typography.Paragraph weight="medium">
+                    {user?.username?.[0] ?? "?"}
+                  </Typography.Paragraph>
                 </Avatar.Fallback>
               </Avatar>
             </Menu.Trigger>
@@ -329,7 +327,9 @@ export default function ChatsScreen(): JSX.Element {
           />
         }
       >
-        {error ? <ErrorAlert title="出了点问题" description={error} onRetry={() => void load()} /> : null}
+        {error ? (
+          <ErrorAlert title="出了点问题" description={error} onRetry={() => void load()} />
+        ) : null}
 
         {/* 搜索。助手看名称 / 描述 / 最后一条摘要，群聊看名称 —— 与 Web 端侧边栏一致。 */}
         <View className="flex-row items-center gap-2 rounded-2xl border border-border bg-surface px-3">
@@ -433,7 +433,9 @@ export default function ChatsScreen(): JSX.Element {
                 <RowGroup
                   rows={visibleAgents}
                   busyId={openingId}
-                  onOpen={(item) => void (item.kind === "channel" ? openChannel(item.id) : openAgent(item.id))}
+                  onOpen={(item) =>
+                    void (item.kind === "channel" ? openChannel(item.id) : openAgent(item.id))
+                  }
                   onEdit={(item) => {
                     const target = agents.find((a) => a.id === item.id);
                     if (!target) return;

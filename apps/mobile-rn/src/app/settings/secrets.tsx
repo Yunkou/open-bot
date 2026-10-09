@@ -175,7 +175,11 @@ export default function SecretsScreen(): JSX.Element {
       error={error}
       empty={
         requests.length === 0 && secrets.length === 0 ? (
-          <EmptyState icon="key-outline" title="还没有密钥" hint="在下方添加一个助手需要访问的凭据" />
+          <EmptyState
+            icon="key-outline"
+            title="还没有密钥"
+            hint="在下方添加一个助手需要访问的凭据"
+          />
         ) : undefined
       }
       onRetry={() => void load()}

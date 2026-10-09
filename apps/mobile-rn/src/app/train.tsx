@@ -97,21 +97,18 @@ export default function TrainScreen(): JSX.Element {
 
   const filtered = useMemo(() => lessons.filter((l) => l.status === tab), [lessons, tab]);
 
-  const patchStatus = useCallback(
-    async (lessonId: string, status: LessonStatus): Promise<void> => {
-      setBusy(true);
-      setError(null);
-      try {
-        const updated = await api.updateLesson(lessonId, { status });
-        setLessons((prev) => prev.map((l) => (l.id === lessonId ? updated : l)));
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "更新失败");
-      } finally {
-        setBusy(false);
-      }
-    },
-    []
-  );
+  const patchStatus = useCallback(async (lessonId: string, status: LessonStatus): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await api.updateLesson(lessonId, { status });
+      setLessons((prev) => prev.map((l) => (l.id === lessonId ? updated : l)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "更新失败");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
 
   const confirmActive = useCallback(
     async (lesson: BotLesson): Promise<void> => {
@@ -286,7 +283,12 @@ export default function TrainScreen(): JSX.Element {
                   </Button>
                 )}
 
-                <Button size="sm" variant="ghost" isDisabled={busy} onPress={() => openEdit(lesson)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  isDisabled={busy}
+                  onPress={() => openEdit(lesson)}
+                >
                   <Button.Label>编辑</Button.Label>
                 </Button>
                 <Button

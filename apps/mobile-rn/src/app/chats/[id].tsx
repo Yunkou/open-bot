@@ -1,6 +1,7 @@
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams } from "expo-router";
+import { Button, Typography } from "heroui-native";
 import type { JSX } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, View } from "react-native";
@@ -12,6 +13,9 @@ import { BotOnboarding } from "@/components/BotOnboarding";
 import { Composer } from "@/components/Composer";
 import { MessageBubble, type UiMessage } from "@/components/MessageBubble";
 import { FilePreviewModal } from "@/components/FilePreviewModal";
+import { FeedbackModal } from "@/components/chat/FeedbackModal";
+import { MessageActionSheet } from "@/components/chat/MessageActionSheet";
+import { QuoteBar } from "@/components/chat/QuoteBar";
 import { RunStatus, deriveRunLabel } from "@/components/RunStatus";
 import { ScreenHeader } from "@/components/ScreenScaffold";
 import { ErrorAlert, MessageSkeleton } from "@/components/states";
@@ -33,6 +37,27 @@ import { useSecretPrompt } from "@/providers/secretPrompt";
 const STREAMING_ID = "__streaming__";
 
 type Streaming = { text: string; agentId?: string; agentName?: string };
+
+/**
+ * 服务端消息 → 气泡用的形状。
+ *
+ * 单独抽出来是因为消息会在三处进来：首屏加载、发送后重新拉取、WS 事件补拉。
+ * 三处各写一遍字段映射，迟早会漏掉一个（漏 `reactions` 就表现为「点了没反应」）。
+ */
+function toUiMessage(m: Message): UiMessage {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    ...(m.agent_id ? { agent_id: m.agent_id } : {}),
+    ...(m.reactions?.length ? { reactions: m.reactions } : {}),
+    ...(m.request_id ? { request_id: m.request_id } : {}),
+    ...(m.reply_to_id ? { reply_to_id: m.reply_to_id } : {}),
+    ...(m.thread_root_id ? { thread_root_id: m.thread_root_id } : {}),
+    ...(m.handoff ? { handoff: m.handoff } : {}),
+    ...(m.host_confirm ? { host_confirm: m.host_confirm } : {}),
+  };
+}
 
 export default function ChatScreen(): JSX.Element {
   const insets = useSafeAreaInsets();
@@ -66,6 +91,23 @@ export default function ChatScreen(): JSX.Element {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
+  /** 长按打开操作面板的目标消息 */
+  const [sheetMessage, setSheetMessage] = useState<UiMessage | null>(null);
+  /** 反馈弹窗的目标消息 */
+  const [feedbackMessage, setFeedbackMessage] = useState<UiMessage | null>(null);
+  /** 反馈来源：面板主动打开 vs 负表情联动 */
+  const [feedbackSource, setFeedbackSource] = useState<"feedback_menu" | "reaction_followup">(
+    "feedback_menu"
+  );
+  /** 引用回复的目标；非空时作曲框上方显示引用条 */
+  const [replyTo, setReplyTo] = useState<UiMessage | null>(null);
+  /** 展开的线程根消息 id */
+  const [threadRootId, setThreadRootId] = useState<string | null>(null);
+  /** 作曲框补全用的数据源：/ 技能、@routine:、@mcp: */
+  const [agentSkills, setAgentSkills] = useState<{ name: string; description?: string }[]>([]);
+  const [routines, setRoutines] = useState<{ name: string }[]>([]);
+  const [mcpNames, setMcpNames] = useState<{ name: string }[]>([]);
+
   const primaryAgent = useMemo(() => {
     if (memberIds?.length) return null;
     const last = messages.find((m) => m.role === "assistant" && m.agent_id);
@@ -75,12 +117,7 @@ export default function ChatScreen(): JSX.Element {
 
   const fetchMessages = useCallback(async (): Promise<{ runActive: boolean }> => {
     const res = await api.listMessagesWithStatus(conversationId);
-    const list: UiMessage[] = res.messages.map((m: Message) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      ...(m.agent_id ? { agent_id: m.agent_id } : {}),
-    }));
+    const list: UiMessage[] = res.messages.map(toUiMessage);
     setMessages(list);
     return { runActive: Boolean(res.run_active) };
   }, [conversationId]);
@@ -158,13 +195,48 @@ export default function ChatScreen(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, primaryAgent?.id]);
 
+  /**
+   * 作曲框的补全数据源。
+   *
+   * 技能是 per-bot 的，换会话（换一个助手）就得换一份，所以跟着 primaryAgent 走。
+   * 例行任务和插件是账号级的，不会变，挂在助手下面一起拉省一次请求。
+   * 三者都拉不到也不能影响聊天 —— 补全只是锦上添花，失败就当没有。
+   */
+  useEffect(() => {
+    const agentId = primaryAgent?.id;
+    if (!agentId) return;
+    let cancelled = false;
+    void (async () => {
+      const [skills, routineList, mcpList] = await Promise.all([
+        api.listAgentSkills(agentId).catch(() => []),
+        api.listRoutines().catch(() => []),
+        api.listMCPServers().catch(() => []),
+      ]);
+      if (cancelled) return;
+      setAgentSkills(skills.map((s) => ({ name: s.name, description: s.description })));
+      setRoutines(routineList.map((r) => ({ name: r.name })));
+      setMcpNames(mcpList.map((m) => ({ name: m.name })));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [primaryAgent?.id]);
+
   // 流式输出时贴着底部
   useEffect(() => {
     if (streaming?.text) scrollRef.current?.scrollToEnd({ animated: true });
   }, [streaming?.text]);
 
   const visible = useMemo(() => {
-    const base = messages;
+    // 主时间线只留没有 thread_root_id 的消息，以及当前展开的那条线程的全部内容。
+    // 与 Web 端一致：线程回复挂在根消息下面，不平铺进主时间线。
+    const mainline = messages.filter((m) => {
+      if (threadRootId) return true;
+      return !m.thread_root_id;
+    });
+    const base = threadRootId
+      ? messages.filter((m) => m.id === threadRootId || m.thread_root_id === threadRootId)
+      : mainline;
     if (!streaming) return base;
     const isSummary = streaming.text === "";
     if (isSummary && base.length > 0) return base;
@@ -179,7 +251,74 @@ export default function ChatScreen(): JSX.Element {
         ...(streaming.agentName ? { agent_name: streaming.agentName } : {}),
       },
     ];
-  }, [messages, streaming]);
+  }, [messages, streaming, threadRootId]);
+
+  /** 每条根消息下面挂了几条线程回复，用来渲染「N 条回复」。 */
+  const threadCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const m of messages) {
+      if (m.thread_root_id) out[m.thread_root_id] = (out[m.thread_root_id] ?? 0) + 1;
+    }
+    return out;
+  }, [messages]);
+
+  const messageById = useMemo(() => {
+    const map = new Map<string, UiMessage>();
+    for (const m of messages) map.set(m.id, m);
+    return map;
+  }, [messages]);
+
+  /**
+   * 表情变化以服务端返回的 count / me 为准写回本地。
+   * 乐观值只是让点击手感不拖沓，拿到权威值后必须替换，否则多端同时点表情会一直不一致。
+   */
+  const onReactionChange = useCallback(
+    (messageId: string, evt: { emoji: string; count: number; me: boolean; action: string }) => {
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (m.id !== messageId) return m;
+          const rest = (m.reactions ?? []).filter((r) => r.emoji !== evt.emoji);
+          const next =
+            evt.count > 0 ? [...rest, { emoji: evt.emoji, count: evt.count, me: evt.me }] : rest;
+          return { ...m, reactions: next };
+        })
+      );
+    },
+    []
+  );
+
+  const openFeedback = useCallback(
+    (messageId: string, source: "feedback_menu" | "reaction_followup") => {
+      setSheetMessage(null);
+      setFeedbackSource(source);
+      setFeedbackMessage(messageById.get(messageId) ?? null);
+    },
+    [messageById]
+  );
+
+  const startReply = useCallback((message: UiMessage) => {
+    setSheetMessage(null);
+    setReplyTo(message);
+  }, []);
+
+  const submitReaction = useCallback(
+    async (message: UiMessage, emoji: string) => {
+      try {
+        const already = (message.reactions ?? []).find((r) => r.emoji === emoji)?.me ?? false;
+        const evt = already
+          ? await api.deleteReaction(message.id, emoji)
+          : await api.toggleReaction(message.id, emoji);
+        onReactionChange(message.id, evt);
+        // 只有「新增负表情」才追问原因；取消表情不打扰用户。
+        if (!already && api.NEGATIVE_REACTION_EMOJIS.includes(emoji as never)) {
+          openFeedback(message.id, "reaction_followup");
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "表情操作失败");
+      }
+    },
+    [onReactionChange, openFeedback]
+  );
 
   const requestAttach = useCallback(async (source: "files" | "images" | "camera") => {
     const picked: PickedFile[] = [];
@@ -266,6 +405,9 @@ export default function ChatScreen(): JSX.Element {
 
       setDraft("");
       setFiles([]);
+      // 引用和线程目标只作用于这一条消息，发完就清掉，
+      // 否则下一条会莫名其妙继续挂在上一段对话下面。
+      setReplyTo(null);
       setSending(true);
       setStreaming({ text: "" });
       setRunLabel("正在思考…");
@@ -311,6 +453,9 @@ export default function ChatScreen(): JSX.Element {
           {
             ...(uploaded.length ? { attachments: uploaded } : {}),
             ...(mentioned.length ? { agentIds: mentioned.map((a) => a.id) } : {}),
+            ...(replyTo ? { replyToId: replyTo.id } : {}),
+            // 在线程里回复时沿用根消息，否则这条会掉回主时间线
+            ...(threadRootId ? { threadRootId } : {}),
           }
         );
       } catch (err) {
@@ -329,7 +474,18 @@ export default function ChatScreen(): JSX.Element {
         abortRef.current = null;
       }
     },
-    [conversationId, draft, files, sending, uploading, agents, reload, refreshSecrets]
+    [
+      conversationId,
+      draft,
+      files,
+      sending,
+      uploading,
+      agents,
+      reload,
+      refreshSecrets,
+      replyTo,
+      threadRootId,
+    ]
   );
 
   const stop = useCallback(async (): Promise<void> => {
@@ -452,9 +608,19 @@ export default function ChatScreen(): JSX.Element {
           <MessageBubble
             key={m.id}
             message={m}
+            conversationId={conversationId}
             onSandboxLink={openSandboxLink}
             // 只有群聊需要逐条标注发言者；单聊里每条都是同一个助手，标了是噪音
             showAgentName={Boolean(memberIds?.length)}
+            {...(m.reply_to_id && messageById.get(m.reply_to_id)
+              ? { quoted: messageById.get(m.reply_to_id) as UiMessage }
+              : {})}
+            {...(threadCounts[m.id] ? { threadCount: threadCounts[m.id] } : {})}
+            onOpenThread={(rootId) => setThreadRootId((cur) => (cur === rootId ? null : rootId))}
+            onLongPress={() => setSheetMessage(m)}
+            onReply={() => startReply(m)}
+            onReactionChange={onReactionChange}
+            onRequestFeedback={(id) => openFeedback(id, "reaction_followup")}
             {...(primaryAgent ? { fallbackAgentId: primaryAgent.id } : {})}
             {...(primaryAgent ? { fallbackAgentName: primaryAgent.name } : {})}
           />
@@ -466,6 +632,17 @@ export default function ChatScreen(): JSX.Element {
       </ScrollView>
 
       <View className="border-t border-border bg-background pb-safe-offset-8">
+        {threadRootId ? (
+          <View className="flex-row items-center justify-between px-5 pt-2">
+            <Typography.Paragraph className="text-xs text-accent-foreground">
+              正在查看线程 · {threadCounts[threadRootId] ?? 0} 条回复
+            </Typography.Paragraph>
+            <Button size="sm" variant="ghost" onPress={() => setThreadRootId(null)}>
+              <Button.Label>返回主时间线</Button.Label>
+            </Button>
+          </View>
+        ) : null}
+        <QuoteBar replyTo={replyTo} onClose={() => setReplyTo(null)} />
         <Composer
           value={draft}
           onChange={setDraft}
@@ -478,8 +655,36 @@ export default function ChatScreen(): JSX.Element {
           busy={uploading}
           {...(primaryAgent ? { agentName: primaryAgent.name } : {})}
           mentionMembers={mentionMembers}
+          allowEveryone={Boolean(memberIds?.length)}
+          dmCandidates={memberIds?.length ? [] : agents}
+          {...(agentSkills.length ? { skills: agentSkills } : {})}
+          {...(routines.length ? { routines } : {})}
+          {...(mcpNames.length ? { mcpServers: mcpNames } : {})}
         />
       </View>
+
+      {sheetMessage ? (
+        <MessageActionSheet
+          visible
+          onClose={() => setSheetMessage(null)}
+          message={sheetMessage as never}
+          onReact={(emoji: string) => void submitReaction(sheetMessage, emoji)}
+          onReply={() => startReply(sheetMessage)}
+          onFeedback={() => openFeedback(sheetMessage.id, "feedback_menu")}
+        />
+      ) : null}
+
+      {feedbackMessage ? (
+        <FeedbackModal
+          visible
+          onClose={() => setFeedbackMessage(null)}
+          message={feedbackMessage as never}
+          source={feedbackSource}
+          conversationId={conversationId}
+          {...(primaryAgent ? { agentName: primaryAgent.name } : {})}
+          onSubmitted={() => setFeedbackMessage(null)}
+        />
+      ) : null}
 
       <FilePreviewModal
         open={filePreview.open}

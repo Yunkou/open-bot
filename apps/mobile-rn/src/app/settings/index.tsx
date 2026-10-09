@@ -30,7 +30,12 @@ const GROUPS: { label: string; items: Section[] }[] = [
   {
     label: "Bot",
     items: [
-      { id: "bot", title: "Bot 设置", desc: "岗位描述与本 Bot 能力", icon: "hardware-chip-outline" },
+      {
+        id: "bot",
+        title: "Bot 设置",
+        desc: "岗位描述与本 Bot 能力",
+        icon: "hardware-chip-outline",
+      },
       { id: "machines", title: "优先电脑", desc: "把活派给哪台电脑执行", icon: "laptop-outline" },
     ],
   },
@@ -47,7 +52,12 @@ const GROUPS: { label: string; items: Section[] }[] = [
     items: [
       { id: "sandbox", title: "运行环境", desc: "沙箱状态与桌面", icon: "cube-outline" },
       { id: "routines", title: "例行任务", desc: "定时与事件自动执行", icon: "timer-outline" },
-      { id: "compact", title: "数据与压缩", desc: "上下文压缩策略（只读）", icon: "layers-outline" },
+      {
+        id: "compact",
+        title: "数据与压缩",
+        desc: "上下文压缩策略（只读）",
+        icon: "layers-outline",
+      },
       { id: "secrets", title: "密钥", desc: "助手可用的凭据与授权请求", icon: "key-outline" },
     ],
   },

@@ -726,14 +726,11 @@ export async function setAgentSkill(
   name: string,
   enabled: boolean
 ): Promise<AgentSkill> {
-  return request(
-    `/v1/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(name)}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    }
-  );
+  return request(`/v1/agents/${encodeURIComponent(agentId)}/skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 export async function replaceAgentSkills(
@@ -1048,9 +1045,7 @@ export async function updateUserSettings(body: {
 
 /* ------------------------------------------------------------------ 消息反馈与训练 */
 
-export async function createMessageFeedback(
-  body: CreateFeedbackInput
-): Promise<MessageFeedback> {
+export async function createMessageFeedback(body: CreateFeedbackInput): Promise<MessageFeedback> {
   return request("/v1/message-feedbacks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -573,8 +573,8 @@ export default function RoutinesScreen(): JSX.Element {
       <View className="gap-3">
         <SectionTitle>入站 Webhook（Slack / GitHub）</SectionTitle>
         <Typography.Paragraph color="muted">
-          创建 Hook 后把返回的 URL 配到 Slack Event Subscriptions 或 GitHub Webhooks。
-          例行任务的 triggers 匹配事件后，会在绑定会话中唤醒助手。
+          创建 Hook 后把返回的 URL 配到 Slack Event Subscriptions 或 GitHub Webhooks。 例行任务的
+          triggers 匹配事件后，会在绑定会话中唤醒助手。
         </Typography.Paragraph>
 
         {hooks.length === 0 ? (

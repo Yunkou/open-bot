@@ -166,8 +166,8 @@ export default function SkillsSettingsScreen(): JSX.Element {
     >
       <Typography.Paragraph color="muted">
         关闭后该技能不会注入 runtime 系统提示，也无法被 load_skill 加载。默认全部启用。
-        自定义技能是目录包（必有 SKILL.md，可含 references/、scripts/ 等），
-        上传时**正文 Markdown 或 zip 包**二选一；落盘到 skills/users/&#123;user_id&#125;/。
+        自定义技能是目录包（必有 SKILL.md，可含 references/、scripts/ 等）， 上传时**正文 Markdown
+        或 zip 包**二选一；落盘到 skills/users/&#123;user_id&#125;/。
       </Typography.Paragraph>
 
       <Card>
@@ -218,12 +218,7 @@ export default function SkillsSettingsScreen(): JSX.Element {
                   <Typography.Paragraph color="muted" className="flex-1 text-sm" numberOfLines={1}>
                     {zip.name}
                   </Typography.Paragraph>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    isDisabled={busy}
-                    onPress={() => setZip(null)}
-                  >
+                  <Button size="sm" variant="ghost" isDisabled={busy} onPress={() => setZip(null)}>
                     <Button.Label>移除</Button.Label>
                   </Button>
                 </>

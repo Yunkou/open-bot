@@ -1,5 +1,4 @@
 import { Button, Card, Chip, ListGroup, Typography } from "heroui-native";
-import * as Linking from "expo-linking";
 import type { JSX } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
@@ -9,6 +8,7 @@ import type { Sandbox, SandboxDirEntry } from "@/api/types";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { FormField, SectionTitle } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
+import { WebPreviewModal } from "@/components/chat/WebPreviewModal";
 import { formatDateTime, formatSize } from "@/lib/format";
 import { friendlyOpenError, normalizeWorkspacePath, previewTitleFromPath } from "@/lib/workspace";
 
@@ -101,6 +101,11 @@ export default function SandboxScreen(): JSX.Element {
   /** 目录浏览器的路径，始终是「我的文件」下的相对路径，空串代表根目录 */
   const [dirInput, setDirInput] = useState("");
   const [entries, setEntries] = useState<SandboxDirEntry[]>([]);
+  /** 应用内桌面预览；open=false 时不渲染 WebView */
+  const [desktop, setDesktop] = useState<{ open: boolean; url: string }>({
+    open: false,
+    url: "",
+  });
   const [listing, setListing] = useState(false);
 
   const [fileInput, setFileInput] = useState("hello.txt");
@@ -158,13 +163,13 @@ export default function SandboxScreen(): JSX.Element {
         );
         return;
       }
-      // RN 没有内置浏览器（也没有装 WebView），桌面预览只能交给系统浏览器打开。
-      // URL 走 API 反代 + JWT，不暴露真实端口。
+      // 桌面走 API 反代 + JWT，不暴露真实端口。
+      // 本轮引入了 WebView，桌面直接在应用内打开；系统浏览器作为兜底保留
+      // （noVNC 在应用外启动时能复用宿主机已装好的客户端）。
       const url = await api.sandboxDesktopURL({ desktop_token: s.desktop_token });
-      await Linking.openURL(url);
-      setMsg("桌面已在浏览器中打开");
+      setDesktop({ open: true, url });
     } catch (err) {
-      setMsg(publicError(err, "无法在浏览器中打开桌面"));
+      setMsg(publicError(err, "无法打开桌面"));
     } finally {
       setBusy(false);
     }
@@ -365,7 +370,7 @@ export default function SandboxScreen(): JSX.Element {
                 isDisabled={busy}
                 onPress={() => void openDesktop()}
               >
-                <Button.Label>在浏览器中打开桌面</Button.Label>
+                <Button.Label>打开桌面</Button.Label>
               </Button>
               <Button
                 size="sm"
@@ -571,6 +576,16 @@ export default function SandboxScreen(): JSX.Element {
       </View>
 
       {msg ? <Typography.Paragraph color="muted">{msg}</Typography.Paragraph> : null}
+
+      {desktop.open && desktop.url ? (
+        <WebPreviewModal
+          visible
+          onClose={() => setDesktop({ open: false, url: "" })}
+          mode="url"
+          uri={desktop.url}
+          title="运行环境桌面"
+        />
+      ) : null}
     </ScreenScaffold>
   );
 }
