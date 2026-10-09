@@ -1,13 +1,13 @@
 /**
  * 图表卡：Mermaid / HTML / 图片。
  *
- * 对齐 Web 端的 `DiagramCard` + `DiagramCardFrame` + `HtmlDiagramCard` + `ImageDiagramCard`，
- * 但有一处**刻意的能力裁剪**：
- *
- * **RN 端不渲染 Mermaid。** Web 端在浏览器里跑 mermaid 运行时（`lib/mermaidRender.ts`），
- * RN 里没有等价物 —— 塞一个 mermaid + jsdom 进 bundle 既重又脆（还要自己补
- * getBBox / DOMParser 等一堆 polyfill）。所以这里的 Mermaid 卡只展示源码，
- * 要看图得导出。这个取舍写在这里，免得后来的人以为是遗漏。
+ * 三类卡的渲染路径各不相同，选型依据写在各自组件里：
+ * - **Mermaid**：`expo-mermaid`，纯 JS 解析 + `react-native-svg` 直绘。无 WebView、
+ *   无第三方服务、离线可用。早期版本曾退化成「只给源码」和「发给 mermaid.ink 换图」，
+ *   那是当时 RN 生态没有原生方案时的将就，现在没必要了。
+ * - **HTML**：`react-native-webview`。HTML 产物本来就是网页，没有等价物，
+ *   所以走 WebView；内容先过 `WebPreviewModal` 里的保守消毒。
+ * - **图片**：RN 的 `Image` 直接渲染，鉴权走 query。
  *
  * 工具条折叠沿用 `DiagramCardFrame` 的思路（放不下就收进 ⋯），实现换成 RN 的
  * `onLayout` 量宽 + heroui `Menu`：RN 没有 ResizeObserver，也不该在布局阶段同步测量。
@@ -15,9 +15,10 @@
 
 import { Chip, Menu, Typography } from "heroui-native";
 import * as Clipboard from "expo-clipboard";
-import * as WebBrowser from "expo-web-browser";
-import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from "react";
-import { Image, Modal, Pressable, ScrollView, useColorScheme, View } from "react-native";
+import { MermaidChart } from "expo-mermaid";
+
+import { useCallback, useEffect, useState, type JSX, type ReactNode } from "react";
+import { Image, Modal, Pressable, ScrollView, View } from "react-native";
 
 import { attachmentCopyUrl, attachmentDisplayUrl, imageDownloadFilename } from "@/api";
 import type { AttachmentMeta } from "@/api/types";
@@ -63,82 +64,120 @@ export function extractFence(
 }
 
 /* ------------------------------------------------------------------ *
- * Mermaid 导出
+ * Mermaid
  * ------------------------------------------------------------------ */
 
-const BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
 /**
- * UTF-8 → base64url。
+ * expo-mermaid 支持的图表类型关键字。
  *
- * 手写而不是用 `Buffer` / `btoa` / `TextEncoder`：这三个在 RN 里要么没装，要么取决于
- * Hermes 版本。中文标签必须按 UTF-8 多字节算，直接对 charCode 取模会得到错误结果。
+ * 这个清单抄自 `expo-mermaid/src/components/MermaidChart.tsx` 的 `parseDiagram`
+ * 分派分支 —— 遇到清单外的类型它会返回 `{type:"unknown"}`，那时画出来是空白。
+ * 与其渲染一个空框，不如直接退回源码视图，让用户至少知道图长什么样。
  */
-function utf8ToBase64Url(input: string): string {
-  const bytes: number[] = [];
-  for (let i = 0; i < input.length; i += 1) {
-    let code = input.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff && i + 1 < input.length) {
-      const next = input.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        code = (code - 0xd800) * 0x400 + (next - 0xdc00) + 0x10000;
-        i += 1;
-      }
-    }
-    if (code < 0x80) bytes.push(code);
-    else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-    else if (code < 0x10000) {
-      bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-    } else {
-      bytes.push(
-        0xf0 | (code >> 18),
-        0x80 | ((code >> 12) & 0x3f),
-        0x80 | ((code >> 6) & 0x3f),
-        0x80 | (code & 0x3f)
-      );
-    }
-  }
+const MERMAID_TYPES = [
+  "flowchart",
+  "graph",
+  "sequencediagram",
+  "pie",
+  "gantt",
+  "classdiagram",
+  "statediagram",
+  "erdiagram",
+  "xychart",
+  "journey",
+  "quadrantchart",
+  "timeline",
+  "mindmap",
+  "gitgraph",
+  "zenuml",
+  "sankey",
+  "requirementdiagram",
+  "radar",
+  "kanban",
+  "block",
+  "packet",
+  "architecture",
+  "treemap",
+  "venn",
+  "ishikawa",
+  "fishbone",
+  "treeview",
+];
 
-  let out = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const b0 = bytes[i]!;
-    const b1 = bytes[i + 1];
-    const b2 = bytes[i + 2];
-    out += BASE64[b0 >> 2];
-    out += BASE64[((b0 & 3) << 4) | ((b1 ?? 0) >> 4)];
-    out += b1 === undefined ? "" : BASE64[((b1 & 15) << 2) | ((b2 ?? 0) >> 6)];
-    out += b2 === undefined ? "" : BASE64[b2 & 63];
+function mermaidTypeOf(source: string): string | null {
+  const lines = (source || "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("%%"));
+  let first = lines[0]?.toLowerCase() ?? "";
+  // `---` 开头是 frontmatter，真正的图从后文开始
+  if (first === "---") {
+    const end = lines.indexOf("---", 1);
+    if (end >= 0) first = lines[end + 1]?.toLowerCase() ?? "";
   }
-  return out;
+  const hit = MERMAID_TYPES.find((t) => first.startsWith(t));
+  return hit ?? null;
 }
 
 /**
- * mermaid.ink 渲染地址。
+ * Mermaid 图表卡。
  *
- * ── 这是第三方服务，取舍写清楚 ────────────────────────────────────────
- * - **会把整段图表源码 POST/GET 给 mermaid.ink**（kroki 系的公开实例）。图里的文字
- *   等于离开了本机。这是移动端唯一不需要在 bundle 里塞 mermaid 运行时的办法；
- *   真要本地渲染就得引入 mermaid + DOM polyfill，代价远大于收益。
- * - **离线 / 服务不可用时导出直接失败**，大图偶尔 503。所以「导出」不等于「一定有结果」，
- *   卡上同时保留「复制源码」这条永远可用的路。
- * - 编码方式是 `base64(JSON.stringify({ code, mermaid: { theme } }))`：
- *   JSON.stringify 会把非 ASCII 转成 `\uXXXX`，服务端才能还原中文标签；
- *   base64 用 **url-safe 变体且去掉 `=` padding** —— 标准 base64 里的 `/` 在路径段里
- *   会被路由吃掉（实测 404），`+` 虽然能过但没必要冒险。
+ * 走 `expo-mermaid`：纯 JS 解析 + `react-native-svg` 直绘，**不引 WebView、
+ * 不连第三方渲染服务、完全离线**。这替换掉了早期版本的两条退路 ——
+ * 「只给源码」和「把源码发给 mermaid.ink 换一张图」。
+ *
+ * 保留「复制源码」是刻意的：解析器覆盖 25 种图表但语法变体有限
+ * （`flowchart-elk`、部分 handDrawn 之类不在内），源码是永远可用的兜底。
  */
-export function mermaidInkUrl(
-  source: string,
-  opts?: { theme?: "default" | "dark"; svg?: boolean }
-): string {
-  const theme = opts?.theme === "dark" ? "dark" : "default";
-  const state = JSON.stringify({ code: source, mermaid: { theme } });
-  const kind = opts?.svg === false ? "img" : "svg";
-  return `https://mermaid.ink/${kind}/${utf8ToBase64Url(state)}`;
-}
+export function MermaidDiagramCard({
+  source,
+  pending,
+}: {
+  /** ```mermaid 围栏里的源码 */
+  source: string;
+  /** 流式输出中围栏未闭合 → 暂时不渲染，避免每来一个 token 重排一次 */
+  pending?: boolean;
+}): JSX.Element {
+  const supported = mermaidTypeOf(source) !== null;
+  const [expanded, setExpanded] = useState(false);
 
-/* ------------------------------------------------------------------ *
- * 共用外壳
- * ------------------------------------------------------------------ */
+  const copySource = useCallback(() => {
+    void Clipboard.setStringAsync(source);
+  }, [source]);
+
+  const actions: DiagramAction[] = [
+    { key: "copy", label: "复制源码", icon: "copy-outline", onPress: copySource },
+    {
+      key: "expand",
+      label: expanded ? "收起" : "全屏查看",
+      icon: expanded ? "contract-outline" : "expand-outline",
+      disabled: !supported || pending,
+      onPress: () => setExpanded((v) => !v),
+    },
+  ];
+
+  return (
+    <DiagramFrame label="Mermaid" actions={actions}>
+      {pending ? (
+        <Typography.Paragraph className="text-[10px] text-muted">图表生成中…</Typography.Paragraph>
+      ) : supported ? (
+        <MermaidChart
+          chart={source}
+          width={expanded ? 720 : 320}
+          height={expanded ? 520 : 240}
+          theme="auto"
+        />
+      ) : (
+        <>
+          <Typography.Paragraph className="text-[10px] text-muted">
+            这类图表移动端暂不支持渲染，可复制源码后在别处查看
+          </Typography.Paragraph>
+          <SourceBlock source={source || "（空）"} />
+        </>
+      )}
+    </DiagramFrame>
+  );
+}
 
 /** 工具条放不下 inline 动作时的折叠阈值。低于它就只留一个 ⋯。 */
 const COLLAPSE_WIDTH = 240;
@@ -233,76 +272,6 @@ function SourceBlock({ source, maxHeight }: { source: string; maxHeight?: string
         </ScrollView>
       </ScrollView>
     </View>
-  );
-}
-
-/* ------------------------------------------------------------------ *
- * Mermaid
- * ------------------------------------------------------------------ */
-
-export function MermaidDiagramCard({
-  source,
-  pending,
-}: {
-  /** ```mermaid 围栏里的源码 */
-  source: string;
-  /** 流式输出中围栏未闭合 → 禁用导出，避免把半截图发给第三方 */
-  pending?: boolean;
-}): JSX.Element {
-  const scheme = useColorScheme();
-  // 记下预览是给哪份源码开的：源码一变（流式追加）就对不上，自动关闭，
-  // 不需要「监听 source 再 setState(false)」那种重渲染。
-  const [previewSource, setPreviewSource] = useState<string | null>(null);
-  const preview = previewSource !== null && previewSource === source && !pending;
-
-  const url = useMemo(
-    () => (pending ? "" : mermaidInkUrl(source, { theme: scheme === "dark" ? "dark" : "default" })),
-    [pending, scheme, source]
-  );
-
-  const copySource = useCallback(() => {
-    void Clipboard.setStringAsync(source);
-  }, [source]);
-
-  const openExternal = useCallback(() => {
-    if (url) void WebBrowser.openBrowserAsync(url);
-  }, [url]);
-
-  const actions: DiagramAction[] = [
-    { key: "copy", label: "复制源码", icon: "copy-outline", onPress: copySource },
-    {
-      key: "svg",
-      label: "导出 SVG",
-      icon: "image-outline",
-      disabled: pending || !url,
-      onPress: () => setPreviewSource(source),
-    },
-    {
-      key: "browser",
-      label: "在浏览器中打开",
-      icon: "open-outline",
-      disabled: pending || !url,
-      onPress: openExternal,
-    },
-  ];
-
-  return (
-    <>
-      <DiagramFrame label="Mermaid" actions={actions}>
-        <Typography.Paragraph className="text-[10px] text-muted">
-          移动端不渲染 Mermaid，可复制源码或导出后在浏览器查看
-        </Typography.Paragraph>
-        <SourceBlock source={source || (pending ? "（生成中…）" : "（空）")} />
-      </DiagramFrame>
-
-      <WebPreviewModal
-        visible={preview}
-        mode="url"
-        uri={url}
-        title="Mermaid 图表"
-        onClose={() => setPreviewSource(null)}
-      />
-    </>
   );
 }
 
