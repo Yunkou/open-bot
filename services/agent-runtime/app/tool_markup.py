@@ -57,6 +57,14 @@ _FENCE = re.compile(
     re.IGNORECASE,
 )
 
+# Qwen-style plain text when native tool_calls are unavailable:
+#   tool_calls:
+#   - tool: host_ls
+#     args: {"path": "Downloads"}
+_YAMLISH_TOOL_ITEM = re.compile(
+    r"(?ms)^\s*-\s*tool:\s*([A-Za-z0-9_.\-]+)\s*\n\s*args:\s*(\{.*?\}|\[.*?\]|null|true|false|\"[^\"]*\"|'[^']*'|[^\n]+)",
+)
+
 def _coerce_value(raw: str) -> Any:
     s = (raw or "").strip()
     if not s:
@@ -217,8 +225,24 @@ def content_has_tool_markup(text: str) -> bool:
         return True
     if _FENCE.search(text):
         return True
+    if _YAMLISH_TOOL_ITEM.search(text):
+        return True
     low = text.lower()
     return "<tool_call" in low or "<function=" in low
+
+
+def _parse_yamlish_tool_items(text: str) -> list[ParsedToolCall]:
+    out: list[ParsedToolCall] = []
+    for m in _YAMLISH_TOOL_ITEM.finditer(text or ""):
+        name = (m.group(1) or "").strip()
+        raw_args = (m.group(2) or "").strip()
+        if not name:
+            continue
+        args: Any = _coerce_value(raw_args)
+        if not isinstance(args, dict):
+            args = {"value": args} if args not in ("", None) else {}
+        out.append(ParsedToolCall(name=name, arguments=dict(args), raw=m.group(0)))
+    return out
 
 
 def parse_tool_markup(text: str) -> list[ParsedToolCall]:
@@ -257,6 +281,9 @@ def parse_tool_markup(text: str) -> list[ParsedToolCall]:
             continue
         results.append(p)
 
+    if not results:
+        results.extend(_parse_yamlish_tool_items(corpus))
+
     return [r for r in results if r.name]
 
 
@@ -273,6 +300,12 @@ def strip_tool_markup(text: str) -> str:
     # Unclosed leftovers
     out = re.sub(r"<tool_call\b[^>]*>[\s\S]*$", "", out, flags=re.IGNORECASE)
     out = re.sub(r"<function\s*=\s*[^>]+>[\s\S]*$", "", out, flags=re.IGNORECASE)
+    # Qwen yamlish tool_calls: blocks
+    out = re.sub(
+        r"(?im)^(?:tool_calls\s*:\s*\n)?(?:\s*-\s*tool:\s*[A-Za-z0-9_.\-]+\s*\n\s*args:\s*.*(?:\n|$))+",
+        "",
+        out,
+    )
     # Collapse excess blank lines from stripping
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()

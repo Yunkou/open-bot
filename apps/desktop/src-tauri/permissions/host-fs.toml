@@ -1,0 +1,80 @@
+[[permission]]
+identifier = "allow-host-stat"
+description = "Enables the host_stat command."
+commands.allow = ["host_stat"]
+
+[[permission]]
+identifier = "allow-host-ls"
+description = "Enables the host_ls command."
+commands.allow = ["host_ls"]
+
+[[permission]]
+identifier = "allow-host-read"
+description = "Enables the host_read command."
+commands.allow = ["host_read"]
+
+[[permission]]
+identifier = "allow-host-write"
+description = "Enables the host_write command."
+commands.allow = ["host_write"]
+
+[[permission]]
+identifier = "allow-host-delete"
+description = "Enables the host_delete command."
+commands.allow = ["host_delete"]
+
+[[permission]]
+identifier = "allow-host-move"
+description = "Enables the host_move command."
+commands.allow = ["host_move"]
+
+[[permission]]
+identifier = "allow-host-open"
+description = "Enables the host_open command."
+commands.allow = ["host_open"]
+
+[[permission]]
+identifier = "allow-host-shell"
+description = "Enables the host_shell command."
+commands.allow = ["host_shell"]
+
+[[permission]]
+identifier = "allow-host-ssh-probe"
+description = "Enables the host_ssh_probe command."
+commands.allow = ["host_ssh_probe"]
+
+[[permission]]
+identifier = "allow-host-ssh-ls"
+description = "Enables the host_ssh_ls command."
+commands.allow = ["host_ssh_ls"]
+
+[[permission]]
+identifier = "allow-host-ssh-read"
+description = "Enables the host_ssh_read command."
+commands.allow = ["host_ssh_read"]
+
+[[permission]]
+identifier = "allow-host-ssh-write"
+description = "Enables the host_ssh_write command."
+commands.allow = ["host_ssh_write"]
+
+[[permission]]
+identifier = "allow-host-ssh-delete"
+description = "Enables the host_ssh_delete command."
+commands.allow = ["host_ssh_delete"]
+
+[[permission]]
+identifier = "allow-host-ssh-exec"
+description = "Enables the host_ssh_exec command."
+commands.allow = ["host_ssh_exec"]
+
+[[permission]]
+identifier = "allow-host-device-name"
+description = "Enables the host_device_name command."
+commands.allow = ["host_device_name"]
+
+[[permission]]
+identifier = "allow-host-machine-id"
+description = "Enables the host_machine_id command."
+commands.allow = ["host_machine_id"]
+

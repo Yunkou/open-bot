@@ -28,4 +28,17 @@ func TestResolveMentionedAgents(t *testing.T) {
 	if len(got2) != 1 || got2[0] != "open-bot" {
 		t.Fatalf("id case fold failed: %#v", got2)
 	}
+	gotAll := resolveMentionedAgents([]string{"everyone"}, members, agents)
+	if len(gotAll) != 3 {
+		t.Fatalf("everyone expected 3 members, got %#v", gotAll)
+	}
+}
+
+func TestMentionIncludesEveryone(t *testing.T) {
+	if !mentionIncludesEveryone("ping @everyone please") {
+		t.Fatal("expected everyone")
+	}
+	if mentionIncludesEveryone("ping @open-bot") {
+		t.Fatal("should not match")
+	}
 }

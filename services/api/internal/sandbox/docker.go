@@ -19,12 +19,14 @@ import (
 )
 
 const (
-	DefaultImage         = "openbot-sandbox:dev"
-	DefaultDesktopImage  = "openbot-sandbox-desktop:dev"
-	DefaultDataRoot      = "data/sandboxes"
-	DefaultMemoryMB      = 512
-	DefaultCPUs          = 1.0
-	MaxExecOutputBytes   = 256 * 1024
+	DefaultImage        = "openbot-sandbox:dev"
+	DefaultDesktopImage = "openbot-sandbox-desktop:dev"
+	DefaultDataRoot     = "data/sandboxes"
+	DefaultMemoryMB     = 512
+	DefaultCPUs         = 1.0
+	MaxExecOutputBytes  = 256 * 1024
+	// MaxDownloadBytes caps a single workspace file download from the chat UI.
+	MaxDownloadBytes = 64 * 1024 * 1024
 )
 
 var sanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -155,8 +157,8 @@ func (m *Manager) Available(ctx context.Context) error {
 }
 
 type containerInspect struct {
-	ID    string `json:"Id"`
-	Name  string `json:"Name"`
+	ID     string `json:"Id"`
+	Name   string `json:"Name"`
 	Config struct {
 		Image string `json:"Image"`
 	} `json:"Config"`
@@ -442,6 +444,25 @@ func (m *Manager) Stop(ctx context.Context, userID string) error {
 			return nil
 		}
 		return fmt.Errorf("docker stop: %s", strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// PurgeUserHome stops/removes the container and deletes the entire per-user host
+// data directory (shared/bots/private/checkpoints/workspace). Used by admin
+// user data purge — irreversible for that user's 运行环境 files.
+func (m *Manager) PurgeUserHome(ctx context.Context, userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return fmt.Errorf("user_id required")
+	}
+	_ = m.removeContainer(ctx, m.ContainerName(userID))
+	home := m.UserHomeHost(userID)
+	if home == "" || home == m.Cfg.DataRoot || home == "/" {
+		return fmt.Errorf("refusing to remove unsafe home path")
+	}
+	if err := os.RemoveAll(home); err != nil {
+		return err
 	}
 	return nil
 }
@@ -740,6 +761,29 @@ func (m *Manager) resolveListHost(op FileOp) (string, error) {
 		}
 	}
 	return host, nil
+}
+
+// OpenWorkspaceFile opens a workspace file for a raw download. Caller closes the file.
+func (m *Manager) OpenWorkspaceFile(op FileOp) (*os.File, os.FileInfo, error) {
+	host, err := m.resolveReadHost(op)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := os.Stat(host)
+	if err != nil {
+		return nil, nil, err
+	}
+	if st.IsDir() {
+		return nil, nil, errors.New("path is a directory")
+	}
+	if st.Size() > MaxDownloadBytes {
+		return nil, nil, fmt.Errorf("file too large")
+	}
+	f, err := os.Open(host)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, st, nil
 }
 
 func (m *Manager) ReadFile(op FileOp, maxBytes int) (string, error) {

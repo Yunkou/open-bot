@@ -10,9 +10,14 @@ import UsersPage from "./pages/UsersPage";
 import BotsPage from "./pages/BotsPage";
 import TracesPage from "./pages/TracesPage";
 import LLMPage from "./pages/LLMPage";
+import DecisionPage from "./pages/DecisionPage";
 import UsagePage from "./pages/UsagePage";
+import OrgsPage from "./pages/OrgsPage";
 import FlagsPage from "./pages/FlagsPage";
 import AuditPage from "./pages/AuditPage";
+import MemoryPage from "./pages/MemoryPage";
+import SkillsPage from "./pages/SkillsPage";
+import SkillEditPage from "./pages/SkillEditPage";
 import { getToken } from "./api";
 
 function RequireAdmin({ children }: { children: ReactNode }) {
@@ -83,10 +88,15 @@ function AppRoutes() {
         <Route index element={<Navigate to="/users" replace />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="bots" element={<BotsPage />} />
+        <Route path="skills" element={<SkillsPage />} />
+        <Route path="skills/:name" element={<SkillEditPage />} />
+        <Route path="memory" element={<MemoryPage />} />
         <Route path="traces" element={<TracesPage />} />
         <Route path="members" element={<MembersPage />} />
         <Route path="llm" element={<LLMPage />} />
+        <Route path="decision" element={<DecisionPage />} />
         <Route path="usage" element={<UsagePage />} />
+        <Route path="orgs" element={<OrgsPage />} />
         <Route path="flags" element={<FlagsPage />} />
         <Route path="audit" element={<AuditPage />} />
       </Route>

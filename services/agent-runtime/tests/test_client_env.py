@@ -32,16 +32,57 @@ def test_from_any_and_env_block() -> None:
         }
     )
     _ok(c is not None and c.platform == "web", "parse web client")
-    block = format_environment_block(c)
+    block = format_environment_block(c, machines=[])
     _ok("环境" in block and "sandbox_*" in block, "env block mentions internal sandbox_*")
     _ok("工作电脑" not in block, "env block does not invent 工作电脑 for users")
     _ok("禁止提及" in block and "Docker" in block, "instructs model not to say Docker")
+    _ok("网页浏览器" in block, "browser chat is explicit")
+    _ok("硬性" in block and "编造" in block, "hard rule when no connected hosts")
+    _ok("已连接" in block and "代操作" in format_environment_block(
+        c,
+        machines=[{"id": "m1", "label": "书房 Mac", "connected": True, "file_op_count": 3}],
+    ), "browser can still use a connected desktop")
+
+
+def test_browser_ignores_stale_machine_label() -> None:
+    c = ClientContext(
+        platform="web",
+        app="browser",
+        os="darwin",
+        machine_id="m-mac",
+        machine_label="我的 Mac",
+    )
+    machines = [
+        {
+            "id": "m-mac",
+            "label": "我的 Mac",
+            "connected": False,
+            "online": False,
+            "file_op_count": 9,
+        }
+    ]
+    block = format_environment_block(c, machines)
+    _ok("网页浏览器" in block, "states browser")
+    _ok("用户当前正在这台设备上聊天：我的 Mac" not in block, "does not claim chatting on Mac")
+    _ok("未连接" in block and "硬性" in block, "offline machines trigger hard rule")
 
 
 def test_tool_defs_include_list_machines() -> None:
     names = {str((t.get("function") or {}).get("name") or "") for t in TOOL_DEFS}
     _ok("list_machines" in names, "list_machines in TOOL_DEFS")
-    _ok("host_ls" in names and "host_read" in names, "host stubs present")
+    _ok("host_ls" in names and "host_read" in names and "host_write" in names, "host file tools present")
+    _ok("host_delete" in names and "host_move" in names, "dangerous host tools present")
+    _ok("host_open" in names and "host_shell" in names, "host open and shell tools present")
+    _ok("host_ssh_exec" in names and "host_ssh_ls" in names and "host_ssh_read" in names, "ssh client tools present")
+    shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
+    desc = str((shell.get("function") or {}).get("description") or "")
+    _ok("host-ssh" in desc, "local shell points remote ssh at host-ssh skill")
+    env = format_environment_block(
+        ClientContext(platform="macos", app="tauri", os="darwin", arch="arm64")
+    )
+    _ok("load_skill" in env and "host-ssh" in env, "env points remote ssh at host-ssh skill via load_skill")
+    _ok("fingerprint" not in env.lower() and "ssh-agent" not in env.lower(), "env omits long ssh tutorial")
+    _ok("Auto-review" not in env and "host_delete" not in env, "env omits auto-review / delete how-to")
     _ok(tool_display_label("sandbox_ls") == "列出目录", "sandbox_ls alias")
     _ok(tool_display_label("sandbox_write") == "写入文件", "sandbox_write alias")
 
@@ -62,10 +103,56 @@ def test_system_prompt_routing() -> None:
     _ok("工作电脑" not in prompt, "no 工作电脑 in prompt")
     _ok("沙箱电脑" not in prompt, "no 沙箱电脑 in prompt")
     _ok("完全透明" in prompt or "只谈结果" in prompt, "instructs outcome-only user speech")
+    _ok("必须 host_ls" not in prompt, "no longer forces host_ls for largest/newest")
+    _ok("load_skill" in prompt, "always-on prompt points at load_skill")
+    _ok("host-file-query" in prompt or "host-shell" in prompt, "routing names host skills to load")
+    _ok("必须" in prompt and "动手前必须" in prompt, "Hermes-style: must load_skill before acting on match")
+    _ok("需要时 load_skill" not in prompt and "需要做法时" not in prompt, "soft optional load_skill phrasing removed")
+    _ok("无匹配" in prompt or "不必" in prompt, "still not load before every reply regardless of match")
+    _ok("find/du" not in prompt.lower() and "host_ls 只用于" not in prompt, "no find/du or host_ls how-to recipe")
+    _ok("paths 一次" not in prompt and "硬危险命令" not in prompt, "no delete-paths / auto-review how-to")
+    _ok("load_skill 不会自动执行" not in prompt and "脚本要你再用" not in prompt, "no host-file-query script recipe in prompt")
+    _ok("skill_view" not in prompt, "keeps open-bot tool name load_skill not skill_view")
+
+
+
+
+def test_machine_label_in_env_block() -> None:
+    client = ClientContext(
+        platform="macos",
+        app="tauri",
+        os="darwin",
+        machine_id="m-1",
+        machine_label="旧名",
+    )
+    machines = [
+        {"id": "m-1", "label": "书房 Mac", "connected": True, "file_op_count": 3},
+        {"id": "m-2", "label": "公司本", "connected": False, "file_op_count": 1},
+    ]
+    block = format_environment_block(client, machines)
+    _ok("书房 Mac" in block, "prefers server-side renamed label")
+    _ok("用户当前正在这台设备上聊天：书房 Mac" in block, "states current chatting device")
+    _ok("已登记的电脑：" in block and "公司本" in block, "lists other machines by name")
+    _ok("工作电脑" not in block, "no 工作电脑 wording")
+
+
+def test_host_ls_tool_is_shallow_browse() -> None:
+    ls = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_ls")
+    desc = str((ls.get("function") or {}).get("description") or "")
+    props = ((ls.get("function") or {}).get("parameters") or {}).get("properties") or {}
+    _ok("Not for largest" in desc or "shallow" in desc.lower() or "Shallow" in desc, "host_ls desc is shallow-browse")
+    _ok("limit" in props and "sort" in props and "glob" in props, "host_ls has limit/sort/glob params")
+    shell = next(t for t in TOOL_DEFS if (t.get("function") or {}).get("name") == "host_shell")
+    sdesc = str((shell.get("function") or {}).get("description") or "")
+    _ok("load_skill" in sdesc and "host-shell" in sdesc, "host_shell desc points at load_skill host-shell")
+    _ok("find/du" not in sdesc.lower(), "host_shell desc does not embed find/du how-to")
 
 
 if __name__ == "__main__":
     test_from_any_and_env_block()
+    test_browser_ignores_stale_machine_label()
     test_tool_defs_include_list_machines()
     test_system_prompt_routing()
+    test_machine_label_in_env_block()
+    test_host_ls_tool_is_shallow_browse()
     print("all passed")

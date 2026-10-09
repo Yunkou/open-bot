@@ -14,12 +14,35 @@ from dataclasses import dataclass
 from typing import Any
 
 
+_THINK_BLOCK = re.compile(
+    r"<(?:think|thinking|redacted_thinking)\b[^>]*>[\s\S]*?</(?:think|thinking|redacted_thinking)>",
+    re.IGNORECASE,
+)
+# Unclosed reasoning runs through the rest of the reply (common when the close tag is missing).
+_THINK_UNCLOSED = re.compile(
+    r"<(?:think|thinking|redacted_thinking)\b[^>]*>[\s\S]*$",
+    re.IGNORECASE,
+)
+# Trailing partial open tag while a stream is still arriving ("<thi").
+_THINK_PARTIAL = re.compile(
+    r"<(?:think|thinking|redacted_thinking)\b[^>]*$",
+    re.IGNORECASE,
+)
+
+
 def strip_think_tags(text: str) -> str:
-    """Remove Qwen-style <think>...</think> blocks from model output."""
+    """Remove reasoning blocks so they are not shown or stored as the reply.
+
+    Covers <think>, <thinking>, and <redacted_thinking>, including an unclosed
+    block. A reply that is only reasoning becomes empty — do not fall back to
+    the original text (that leaked the tags into chat history).
+    """
     if not text:
         return text
-    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
-    return cleaned.strip() or text.strip()
+    cleaned = _THINK_BLOCK.sub("", text)
+    cleaned = _THINK_UNCLOSED.sub("", cleaned)
+    cleaned = _THINK_PARTIAL.sub("", cleaned)
+    return cleaned.strip()
 
 
 def detect_family(model: str, base_url: str = "") -> str:
@@ -37,6 +60,8 @@ def detect_family(model: str, base_url: str = "") -> str:
         return "qwen"
     if "deepseek.com" in u:
         return "deepseek"
+    if "moonshot.cn" in u or "kimi" in u:
+        return "openai_chat"
     if "api.openai.com" in u and not m:
         return "openai_chat"
 
@@ -46,6 +71,8 @@ def detect_family(model: str, base_url: str = "") -> str:
     # Vendor substrings
     if m.startswith("claude") or "claude" in m:
         return "anthropic"
+    if m.startswith("kimi") or "moonshot" in m:
+        return "openai_chat"
     if m.startswith("qwen") or m.startswith("qwq") or "qwen" in m or "qwq" in m:
         return "qwen"
     if m.startswith("deepseek") or "deepseek" in m:

@@ -143,6 +143,23 @@ def test_unclosed_strip() -> None:
     _ok("前言" in cleaned, "prose kept")
 
 
+def test_yamlish_tool_calls() -> None:
+    text = (
+        "先查一下\n"
+        "tool_calls:\n"
+        "- tool: host_ls\n"
+        '  args: {"path": "Downloads"}\n'
+    )
+    _ok(content_has_tool_markup(text), "detect yamlish")
+    parsed = parse_tool_markup(text)
+    _ok(len(parsed) == 1, f"one call (got {parsed!r})")
+    _ok(parsed[0].name == "host_ls", "name")
+    _ok(parsed[0].arguments.get("path") == "Downloads", f"args {parsed[0].arguments!r}")
+    cleaned = strip_tool_markup(text)
+    _ok("host_ls" not in cleaned and "Downloads" not in cleaned, f"stripped {cleaned!r}")
+    _ok("先查一下" in cleaned, "prose kept")
+
+
 def main() -> None:
     print("test_tool_markup")
     test_bug_format_sandbox_ls()
@@ -152,6 +169,7 @@ def main() -> None:
     test_fenced_xml()
     test_bare_function_without_tool_call_wrapper()
     test_hermes_line_form()
+    test_yamlish_tool_calls()
     test_no_false_positive()
     test_unclosed_strip()
     print("ALL PASSED")

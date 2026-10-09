@@ -1,64 +1,141 @@
 import { useEffect, useState } from "react";
-import { Card, Col, Row, Statistic, message } from "antd";
+import { Card, Col, Row, Statistic, Table, message, Select, Space } from "antd";
 import { PageContainer } from "@ant-design/pro-components";
 import {
   CommentOutlined,
   MessageOutlined,
   RobotOutlined,
   TeamOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
-import { adminGetUsage, type OrgUsage } from "../api";
+import {
+  adminGetUsage,
+  getAdminScopeOrgId,
+  type OrgUsage,
+} from "../api";
 
 export default function UsagePage() {
   const [usage, setUsage] = useState<OrgUsage | null>(null);
   const [loading, setLoading] = useState(true);
+  const [days, setDays] = useState(30);
 
   useEffect(() => {
     setLoading(true);
-    void adminGetUsage()
+    const orgId = getAdminScopeOrgId() || undefined;
+    void adminGetUsage(days, orgId)
       .then(setUsage)
       .catch((err) => {
         message.error(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [days]);
 
   return (
-    <PageContainer title="用量">
+    <PageContainer
+      title="用量"
+      extra={
+        <Space>
+          <span>统计窗口</span>
+          <Select
+            value={days}
+            style={{ width: 120 }}
+            onChange={setDays}
+            options={[
+              { value: 7, label: "近 7 天" },
+              { value: 30, label: "近 30 天" },
+              { value: 90, label: "近 90 天" },
+            ]}
+          />
+        </Space>
+      }
+    >
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} md={6}>
           <Card loading={loading}>
-            <Statistic
-              title="成员数"
-              value={usage?.member_count ?? 0}
-              prefix={<TeamOutlined />}
-            />
+            <Statistic title="成员数" value={usage?.member_count ?? 0} prefix={<TeamOutlined />} />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={6}>
           <Card loading={loading}>
-            <Statistic
-              title="会话数"
-              value={usage?.conversation_count ?? 0}
-              prefix={<CommentOutlined />}
-            />
+            <Statistic title="会话数" value={usage?.conversation_count ?? 0} prefix={<CommentOutlined />} />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={6}>
           <Card loading={loading}>
-            <Statistic
-              title="消息数"
-              value={usage?.message_count ?? 0}
-              prefix={<MessageOutlined />}
-            />
+            <Statistic title="消息数" value={usage?.message_count ?? 0} prefix={<MessageOutlined />} />
           </Card>
         </Col>
         <Col xs={24} sm={12} md={6}>
           <Card loading={loading}>
-            <Statistic
-              title="助手数"
-              value={usage?.agent_count ?? 0}
-              prefix={<RobotOutlined />}
+            <Statistic title="助手数" value={usage?.agent_count ?? 0} prefix={<RobotOutlined />} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card loading={loading}>
+            <Statistic title="Runs" value={usage?.run_count ?? 0} prefix={<ThunderboltOutlined />} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card loading={loading}>
+            <Statistic title="Prompt tokens" value={usage?.prompt_tokens ?? 0} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card loading={loading}>
+            <Statistic title="Completion tokens" value={usage?.completion_tokens ?? 0} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card loading={loading}>
+            <Statistic title="Total tokens" value={usage?.total_tokens ?? 0} />
+          </Card>
+        </Col>
+      </Row>
+
+      <Card title="按日" style={{ marginTop: 16 }} loading={loading}>
+        <Table
+          rowKey={(r) => r.day || String(Math.random())}
+          size="small"
+          pagination={false}
+          dataSource={usage?.by_day || []}
+          columns={[
+            { title: "日期", dataIndex: "day" },
+            { title: "Runs", dataIndex: "run_count" },
+            { title: "Prompt", dataIndex: "prompt_tokens" },
+            { title: "Completion", dataIndex: "completion_tokens" },
+            { title: "Total", dataIndex: "total_tokens" },
+          ]}
+        />
+      </Card>
+
+      <Row gutter={16} style={{ marginTop: 16 }}>
+        <Col xs={24} md={12}>
+          <Card title="按用户" loading={loading}>
+            <Table
+              rowKey={(r) => r.user_id || r.username || String(Math.random())}
+              size="small"
+              pagination={false}
+              dataSource={usage?.by_user || []}
+              columns={[
+                { title: "用户", dataIndex: "username" },
+                { title: "Runs", dataIndex: "run_count" },
+                { title: "Tokens", dataIndex: "total_tokens" },
+              ]}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card title="按 Bot" loading={loading}>
+            <Table
+              rowKey={(r) => r.agent_id || r.agent_name || String(Math.random())}
+              size="small"
+              pagination={false}
+              dataSource={usage?.by_bot || []}
+              columns={[
+                { title: "Bot", dataIndex: "agent_name" },
+                { title: "Runs", dataIndex: "run_count" },
+                { title: "Tokens", dataIndex: "total_tokens" },
+              ]}
             />
           </Card>
         </Col>

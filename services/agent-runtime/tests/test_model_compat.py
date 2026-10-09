@@ -56,6 +56,11 @@ def test_detect_family() -> None:
     _ok(detect_family("Qwen3-32B-AWQ") == "qwen", "Qwen3-32B-AWQ → qwen")
     _ok(detect_family("qwq-32b") == "qwen", "qwq → qwen")
     _ok(detect_family("deepseek-chat") == "deepseek", "deepseek-chat → deepseek")
+    _ok(detect_family("kimi-k3") == "openai_chat", "kimi-k3 → openai_chat")
+    _ok(
+        detect_family("opaque", "https://api.moonshot.cn/v1") == "openai_chat",
+        "moonshot url → openai_chat",
+    )
 
     _ok(
         detect_family("opaque", "https://api.anthropic.com/v1") == "anthropic",
@@ -123,6 +128,12 @@ def test_profiles_and_adapt() -> None:
     cleaned = postprocess_text(text, pq)
     _ok("<think>" not in cleaned and "hello" in cleaned and "world" in cleaned, "strip think")
     _ok(postprocess_text(text, p4) == text, "gpt-4o does not strip think")
+    from app.model_compat import strip_think_tags
+    only = "<think>\nonly reasoning\n</think>"
+    _ok(strip_think_tags(only) == "", "reasoning-only must be empty, not the original tags")
+    _ok(strip_think_tags("a <thinking>b</thinking> c") == "a  c", "thinking tags")
+    _ok(strip_think_tags("<redacted_thinking>hid</redacted_thinking>ok") == "ok", "redacted_thinking")
+    _ok(strip_think_tags("hi <think>no close") == "hi", "unclosed think drops the rest")
 
 
 def test_env_overrides() -> None:

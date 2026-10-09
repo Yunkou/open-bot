@@ -6,6 +6,7 @@
 *.pyc
 *.pyo
 services/api/api
+services/api/tmp/
 *.exe
 .env
 .env.local
@@ -57,3 +58,8 @@ e2e/playwright/.cache/
 e2e/.mock-llm.pid
 !.env.e2e.example
 !e2e/.env.e2e.example
+
+# local merge scratch / smoke artifacts
+.merge-packs/
+services/api/.merge-packs/
+e2e/smoke-shots/

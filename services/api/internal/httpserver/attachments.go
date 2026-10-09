@@ -19,12 +19,14 @@ const maxAttachmentBytes = 20 << 20 // 20 MiB
 const maxInlineTextBytes = 40 << 10 // 40 KiB inlined into model prompt
 
 // AttachmentRef is metadata returned by upload and accepted on send.
+// URL is the authenticated GET path (relative); client may append ?access_token=.
 type AttachmentRef struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Mime string `json:"mime"`
 	Size int64  `json:"size"`
-	Path string `json:"path"` // relative to UploadsRoot()
+	Path string `json:"path"` // relative to uploadsRoot()
+	URL  string `json:"url,omitempty"`
 }
 
 func uploadsRoot() string {
@@ -257,13 +259,93 @@ func (s *Server) handleUploadAttachment(w http.ResponseWriter, r *http.Request) 
 	}
 
 	relPath := filepath.ToSlash(filepath.Join(relDir, storedName))
-	writeJSON(w, http.StatusCreated, AttachmentRef{
-		ID:   id,
-		Name: name,
-		Mime: mimeType,
-		Size: written,
-		Path: relPath,
+	row, err := s.db.CreateMessageAttachment(db.MessageAttachment{
+		ID:             id,
+		ConversationID: convID,
+		UserID:         uid,
+		Name:           name,
+		Mime:           mimeType,
+		Size:           written,
+		Path:           relPath,
 	})
+	if err != nil {
+		_ = os.Remove(absPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, AttachmentRef{
+		ID:   row.ID,
+		Name: row.Name,
+		Mime: row.Mime,
+		Size: row.Size,
+		Path: row.Path,
+		URL:  row.URL,
+	})
+}
+
+func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	convID := r.PathValue("id")
+	attID := r.PathValue("attachmentId")
+	if strings.TrimSpace(convID) == "" || strings.TrimSpace(attID) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "conversation id and attachment id required"})
+		return
+	}
+	if _, err := s.db.GetConversation(uid, convID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "conversation not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	att, err := s.db.GetMessageAttachment(uid, convID, attID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "attachment not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	abs, err := resolveAttachmentPath(uid, convID, AttachmentRef{
+		ID:   att.ID,
+		Name: att.Name,
+		Mime: att.Mime,
+		Size: att.Size,
+		Path: att.Path,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "attachment file missing"})
+		return
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "attachment file missing"})
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	ctype := att.Mime
+	if ctype == "" {
+		ctype = mime.TypeByExtension(filepath.Ext(att.Name))
+	}
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ctype)
+	// Images: inline so <img> / diagram-card can display; others: download.
+	disp := "attachment"
+	if strings.HasPrefix(strings.ToLower(ctype), "image/") {
+		disp = "inline"
+	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`%s; filename="%s"`, disp, strings.ReplaceAll(att.Name, `"`, `_`)))
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeContent(w, r, att.Name, st.ModTime(), f)
 }
 
 func resolveAttachmentPath(uid, convID string, ref AttachmentRef) (string, error) {
@@ -365,3 +447,59 @@ func buildUserContentWithAttachments(text string, uid, convID string, refs []Att
 	}
 	return strings.TrimRight(b.String(), "\n"), nil
 }
+
+// ensureAttachmentRows upserts DB rows for refs that exist on disk but were uploaded
+// before message_attachments existed (or if CreateMessageAttachment failed silently).
+func (s *Server) ensureAttachmentRows(uid, convID string, refs []AttachmentRef) error {
+	for _, ref := range refs {
+		id := strings.TrimSpace(ref.ID)
+		if id == "" {
+			continue
+		}
+		if _, err := s.db.GetMessageAttachment(uid, convID, id); err == nil {
+			continue
+		} else if err != nil && !errors.Is(err, db.ErrNotFound) {
+			return err
+		}
+		abs, err := resolveAttachmentPath(uid, convID, ref)
+		if err != nil {
+			return err
+		}
+		name := ref.Name
+		if name == "" {
+			name = filepath.Base(abs)
+		}
+		mimeType := ref.Mime
+		if mimeType == "" {
+			mimeType = mime.TypeByExtension(filepath.Ext(name))
+		}
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		size := ref.Size
+		if size <= 0 {
+			if st, serr := os.Stat(abs); serr == nil {
+				size = st.Size()
+			}
+		}
+		rel := ref.Path
+		if rel == "" {
+			root, _ := filepath.Abs(uploadsRoot())
+			rel, _ = filepath.Rel(root, abs)
+			rel = filepath.ToSlash(rel)
+		}
+		if _, err := s.db.CreateMessageAttachment(db.MessageAttachment{
+			ID:             id,
+			ConversationID: convID,
+			UserID:         uid,
+			Name:           name,
+			Mime:           mimeType,
+			Size:           size,
+			Path:           rel,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+

@@ -35,6 +35,34 @@ func (s *Server) requireOrgAdmin(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+func (s *Server) requirePlatformAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		u, ok := s.loadAuthUser(w, r)
+		if !ok {
+			return
+		}
+		if db.NormalizeRole(u.Role) != db.RolePlatformAdmin {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "需要平台管理员权限"})
+			return
+		}
+		next(w, r)
+	})
+}
+
+// adminScopeOrgID returns the org to operate on. platform_admin may pass
+// X-Admin-Org-Id / ?org_id= to view another tenant; org_admin stays own-org.
+func (s *Server) adminScopeOrgID(r *http.Request, u *db.User) string {
+	if db.NormalizeRole(u.Role) == db.RolePlatformAdmin {
+		if v := strings.TrimSpace(r.Header.Get("X-Admin-Org-Id")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(r.URL.Query().Get("org_id")); v != "" {
+			return v
+		}
+	}
+	return u.OrgID
+}
+
 func (s *Server) writeAudit(orgID, actorID, action, targetType, targetID string, meta map[string]any) {
 	if strings.TrimSpace(orgID) == "" || strings.TrimSpace(action) == "" {
 		return
@@ -279,15 +307,24 @@ func (s *Server) handleAdminPutLLM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
+	apiKey := body.APIKey
+	if body.APIKey == "" {
+		if cur, err := s.db.GetOrgSettings(u.OrgID); err == nil {
+			apiKey = cur.LLMAPIKey
+		}
+	}
+	if s.rejectIfToolsUnsupported(w, r, body.BaseURL, apiKey, body.Model, body.EnableTools) {
+		return
+	}
 	settings, err := s.db.UpsertOrgLLM(u.OrgID, body.Name, body.BaseURL, body.APIKey, body.Model, body.EnableTools, body.ContextWindow, body.APIKey == "")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	s.writeAudit(u.OrgID, u.ID, "org.llm_update", "org_settings", u.OrgID, map[string]any{
-		"llm_name":        settings.LLMName,
-		"llm_base_url":    settings.LLMBaseURL,
-		"llm_model":       settings.LLMModel,
+		"llm_name":         settings.LLMName,
+		"llm_base_url":     settings.LLMBaseURL,
+		"llm_model":        settings.LLMModel,
 		"llm_enable_tools": settings.LLMEnableTools,
 		"api_key_updated": body.APIKey != "",
 	})
@@ -299,7 +336,14 @@ func (s *Server) handleAdminUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	usage, err := s.db.GetOrgUsage(u.OrgID)
+	orgID := s.adminScopeOrgID(r, u)
+	days := 30
+	if q := strings.TrimSpace(r.URL.Query().Get("days")); q != "" {
+		if n, err := strconv.Atoi(q); err == nil {
+			days = n
+		}
+	}
+	usage, err := s.db.GetOrgUsageDetailed(orgID, days)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

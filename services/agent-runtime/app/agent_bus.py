@@ -133,6 +133,66 @@ def _post_via_pg(
     }
 
 
+
+def project_handoff_note(
+    *,
+    user_id: str,
+    from_bot: str,
+    to_bot: str,
+    purpose: str,
+    status: str,
+    agent_message_id: str,
+    conversation_id: str | None = None,
+    thread_root_id: str | None = None,
+    viewer_agent_id: str | None = None,
+    skip_if_projected: bool = True,
+) -> dict[str, Any]:
+    """P1 projection: POST /internal/handoff-notes (idempotent on agent_message_id)."""
+    user_id = (user_id or "").strip()
+    agent_message_id = (agent_message_id or "").strip()
+    to_bot = (to_bot or "").strip()
+    from_bot = (from_bot or "").strip() or "open-bot"
+    if not user_id or not agent_message_id or not to_bot:
+        return {"skipped": True, "reason": "missing_required"}
+    status = (status or "running").strip() or "running"
+    purpose = (purpose or "").strip() or "协作交接"
+    if len(purpose) > 120:
+        purpose = purpose[:120] + "…"
+    payload: dict[str, Any] = {
+        "user_id": user_id,
+        "from_bot": from_bot,
+        "to_bot": to_bot,
+        "purpose": purpose,
+        "status": status,
+        "agent_message_id": agent_message_id,
+        "skip_if_projected": bool(skip_if_projected),
+    }
+    if conversation_id:
+        payload["conversation_id"] = conversation_id.strip()
+    if thread_root_id:
+        payload["thread_root_id"] = thread_root_id.strip()
+    if viewer_agent_id:
+        payload["viewer_agent_id"] = viewer_agent_id.strip()
+    url = f"{_api_base()}/internal/handoff-notes"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "X-Internal-Token": _internal_token(),
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except Exception as e:  # noqa: BLE001 — projection must not break bus send
+        return {"error": str(e), "skipped": True}
+
+
 def send_agent_message(
     *,
     user_id: str,
@@ -155,7 +215,7 @@ def send_agent_message(
         raise ValueError("to_agent_id or channel_id required")
 
     try:
-        return _post_via_api(
+        out = _post_via_api(
             user_id=user_id,
             from_agent_id=from_agent_id,
             body=body,
@@ -163,6 +223,22 @@ def send_agent_message(
             channel_id=channel_id,
             priority=priority,
         )
+        # P1: project visible handoff onto user timeline (API also hooks; skip_if_projected).
+        if to_agent_id and out.get("id"):
+            status = "running" if priority else "done"
+            proj = project_handoff_note(
+                user_id=user_id,
+                from_bot=from_agent_id,
+                to_bot=to_agent_id,
+                purpose=body,
+                status=status,
+                agent_message_id=str(out["id"]),
+                viewer_agent_id=from_agent_id,
+                skip_if_projected=True,
+            )
+            if proj:
+                out["_handoff_projection"] = proj
+        return out
     except Exception as api_err:
         fallback = (os.getenv("OPENBOT_BUS_PG_FALLBACK") or "").strip().lower() in {
             "1",
@@ -182,4 +258,18 @@ def send_agent_message(
             priority=priority,
         )
         out["_api_error"] = str(api_err)
+        if to_agent_id and out.get("id"):
+            status = "running" if priority else "done"
+            proj = project_handoff_note(
+                user_id=user_id,
+                from_bot=from_agent_id,
+                to_bot=to_agent_id,
+                purpose=body,
+                status=status,
+                agent_message_id=str(out["id"]),
+                viewer_agent_id=from_agent_id,
+                skip_if_projected=True,
+            )
+            if proj:
+                out["_handoff_projection"] = proj
         return out
