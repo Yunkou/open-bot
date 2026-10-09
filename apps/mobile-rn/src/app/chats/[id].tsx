@@ -79,7 +79,8 @@ export default function ChatScreen(): JSX.Element {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const loading = loadedFor !== conversationId;
   const [error, setError] = useState<string | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(false);
+  /** 用户在本会话里主动关掉引导卡（选了方向、发过消息、或点了关闭）。 */
+  const [onboardingOff, setOnboardingOff] = useState(false);
   const [filePreview, setFilePreview] = useState<{
     open: boolean;
     title: string;
@@ -185,15 +186,6 @@ export default function ChatScreen(): JSX.Element {
       });
     return () => abortRef.current?.abort();
   }, [conversationId, reload]);
-
-  useEffect(() => {
-    if (!showOnboarding || !primaryAgent) return;
-    void shouldShowOnboarding(conversationId, primaryAgent.id, messages.length).then(
-      setShowOnboarding
-    );
-    // 只在会话就绪时判定一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId, primaryAgent?.id]);
 
   /**
    * 作曲框的补全数据源。
@@ -385,7 +377,7 @@ export default function ChatScreen(): JSX.Element {
       if (!content && files.length === 0) return;
 
       setError(null);
-      setShowOnboarding(false);
+      setOnboardingOff(true);
 
       // 附件先上传拿到 AttachmentMeta，再随消息体一起提交
       let uploaded: AttachmentMeta[] = [];
@@ -493,10 +485,10 @@ export default function ChatScreen(): JSX.Element {
     await api.cancelConversationRun(conversationId).catch(() => undefined);
   }, [conversationId]);
 
-  const dismissOnboarding = useCallback(async (): Promise<void> => {
+  const dismissOnboarding = useCallback((): void => {
     if (!primaryAgent) return;
-    setShowOnboarding(false);
-    await setOnboardingDismissed(onboardingStorageKey(conversationId, primaryAgent.id));
+    setOnboardingOff(true);
+    setOnboardingDismissed(onboardingStorageKey(conversationId, primaryAgent.id));
   }, [conversationId, primaryAgent]);
 
   /**
@@ -551,6 +543,20 @@ export default function ChatScreen(): JSX.Element {
     [primaryAgent, refreshAgentsAfterOnboarding, send]
   );
 
+  /**
+   * 引导卡是否该出现 —— 渲染期直接派生。
+   *
+   * 之前是 `useState` + `useEffect` 判定：首屏先渲染 false，等 effect 跑完
+   * 才变 true，闪现一次。`shouldShowOnboarding` 换成 MMKV 同步读之后，
+   * 这里可以纯派生，不用存也不用等。
+   */
+  const showOnboarding =
+    !onboardingOff &&
+    messages.length === 0 &&
+    !loading &&
+    Boolean(primaryAgent) &&
+    shouldShowOnboarding(conversationId, primaryAgent?.id ?? "", messages.length);
+
   const mentionMembers = useMemo(() => mentionMembersOf(agents, memberIds), [agents, memberIds]);
 
   /** 正文里的 `sandbox:` 链接 → 读文件并弹预览。和产物卡片走同一条路。 */
@@ -596,11 +602,15 @@ export default function ChatScreen(): JSX.Element {
       >
         {loading ? <MessageSkeleton /> : null}
 
-        {!loading && messages.length === 0 && !streaming ? (
+        {/* 显隐走上面派生的 showOnboarding。以前这里写的是
+            `!loading && messages.length === 0 && !streaming`，
+            绕过了 showOnboarding —— 结果「关过引导」这个状态算了却没用上，
+            点了关闭下次进来照样弹。 */}
+        {showOnboarding ? (
           <BotOnboarding
             onSelectOption={onOnboardingOption}
             onCustomSubmit={onOnboardingCustom}
-            onDismiss={() => void dismissOnboarding()}
+            onDismiss={dismissOnboarding}
           />
         ) : null}
 

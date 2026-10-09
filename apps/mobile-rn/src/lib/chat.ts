@@ -44,15 +44,15 @@ export function mentionMembersOf(
  * 判断是否展示首次引导卡。
  *
  * 条件与 Web 端一致：会话还没有任何消息，且用户没关过这个会话的引导。
- * 「关过」按会话（或还没建会话时的助手）维度记在 SecureStore。
+ * 「关过」按会话（或还没建会话时的助手）维度记在 MMKV（见 lib/storage.ts）。
  */
-export async function shouldShowOnboarding(
+export function shouldShowOnboarding(
   conversationId: string | null,
   agentId: string,
   messageCount: number
-): Promise<boolean> {
+): boolean {
   if (messageCount > 0) return false;
-  return !(await isOnboardingDismissed(onboardingStorageKey(conversationId, agentId)));
+  return !isOnboardingDismissed(onboardingStorageKey(conversationId, agentId));
 }
 
 /** 待上传附件的本地校验聚合：任一不合格就不允许发送。 */

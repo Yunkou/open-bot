@@ -72,8 +72,13 @@ export default function ChatsScreen(): JSX.Element {
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>({});
-  const [lastOpened, setLastOpened] = useState<LastOpened | null>(null);
+  // 折叠状态与「上次打开」用惰性初始化直接读。
+  //
+  // 之前这里是 useEffect + 异步读盘：首屏先渲染一帧默认值，再跳成真实值。
+  // MMKV 是同步的（见 lib/storage.ts），所以能直接在初始化阶段读出来，
+  // 既没有那一帧闪烁，也不需要 effect。
+  const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>(getCollapsed);
+  const [lastOpened, setLastOpened] = useState<LastOpened | null>(getLastOpened);
 
   const load = useCallback(async () => {
     try {
@@ -97,20 +102,6 @@ export default function ChatsScreen(): JSX.Element {
     void load();
   }, [load]);
 
-  // 折叠状态与「上次打开」在挂载时读一次；读失败由 listPrefs 内部兜底成默认值。
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const [collapsed, last] = await Promise.all([getCollapsed(), getLastOpened()]);
-      if (cancelled) return;
-      setCollapsedMap(collapsed);
-      setLastOpened(last);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const openAgent = useCallback(
     async (agentId: string): Promise<void> => {
       if (openingId) return;
@@ -125,7 +116,7 @@ export default function ChatsScreen(): JSX.Element {
           conversation_id: conversation.id,
         };
         setLastOpened(record);
-        void setLastOpenedPref(record);
+        setLastOpenedPref(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "打开会话失败");
@@ -150,7 +141,7 @@ export default function ChatsScreen(): JSX.Element {
           conversation_id: conversation.id,
         };
         setLastOpened(record);
-        void setLastOpenedPref(record);
+        setLastOpenedPref(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "打开群聊失败");
@@ -260,7 +251,7 @@ export default function ChatsScreen(): JSX.Element {
   const toggleSection = useCallback((key: string) => {
     setCollapsedMap((prev) => {
       const next = { ...prev, [key]: !prev[key] };
-      void setCollapsed(next);
+      setCollapsed(next);
       return next;
     });
   }, []);
