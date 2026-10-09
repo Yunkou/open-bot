@@ -8,6 +8,10 @@ import { KeyboardAvoidingView, Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import * as api from "@/api";
+import { useQueryClient } from "@tanstack/react-query";
+
+import { useAgents, useMessages } from "@/queries";
+import { qk } from "@/queries/client";
 import type { Agent, AttachmentMeta, Message, ReactionUpdatedEvent } from "@/api/types";
 import { BotOnboarding } from "@/components/BotOnboarding";
 import { Composer } from "@/components/Composer";
@@ -36,6 +40,9 @@ import { useRealtimeEvents } from "@/providers/realtime";
 import { useSecretPrompt } from "@/providers/secretPrompt";
 
 const STREAMING_ID = "__streaming__";
+
+/** 稳定空数组引用，避免 `?? []` 让下游 memo 每次都失效。 */
+const EMPTY_AGENTS: Agent[] = [];
 
 type Streaming = { text: string; agentId?: string; agentName?: string };
 
@@ -66,8 +73,7 @@ export default function ChatScreen(): JSX.Element {
   const conversationId = String(id ?? "");
   const { refresh: refreshSecrets } = useSecretPrompt();
 
-  const [messages, setMessages] = useState<UiMessage[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [pendingBubbles, setPendingBubbles] = useState<UiMessage[]>([]);
   const [title, setTitle] = useState("");
   const [memberIds, setMemberIds] = useState<string[] | undefined>();
   const [draft, setDraft] = useState("");
@@ -89,6 +95,21 @@ export default function ChatScreen(): JSX.Element {
     loading: boolean;
     error: string | null;
   }>({ open: false, title: "", content: null, loading: false, error: null });
+
+  const queryClient = useQueryClient();
+  const messagesQuery = useMessages(conversationId);
+  const agentsQuery = useAgents();
+
+  /**
+   * 三个来源拼成最终要渲染的列表：服务端已落库 + 本地乐观气泡 + 正在流式的那条。
+   * 顺序即时间顺序 —— 乐观气泡发出去就在最末尾，流式块也追加在最末尾。
+   */
+  const messages = useMemo<UiMessage[]>(() => {
+    const server = (messagesQuery.data?.messages ?? []).map(toUiMessage);
+    return [...server, ...pendingBubbles];
+  }, [messagesQuery.data, pendingBubbles]);
+
+  const agents = useMemo(() => agentsQuery.data ?? EMPTY_AGENTS, [agentsQuery.data]);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<ScrollView>(null);
@@ -117,15 +138,33 @@ export default function ChatScreen(): JSX.Element {
     return fromMsg ?? agents[0] ?? null;
   }, [agents, memberIds, messages]);
 
-  const fetchMessages = useCallback(async (): Promise<{ runActive: boolean }> => {
-    const res = await api.listMessagesWithStatus(conversationId);
-    const list: UiMessage[] = res.messages.map(toUiMessage);
-    setMessages(list);
-    return { runActive: Boolean(res.run_active) };
-  }, [conversationId]);
+  /**
+   * 消息本体是服务端状态，交给 TanStack Query。
+   *
+   * 保留在本地 state 的只有两类**服务端还不知道的东西**：
+   * - `pendingBubbles`：刚发出去、还没落库的用户消息（乐观气泡）
+   * - `streaming`：正在流式输出的助手回复
+   * 两者都会在拿到服务端结果后清掉。分成这三份而不是混在一个数组里，
+   * 是为了让「哪些是真相」一目了然 —— 否则重取时很容易把流式内容一起冲掉。
+   */
+  /**
+   * 重新拉消息并清掉乐观气泡。
+   *
+   * 单独抽出来是因为 `reload` 自己内部也要用它（重新接管 run 流结束时）。
+   * 如果在 `reload` 的函数体里直接引用 `reload`，会构成自引用 ——
+   * 回调闭包里的 `reload` 指向的是当次渲染的那个实例，
+   * 依赖一变（比如切了会话）就可能拿着旧的。
+   */
+  const refreshMessages = useCallback(async (): Promise<{ runActive: boolean }> => {
+    const { data } = await messagesQuery.refetch();
+    setPendingBubbles([]);
+    return { runActive: Boolean(data?.run_active) };
+  }, [messagesQuery]);
 
   const reload = useCallback(async () => {
-    const { runActive } = await fetchMessages();
+    // 用 refetch 的返回值，而不是闭包里的 messagesQuery.data ——
+    // 那是本次渲染时的旧值，refetch 完不会自己更新。
+    const { runActive } = await refreshMessages();
     if (!runActive) return;
 
     // 服务端还有 run 在跑（App 被杀掉后重开）→ 重新挂回流
@@ -144,7 +183,7 @@ export default function ChatScreen(): JSX.Element {
             setStreaming(null);
             setSending(false);
             setRunLabel("");
-            void fetchMessages();
+            void refreshMessages().then(() => undefined);
           },
           onError: (m) => setError(m),
         },
@@ -155,27 +194,26 @@ export default function ChatScreen(): JSX.Element {
           setError(err instanceof Error ? err.message : "订阅中断");
         }
       });
-  }, [conversationId, fetchMessages]);
+  }, [conversationId, refreshMessages]);
 
   useEffect(() => {
     if (!conversationId) return;
-    // 豁免 react-hooks/set-state-in-effect：reload 内的所有 setState 都在
-    // `await fetchMessages()` 之后才发生（网络往返完成才更新），不是渲染期同步写状态。
+    // 豁免 react-hooks/set-state-in-effect：reload 及其 then 链里的所有
+    // setState 都发生在 `await` 网络往返之后，不是渲染期同步写状态。
     // 规则无法跨 async 边界证明这点，只能在此显式说明。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void reload()
       .then(async () => {
-        const [agentList, convList] = await Promise.all([
-          api.listAgents().catch(() => [] as Agent[]),
+        // 消息由 useMessages 自己管；这里只补会话元信息（标题、是否群聊）
+        const [convList, channelList] = await Promise.all([
           api.listConversations().catch(() => []),
+          api.listChannels().catch(() => []),
         ]);
-        setAgents(agentList);
         const conv = convList.find((c) => c.id === conversationId);
         if (conv) {
           setTitle(conv.title);
           if (conv.channel_id) {
-            const channels = await api.listChannels().catch(() => []);
-            setMemberIds(channels.find((c) => c.id === conv.channel_id)?.members);
+            setMemberIds(channelList.find((c) => c.id === conv.channel_id)?.members);
           }
         }
         setLoadedFor(conversationId);
@@ -265,19 +303,35 @@ export default function ChatScreen(): JSX.Element {
    * 表情变化以服务端返回的 count / me 为准写回本地。
    * 乐观值只是让点击手感不拖沓，拿到权威值后必须替换，否则多端同时点表情会一直不一致。
    */
+  /**
+   * 表情变化以服务端返回的 count / me 为准。
+   *
+   * 写的是 **query 缓存**而不是本地 state：消息本体归 TanStack Query 管，
+   * 只有还没落库的乐观气泡才在 `pendingBubbles` 里。所以这里必须改缓存，
+   * 否则点表情会「没反应」——缓存没变，下次重取又回到旧值。
+   */
   const onReactionChange = useCallback(
     (messageId: string, evt: { emoji: string; count: number; me: boolean; action: string }) => {
-      setMessages((prev) =>
-        prev.map((m) => {
-          if (m.id !== messageId) return m;
-          const rest = (m.reactions ?? []).filter((r) => r.emoji !== evt.emoji);
-          const next =
-            evt.count > 0 ? [...rest, { emoji: evt.emoji, count: evt.count, me: evt.me }] : rest;
-          return { ...m, reactions: next };
-        })
+      queryClient.setQueryData<{ messages: Message[]; run_active?: boolean }>(
+        qk.messages(conversationId),
+        (prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            messages: prev.messages.map((m) => {
+              if (m.id !== messageId) return m;
+              const rest = (m.reactions ?? []).filter((r) => r.emoji !== evt.emoji);
+              const next =
+                evt.count > 0
+                  ? [...rest, { emoji: evt.emoji, count: evt.count, me: evt.me }]
+                  : rest;
+              return { ...m, reactions: next };
+            }),
+          };
+        }
       );
     },
-    []
+    [conversationId, queryClient]
   );
 
   /**
@@ -429,7 +483,7 @@ export default function ChatScreen(): JSX.Element {
         content,
         ...(uploaded.length ? { attachments: uploaded } : {}),
       };
-      setMessages((prev) => [...prev, optimistic]);
+      setPendingBubbles((prev) => [...prev, optimistic]);
       scrollRef.current?.scrollToEnd({ animated: true });
 
       const mentioned = resolveMentionedAgents(content, agents);
@@ -517,10 +571,10 @@ export default function ChatScreen(): JSX.Element {
    * 选完等于白选。Web 端一直是对的（apps/web/src/App.tsx 先 apply 再 send），
    * RN 跟随时补上。落库失败按 Web 的做法：提示但不阻断发送。
    */
+  // 引导卡会改写 Bot 的岗位描述 / 人设 / 默认技能，所以要重取助手列表
   const refreshAgentsAfterOnboarding = useCallback(async (): Promise<void> => {
-    const next = await api.listAgents().catch(() => null);
-    if (next) setAgents(next);
-  }, []);
+    await agentsQuery.refetch();
+  }, [agentsQuery]);
 
   const onOnboardingOption = useCallback(
     (opt: OnboardingOption) => {

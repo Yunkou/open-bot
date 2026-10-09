@@ -1,15 +1,23 @@
 import { Button, Card, Chip, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ScrollView, View } from "react-native";
 
-import * as api from "@/api";
-import type { Agent, InboundHook, Routine, RoutineInput } from "@/api/types";
+import type { InboundHook, Routine, RoutineInput } from "@/api/types";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { EmptyState } from "@/components/states";
+import { errText } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format";
+import {
+  useAgents,
+  useBusy,
+  useInboundHookMutations,
+  useInboundHooks,
+  useRoutineMutations,
+  useRoutines,
+} from "@/queries";
 
 /**
  * 例行任务 + 入站 Webhook。与 Web 端 `settingsTab === "routines"` 对齐：
@@ -82,66 +90,56 @@ function validateTriggers(json: string): string | null {
   }
 }
 
-function errText(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
 export default function RoutinesScreen(): JSX.Element {
   const { confirm } = useConfirm();
 
-  const [routines, setRoutines] = useState<Routine[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [hooks, setHooks] = useState<InboundHook[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [hooksMsg, setHooksMsg] = useState("");
   /** 立即运行后展示的 { status, result_text }，列表里的 last_run 之外再单独回显一次 */
   const [lastRun, setLastRun] = useState<{ name: string; status: string; text: string } | null>(
     null
   );
-  /** 正在跑立即运行的任务 id，用来单独禁用那一个按钮 */
-  const [runningId, setRunningId] = useState<string | null>(null);
 
   const [form, setForm] = useState<RoutineInput>(EMPTY_FORM);
   const [formErrors, setFormErrors] = useState<FormErrors>({});
   /** 正在编辑的任务 id；null = 新建 */
   const [editingId, setEditingId] = useState<string | null>(null);
 
+  // 三个列表各自一把键：原来是一个 Promise.all 一起取一起失败，
+  // 现在保持同样的口径（任一失败整页报错），但只重取真正变了的那把。
+  const routinesQuery = useRoutines();
+  const agentsQuery = useAgents();
+  const hooksQuery = useInboundHooks();
+  const routines = routinesQuery.data ?? [];
+  const agents = agentsQuery.data ?? [];
+  const hooks = hooksQuery.data ?? [];
+
+  const routinesMut = useRoutineMutations();
+  const hooksMut = useInboundHookMutations();
+  const busy = useBusy(
+    routinesMut.create,
+    routinesMut.update,
+    routinesMut.remove,
+    hooksMut.create,
+    hooksMut.remove
+  );
+  /** 正在跑立即运行的任务 id，用来单独禁用那一个按钮（原来也是只禁一个）。 */
+  const runningId = routinesMut.run.isPending ? (routinesMut.run.variables ?? null) : null;
+
+  /** 三个列表中第一个失败的那个：与原来 Promise.all 整页报错的观感一致。 */
+  const loadError = routinesQuery.error ?? agentsQuery.error ?? hooksQuery.error;
+
   const agentNameById = useMemo(() => {
     const m = new Map<string, string>();
-    for (const a of agents) m.set(a.id, a.name);
+    // 依赖 data 而不是上面那个 `agents ?? []`：后者每次渲染都是新数组，
+    // 挂进依赖里等于每次重算这张表。
+    for (const a of agentsQuery.data ?? []) m.set(a.id, a.name);
     return m;
-  }, [agents]);
+  }, [agentsQuery.data]);
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      // 三个列表并行拉：任一失败整页报错会掩盖另外两个还能用的功能
-      const [rs, as, hs] = await Promise.all([
-        api.listRoutines(),
-        api.listAgents(),
-        api.listInboundHooks(),
-      ]);
-      setRoutines(rs);
-      setAgents(as);
-      setHooks(hs);
-    } catch (err) {
-      setError(errText(err, "加载例行任务失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
-
-  const refresh = useCallback(() => {
-    void load();
-  }, [load]);
+  const refresh = () => {
+    void Promise.all([routinesQuery.refetch(), agentsQuery.refetch(), hooksQuery.refetch()]);
+  };
 
   /** 现有任务 → 表单。triggers_json 优先用服务端原文，回落到 triggers 序列化。 */
   function formFromRoutine(r: Routine): RoutineInput {
@@ -198,45 +196,35 @@ export default function RoutinesScreen(): JSX.Element {
       quiet_unchanged: Boolean(form.quiet_unchanged),
     };
 
-    setBusy(true);
     setMsg("");
     try {
       if (editingId) {
-        await api.updateRoutine(editingId, payload);
+        await routinesMut.update.mutateAsync({ id: editingId, body: payload });
         setMsg(`已更新「${name}」`);
       } else {
-        await api.createRoutine(payload);
+        await routinesMut.create.mutateAsync(payload);
         setMsg("已创建");
       }
       cancelEdit();
-      await load();
     } catch (err) {
       setMsg(errText(err, editingId ? "更新失败" : "创建失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function toggle(routine: Routine, enabled: boolean): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
-      await api.updateRoutine(routine.id, { enabled });
-      await load();
+      await routinesMut.update.mutateAsync({ id: routine.id, body: { enabled } });
     } catch (err) {
       setMsg(errText(err, "更新失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function runNow(routine: Routine): Promise<void> {
-    setRunningId(routine.id);
     setMsg("运行中…");
     setLastRun(null);
     try {
-      const res = await api.runRoutine(routine.id);
-      await load();
+      const res = await routinesMut.run.mutateAsync(routine.id);
       // run.result_text 才是用户真正想看的「跑出了什么」，状态只是标签
       setLastRun({
         name: routine.name,
@@ -246,12 +234,10 @@ export default function RoutinesScreen(): JSX.Element {
       setMsg(`运行完成：${res.run.status}`);
     } catch (err) {
       setMsg(errText(err, "运行失败"));
-    } finally {
-      setRunningId(null);
     }
   }
 
-  async function remove(routine: Routine): Promise<void> {
+  async function removeRoutine(routine: Routine): Promise<void> {
     const ok = await confirm({
       title: "删除例行任务？",
       message: `「${routine.name}」将不再按计划自动执行，删除后无法恢复。`,
@@ -261,35 +247,27 @@ export default function RoutinesScreen(): JSX.Element {
     });
     if (!ok) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      await api.deleteRoutine(routine.id);
+      await routinesMut.remove.mutateAsync(routine.id);
       if (lastRun?.name === routine.name) setLastRun(null);
       // 删掉的正好在编辑：表单退回新建态，别留在已经没了的 id 上
       if (editingId === routine.id) cancelEdit();
-      await load();
       setMsg(`已删除「${routine.name}」`);
     } catch (err) {
       setMsg(errText(err, "删除失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function createHook(): Promise<void> {
-    setBusy(true);
     setHooksMsg("");
     try {
       // provider 固定 any：一个 Hook 同时接 Slack 与 GitHub 事件，
       // 与 Web 端 createInboundHook({provider:"any"}) 一致
-      const h = await api.createInboundHook({ provider: "any", label: "默认入站" });
-      await load();
+      const h = await hooksMut.create.mutateAsync({ provider: "any", label: "默认入站" });
       setHooksMsg(`已创建 Hook：${h.label || h.provider}`);
     } catch (err) {
       setHooksMsg(errText(err, "创建 Hook 失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -303,16 +281,12 @@ export default function RoutinesScreen(): JSX.Element {
     });
     if (!ok) return;
 
-    setBusy(true);
     setHooksMsg("");
     try {
-      await api.deleteInboundHook(hook.id);
-      await load();
+      await hooksMut.remove.mutateAsync(hook.id);
       setHooksMsg("已删除 Hook");
     } catch (err) {
       setHooksMsg(errText(err, "删除 Hook 失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -320,8 +294,8 @@ export default function RoutinesScreen(): JSX.Element {
     <ScreenScaffold
       title="例行任务"
       subtitle="定时自动执行"
-      loading={loading}
-      error={error}
+      loading={routinesQuery.isLoading}
+      error={loadError ? errText(loadError, "加载例行任务失败") : null}
       empty={
         routines.length === 0 ? (
           <EmptyState
@@ -418,7 +392,7 @@ export default function RoutinesScreen(): JSX.Element {
                     variant="danger-soft"
                     className="flex-1"
                     isDisabled={busy}
-                    onPress={() => void remove(r)}
+                    onPress={() => void removeRoutine(r)}
                   >
                     <Button.Label>删除</Button.Label>
                   </Button>

@@ -1,16 +1,12 @@
 import { Button, Chip, ListGroup, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { View } from "react-native";
 
-import * as api from "@/api";
 import {
-  clearStoredMachineId,
   defaultMachineLabel,
   detectClientContext,
   getOrCreateMachineKey,
-  getStoredMachineId,
-  setStoredMachineId,
   shouldRegisterAsHost,
 } from "@/api/client";
 import type { Machine } from "@/api/types";
@@ -19,6 +15,7 @@ import { FormField } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { EmptyState } from "@/components/states";
 import { formatRelativeTime } from "@/lib/format";
+import { useBusy, useMachines, useMachineMutations, useStoredMachineId } from "@/queries";
 
 /**
  * 已登记的电脑。对齐 Web 端 `settingsTab === "machines"`：
@@ -79,12 +76,6 @@ function errText(err: unknown, fallback: string): string {
 export default function MachinesScreen(): JSX.Element {
   const { confirm } = useConfirm();
 
-  const [machines, setMachines] = useState<Machine[]>([]);
-  /** 本机在服务端记录里的 id，删除它时要把本地缓存一起清掉 */
-  const [selfId, setSelfId] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   /** 本机名称草稿（`null` = 不在编辑态） */
   const [labelDraft, setLabelDraft] = useState<string | null>(null);
@@ -92,32 +83,24 @@ export default function MachinesScreen(): JSX.Element {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setMachines(await api.listMachines());
-      setSelfId(await getStoredMachineId());
-    } catch (err) {
-      setError(errText(err, "加载电脑列表失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 列表是服务端状态；本机 id 存在本机（SecureStore）而不是服务端，
+  // 但同样走查询层：登记 / 移除之后可以直接改缓存，不必等一次重取。
+  const machinesQuery = useMachines();
+  const selfIdQuery = useStoredMachineId();
+  const { register, heartbeat, update, remove } = useMachineMutations();
+  const busy = useBusy(register, heartbeat, update, remove);
+  const machines = machinesQuery.data ?? [];
+  const selfId = selfIdQuery.data ?? null;
+  const loadError = machinesQuery.error ?? selfIdQuery.error;
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
-
-  const refresh = useCallback(() => {
-    void load();
-  }, [load]);
+  const refresh = () => {
+    void machinesQuery.refetch();
+  };
 
   async function registerSelf(): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
-      const m = await api.registerMachine({
+      const m = await register.mutateAsync({
         machine_key: await getOrCreateMachineKey(),
         label: defaultMachineLabel(client),
         platform: client.platform,
@@ -126,31 +109,23 @@ export default function MachinesScreen(): JSX.Element {
         app: client.app,
         app_version: client.app_version,
       });
-      await setStoredMachineId(m.id);
       setMsg(`已登记本机：${m.label}`);
-      await load();
     } catch (err) {
       setMsg(errText(err, "登记本机失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
-  async function heartbeat(machine: Machine): Promise<void> {
-    setBusy(true);
+  async function sendHeartbeat(machine: Machine): Promise<void> {
     setMsg("");
     try {
-      const updated = await api.heartbeatMachine(machine.id);
+      const updated = await heartbeat.mutateAsync(machine.id);
       setMsg(`已上报心跳：${updated.label}`);
-      await load();
     } catch (err) {
       setMsg(errText(err, "心跳上报失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
-  async function remove(machine: Machine): Promise<void> {
+  async function removeMachine(machine: Machine): Promise<void> {
     const ok = await confirm({
       title: "移除这台电脑？",
       message: `「${machine.label}」将从已登记列表中移除，之后助手无法再把它当作可用的电脑。`,
@@ -160,18 +135,13 @@ export default function MachinesScreen(): JSX.Element {
     });
     if (!ok) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      await api.deleteMachine(machine.id);
-      // 删掉的正是本机时清掉本地缓存，否则下次打开还会以为自己已登记
-      if (selfId === machine.id) await clearStoredMachineId();
+      // 删掉的正是本机时清本机缓存的逻辑放在 mutation 的 onSuccess 里（见 useMachineMutations）
+      await remove.mutateAsync(machine.id);
       setMsg(`已移除 ${machine.label}`);
-      await load();
     } catch (err) {
       setMsg(errText(err, "移除失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -180,28 +150,23 @@ export default function MachinesScreen(): JSX.Element {
     const label = raw.trim();
     if (!label || label === machine.label) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      const updated = await api.updateMachineLabel(machine.id, label);
+      const updated = await update.mutateAsync({ id: machine.id, body: { label } });
       setMsg(`已重命名为 ${updated.label}`);
       setRenamingId(null);
       setLabelDraft(null);
-      await load();
     } catch (err) {
       setMsg(errText(err, "重命名失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function setPolicy(machine: Machine, policy: string): Promise<void> {
     if (normalizePolicy(machine.exec_policy) === policy) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      await api.updateMachine(machine.id, { exec_policy: policy });
+      await update.mutateAsync({ id: machine.id, body: { exec_policy: policy } });
       setMsg(
         policy === "allow"
           ? "已设为始终允许（不弹确认卡；硬拒绝仍失败）"
@@ -209,11 +174,8 @@ export default function MachinesScreen(): JSX.Element {
             ? "已设为每次询问"
             : "已设为不允许在这台设备执行"
       );
-      await load();
     } catch (err) {
       setMsg(errText(err, "更新执行策略失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -223,8 +185,8 @@ export default function MachinesScreen(): JSX.Element {
     <ScreenScaffold
       title="电脑"
       subtitle="已登记的本机设备"
-      loading={loading}
-      error={error}
+      loading={machinesQuery.isLoading}
+      error={loadError ? errText(loadError, "加载电脑列表失败") : null}
       empty={
         machines.length === 0 ? (
           <EmptyState
@@ -478,7 +440,7 @@ export default function MachinesScreen(): JSX.Element {
                       size="sm"
                       variant="ghost"
                       isDisabled={busy}
-                      onPress={() => void heartbeat(m)}
+                      onPress={() => void sendHeartbeat(m)}
                     >
                       <Button.Label>心跳</Button.Label>
                     </Button>
@@ -499,7 +461,7 @@ export default function MachinesScreen(): JSX.Element {
                       size="sm"
                       variant="danger-soft"
                       isDisabled={busy}
-                      onPress={() => void remove(m)}
+                      onPress={() => void removeMachine(m)}
                     >
                       <Button.Label>移除</Button.Label>
                     </Button>

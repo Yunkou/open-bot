@@ -1,7 +1,7 @@
 import { Avatar, Button, Dialog, Menu, Separator, Spinner, Typography } from "heroui-native";
 import { useRouter } from "expo-router";
 import type { JSX, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Pressable, RefreshControl, ScrollView, TextInput, View } from "react-native";
 
 import * as api from "@/api";
@@ -12,9 +12,15 @@ import { Icon } from "@/components/Icon";
 import { FormField } from "@/components/FormField";
 import { EmptyState, ErrorAlert, ListSkeleton } from "@/components/states";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { errText } from "@/lib/errors";
 import { formatRelativeTime } from "@/lib/format";
 import { useSession } from "@/providers/session";
+import { useAgentMutations, useAgents, useChannels, useChannelMutations } from "@/queries";
 import { useListPrefs, type ListPrefsState } from "@/stores/client";
+
+/** 稳定的空数组引用，避免 `?? []` 破坏下游 memo。 */
+const EMPTY_AGENTS: Agent[] = [];
+const EMPTY_CHANNELS: Channel[] = [];
 
 type Row =
   | {
@@ -55,12 +61,35 @@ export default function ChatsScreen(): JSX.Element {
   const { user, signOut } = useSession();
   const { confirm } = useConfirm();
 
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [channels, setChannels] = useState<Channel[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 服务端状态交给 TanStack Query：加载态、错误、重取、缓存都在那边，
+  // 这里只声明「要哪份数据」和「写完之后让哪份失效」。
+  const agentsQuery = useAgents();
+  const channelsQuery = useChannels();
+  const agentMutations = useAgentMutations();
+  const channelMutations = useChannelMutations();
+
+  // 兜底数组用模块级常量：`?? []` 每次渲染都是新引用，
+  // 会让下游所有 useMemo / useCallback 的依赖每次都变（等于缓存失效）
+  const agents = agentsQuery.data ?? EMPTY_AGENTS;
+  const channels = channelsQuery.data ?? EMPTY_CHANNELS;
+  const loading = agentsQuery.isLoading;
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [openingId, setOpeningId] = useState<string | null>(null);
+
+  /** 两个查询里任一失败都要能显示出来；群聊拉不到不该拖垮助手列表。 */
+  const queryError = agentsQuery.error
+    ? errText(agentsQuery.error, "加载助手失败")
+    : channelsQuery.error
+      ? errText(channelsQuery.error, "加载群聊失败")
+      : null;
+
+  /**
+   * 「打开会话失败」「删除失败」这类**单次操作**的错误单独放。
+   * 和 queryError 分开是因为它们不是一回事：查询错误会随重取自愈，
+   * 操作错误必须等用户下一次操作，不该被后台刷新悄悄抹掉。
+   */
+  const [actionError, setActionError] = useState<string | null>(null);
+  const error = actionError ?? queryError;
 
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -73,27 +102,10 @@ export default function ChatsScreen(): JSX.Element {
   const setLastOpened = useListPrefs((s) => s.setLastOpened);
   const toggleSection = useListPrefs((s) => s.toggleSection);
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      const [agentList, channelList] = await Promise.all([
-        api.listAgents(),
-        api.listChannels().catch(() => [] as Channel[]),
-      ]);
-      setAgents(agentList);
-      setChannels(channelList);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+  const load = useCallback(async (): Promise<void> => {
+    await Promise.all([agentsQuery.refetch(), channelsQuery.refetch()]);
+    setRefreshing(false);
+  }, [agentsQuery, channelsQuery]);
 
   const openAgent = useCallback(
     async (agentId: string): Promise<void> => {
@@ -111,7 +123,7 @@ export default function ChatsScreen(): JSX.Element {
         setLastOpened(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "打开会话失败");
+        setActionError(errText(err, "打开会话失败"));
       } finally {
         setOpeningId(null);
       }
@@ -135,7 +147,7 @@ export default function ChatsScreen(): JSX.Element {
         setLastOpened(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "打开群聊失败");
+        setActionError(errText(err, "打开群聊失败"));
       } finally {
         setOpeningId(null);
       }
@@ -166,13 +178,15 @@ export default function ChatsScreen(): JSX.Element {
       });
       if (!ok) return;
       try {
-        await api.deleteAgent(agent.id);
-        await load();
+        // 走 mutation：删除成功后由 onSuccess 精确失效 agents 缓存，
+        // 不用再手动 load() 把整页重打一遍
+        await agentMutations.remove.mutateAsync(agent.id);
+        setActionError(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "删除失败");
+        setActionError(errText(err, "删除失败"));
       }
     },
-    [confirm, load]
+    [agentMutations.remove, confirm]
   );
 
   const removeChannel = useCallback(
@@ -185,13 +199,13 @@ export default function ChatsScreen(): JSX.Element {
       });
       if (!ok) return;
       try {
-        await api.deleteChannel(channel.id);
-        await load();
+        await channelMutations.remove.mutateAsync(channel.id);
+        setActionError(null);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "删除失败");
+        setActionError(errText(err, "删除失败"));
       }
     },
-    [confirm, load]
+    [channelMutations.remove, confirm]
   );
 
   const agentRows = useMemo<Row[]>(

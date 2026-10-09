@@ -1,14 +1,21 @@
 import { Button, Card, Chip, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ScrollView, View } from "react-native";
 
-import * as api from "@/api";
 import type { Agent, AgentSkill } from "@/api/types";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
+import { errText } from "@/lib/errors";
 import { EmptyState } from "@/components/states";
 import { useCurrentBot } from "@/stores/client";
+import {
+  useAgentMutations,
+  useAgentSkillMutations,
+  useAgentSkills,
+  useAgents,
+  useBusy,
+} from "@/queries";
 
 /**
  * Bot 设置。对齐 Web 端 `settingsTab === "bot"`（`components/BotSettingsPanel.tsx`）：
@@ -32,32 +39,18 @@ const COMPUTER_MODES = [
   },
 ];
 
-function errText(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
 export default function BotSettingsScreen(): JSX.Element {
-  const [agents, setAgents] = useState<Agent[]>([]);
   // 当前 Bot 提升到全局 store：这个选择是跨页共享的（设置页选完，
   // 聊天页也该是同一个），之前做成页内状态，一进页面就重置。
   const currentBot = useCurrentBot((s) => s.bot);
   const setCurrentBot = useCurrentBot((s) => s.setBot);
   const selectedId = currentBot?.id ?? null;
-  // 选中态同时存一份 ref：`load` 需要它来保持刷新后的选中项不变，
-  // 但又不能把它放进依赖数组（那会让 load 每次渲染都变，进而让初始化 effect 反复跑）。
-  const selectedRef = useRef<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [computerMode, setComputerMode] = useState<"team" | "private">("team");
-
-  const [skills, setSkills] = useState<AgentSkill[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [msg, setMsg] = useState("");
 
   /** 把服务端返回的 Agent 灌进表单。纯 setState，不含副作用。 */
   const fillForm = useCallback((agent: Agent) => {
@@ -67,57 +60,50 @@ export default function BotSettingsScreen(): JSX.Element {
     setComputerMode(agent.computer_mode === "private" ? "private" : "team");
   }, []);
 
-  const loadSkills = useCallback(async (agentId: string) => {
-    setSkillsLoading(true);
-    try {
-      setSkills(await api.listAgentSkills(agentId));
-    } catch (err) {
-      setSkills([]);
-      setMsg(errText(err, "加载技能失败"));
-    } finally {
-      setSkillsLoading(false);
-    }
-  }, []);
+  const agentsQuery = useAgents();
+  const agents = agentsQuery.data ?? [];
+  const agent = agents.find((a) => a.id === selectedId) ?? null;
 
-  const selectAgent = useCallback(
-    (agent: Agent) => {
-      selectedRef.current = agent.id;
-      setCurrentBot({ id: agent.id, name: agent.name });
-      fillForm(agent);
-      setMsg("");
-      void loadSkills(agent.id);
-    },
-    [fillForm, loadSkills, setCurrentBot]
-  );
+  // 技能跟着选中的 Bot 换：没选中时这把键停用，不会白打接口。
+  const skillsQuery = useAgentSkills(selectedId ?? undefined);
+  const skills = skillsQuery.data ?? [];
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      const list = await api.listAgents();
-      setAgents(list);
-      // 刷新后尽量保持当前选中项（store 里的选择跨页面保留）；
-      // 没有、或已被删除，就退回第一个
-      const target =
-        list.find((a) => a.id === selectedRef.current) ??
-        list.find((a) => a.id === currentBot?.id) ??
-        list[0];
-      if (target) {
-        selectedRef.current = target.id;
-        setCurrentBot({ id: target.id, name: target.name });
-        fillForm(target);
-        await loadSkills(target.id);
-      }
-    } catch (err) {
-      setError(errText(err, "加载助手失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, [currentBot?.id, fillForm, loadSkills, setCurrentBot]);
+  const { update } = useAgentMutations();
+  const skillMut = useAgentSkillMutations();
+  const busy = useBusy(update, skillMut.setEnabled);
+  const skillsLoading = skillsQuery.isLoading;
+  const skillError = skillsQuery.error ? errText(skillsQuery.error, "加载技能失败") : null;
 
+  /**
+   * 选中态兜底：还没选过、或选中的那个已经不在列表里（别处删了 / 换了账号），
+   * 就退回第一个并**写回 store** —— 聊天页读的也是这份选择，不写回去两边会各说各话。
+   */
   useEffect(() => {
+    const list = agentsQuery.data;
+    if (!list || list.length === 0) return;
+    if (selectedId && list.some((a) => a.id === selectedId)) return;
+    const first = list[0];
+    setCurrentBot({ id: first.id, name: first.name });
+  }, [agentsQuery.data, selectedId, setCurrentBot]);
+
+  /**
+   * 选中的助手（或它本身的服务端数据）变了，就把表单重灌一遍。
+   *
+   * 这是这一页唯一保留的 setState-in-effect 豁免：表单是本地草稿，初值只能来自
+   * 服务端数据，而「什么时候该重灌」正是这个 effect 的职责 ——
+   * 换成 mutation 的 onSuccess 只能覆盖「保存之后」，首屏和切换 Bot 都会是空表单。
+   * 依赖的是 agent 对象本身（数据没变时引用稳定），所以打字不会触发它。
+   */
+  useEffect(() => {
+    if (!agent) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+    fillForm(agent);
+  }, [agent, fillForm]);
+
+  function selectAgent(next: Agent): void {
+    setCurrentBot({ id: next.id, name: next.name });
+    setMsg("");
+  }
 
   async function save(): Promise<void> {
     if (!selectedId) return;
@@ -126,39 +112,33 @@ export default function BotSettingsScreen(): JSX.Element {
       setMsg("名称必填");
       return;
     }
-    setBusy(true);
     setMsg("");
     try {
-      await api.updateAgent(selectedId, {
-        name: trimmed,
-        description: description.trim(),
-        system_prompt: systemPrompt.trim(),
-        computer_mode: computerMode,
+      await update.mutateAsync({
+        id: selectedId,
+        body: {
+          name: trimmed,
+          description: description.trim(),
+          system_prompt: systemPrompt.trim(),
+          computer_mode: computerMode,
+        },
       });
       setMsg("已保存岗位与电脑模式");
-      await load();
     } catch (err) {
       setMsg(errText(err, "保存失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function toggleSkill(sk: AgentSkill, enabled: boolean): Promise<void> {
     if (!selectedId) return;
-    setBusy(true);
     setMsg("");
     try {
-      const next = await api.setAgentSkill(selectedId, sk.name, enabled);
-      setSkills((prev) => prev.map((s) => (s.name === next.name ? next : s)));
+      await skillMut.setEnabled.mutateAsync({ agentId: selectedId, name: sk.name, enabled });
     } catch (err) {
       setMsg(errText(err, "更新技能失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
-  const agent = agents.find((a) => a.id === selectedId) ?? null;
   // 账号级已关闭的技能不给开关：那是「技能」页管的维度，
   // 在这里摆一个拨不动的开关只会让人以为是自己关的（与 Web 同口径）。
   const visibleSkills = skills.filter((s) => s.account_enabled !== false);
@@ -168,8 +148,8 @@ export default function BotSettingsScreen(): JSX.Element {
     <ScreenScaffold
       title="Bot 设置"
       subtitle="岗位描述、电脑模式与启用技能"
-      loading={loading}
-      error={error}
+      loading={agentsQuery.isLoading}
+      error={agentsQuery.error ? errText(agentsQuery.error, "加载助手失败") : null}
       emptyOnly={agents.length === 0}
       empty={
         <EmptyState
@@ -178,7 +158,7 @@ export default function BotSettingsScreen(): JSX.Element {
           hint="先在聊天页新建一个助手，才能在这里配置它的岗位与技能"
         />
       }
-      onRetry={() => void load()}
+      onRetry={() => void agentsQuery.refetch()}
     >
       {agents.length > 1 ? (
         <View className="gap-2.5">
@@ -276,6 +256,10 @@ export default function BotSettingsScreen(): JSX.Element {
             <SectionTitle>本 Bot 启用的技能</SectionTitle>
             {skillsLoading ? (
               <Typography.Paragraph color="muted">正在加载技能…</Typography.Paragraph>
+            ) : skillError ? (
+              // 加载失败原来只写进页面底部的 msg，但那样「暂无可用技能」和
+              // 真正的失败原因会长得一模一样。这里就地显示，不再冒充空态。
+              <Typography.Paragraph color="muted">{skillError}</Typography.Paragraph>
             ) : visibleSkills.length === 0 ? (
               <Typography.Paragraph color="muted">
                 暂无可用技能（或尚未加载）。请先在管理端启用平台技能，并在账号侧保持可用。

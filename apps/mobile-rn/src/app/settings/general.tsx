@@ -1,14 +1,14 @@
 import { Button, Card, Chip, Typography } from "heroui-native";
 import * as Clipboard from "expo-clipboard";
 import type { JSX } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { ScrollView, View } from "react-native";
 
-import * as api from "@/api";
-import type { AutoReviewRule, UserSettings } from "@/api/types";
+import type { AutoReviewRule } from "@/api/types";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { useSession } from "@/providers/session";
+import { useUserSettings, useUserSettingsMutations } from "@/queries";
 
 /**
  * 审核与时区。对齐 Web 端 `settingsTab === "general"` 的 `GeneralBotSettings`
@@ -71,33 +71,18 @@ function errText(err: unknown, fallback: string): string {
 export default function GeneralSettingsScreen(): JSX.Element {
   const { user } = useSession();
 
-  const [settings, setSettings] = useState<UserSettings | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-
   const [draftWhen, setDraftWhen] = useState("");
   const [draftAction, setDraftAction] = useState<AutoReviewRule["action"]>("ask_first");
   const [copied, setCopied] = useState(false);
+  const [msg, setMsg] = useState("");
 
   const detected = detectTimezone();
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setSettings(await api.fetchUserSettings());
-    } catch (err) {
-      setError(errText(err, "加载设置失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+  // 设置本身是服务端状态；保存走 mutation，成功回调把整份回读结果写回缓存。
+  const settingsQuery = useUserSettings();
+  const { update } = useUserSettingsMutations();
+  const busy = update.isPending;
+  const settings = settingsQuery.data ?? null;
 
   async function persist(
     patch: {
@@ -107,17 +92,13 @@ export default function GeneralSettingsScreen(): JSX.Element {
     },
     okMsg: string
   ): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
       // 整份读回，避免本地 state 与服务端（比如并发在另一端改过）漂移
-      const next = await api.updateUserSettings(patch);
-      setSettings(next);
+      await update.mutateAsync(patch);
       setMsg(okMsg);
     } catch (err) {
       setMsg(errText(err, "保存失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -164,9 +145,9 @@ export default function GeneralSettingsScreen(): JSX.Element {
     <ScreenScaffold
       title="审核与时区"
       subtitle="操作审批规则与时间基准"
-      loading={loading}
-      error={error}
-      onRetry={() => void load()}
+      loading={settingsQuery.isLoading}
+      error={settingsQuery.error ? errText(settingsQuery.error, "加载设置失败") : null}
+      onRetry={() => void settingsQuery.refetch()}
     >
       <Card>
         <Card.Body className="gap-4">

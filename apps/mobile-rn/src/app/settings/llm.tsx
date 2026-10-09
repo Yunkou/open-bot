@@ -1,6 +1,7 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Button, Card, Chip, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { View } from "react-native";
 
 import * as api from "@/api";
@@ -9,6 +10,8 @@ import { useConfirm } from "@/components/ConfirmDialog";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { formatRelativeTime } from "@/lib/format";
+import { useBusy, useLlmConnections, useLlmMutations } from "@/queries";
+import { qk } from "@/queries/client";
 
 /**
  * 模型（LLM）连接管理。行为对齐 `apps/web/src/App.tsx` 的 `settingsTab === "llm"` 分区。
@@ -41,38 +44,29 @@ export default function LlmSettingsScreen(): JSX.Element {
   // `useConfirm` 返回的是 `{ confirm }` 上下文对象，取方法本身再 await。
   const { confirm } = useConfirm();
 
-  const [connections, setConnections] = useState<LLMConnection[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<LLMInput>(emptyLLMForm);
   const [errors, setErrors] = useState<FieldErrors>({});
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   /** tools 探测中：与普通保存共用 busy 会让「检测」按钮跟着一起禁用，读起来像卡死 */
   const [probing, setProbing] = useState(false);
   /** 最近一次探测的中文结论，独立于 msg 显示，免得被下一次保存结果冲掉 */
   const [probeMsg, setProbeMsg] = useState("");
 
-  const load = useCallback(async (): Promise<LLMConnection[]> => {
-    try {
-      setError(null);
-      const list = await api.listLLMConnections();
-      setConnections(list);
-      return list;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
-      return [];
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 列表与四个写操作都在查询层；页面只留表单这类真正的本地状态。
+  const llm = useLlmConnections();
+  const qc = useQueryClient();
+  const { create, update, remove, setDefault } = useLlmMutations();
+  const connections = llm.data ?? [];
+  const busy = useBusy(create, update, remove, setDefault);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+  /**
+   * 刚写完要按「刷新后的列表」决定表单状态。
+   * mutation 的 onSuccess 已经等列表重取落定（见 useLlmMutations），所以直接读缓存即可。
+   */
+  function freshList(): LLMConnection[] {
+    return qc.getQueryData<LLMConnection[]>(qk.llmConnections) ?? [];
+  }
 
   /**
    * `isDefault` 由列表长度推导：一条连接都没有时新建的那条自动成为默认，
@@ -160,7 +154,6 @@ export default function LlmSettingsScreen(): JSX.Element {
       }
     }
 
-    setBusy(true);
     setMsg("");
     try {
       // 留空 = 自动（按模型名推断），所以非法或 0 一律归一成 null 而不是报错。
@@ -179,35 +172,28 @@ export default function LlmSettingsScreen(): JSX.Element {
         // 只有真的填了新密钥才带上 api_key —— 空串提交会把已存的密钥清掉。
         const key = form.api_key?.trim();
         if (key) payload.api_key = key;
-        await api.updateLLMConnection(editingId, payload);
+        await update.mutateAsync({ id: editingId, body: payload });
         setMsg("已更新");
       } else {
-        await api.createLLMConnection({ ...form, name, context_window: contextWindow });
+        await create.mutateAsync({ ...form, name, context_window: contextWindow });
         setMsg("已创建");
       }
-      const list = await load();
-      resetForm(list.length > 0);
+      resetForm(freshList().length > 0);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
-  async function setDefault(c: LLMConnection): Promise<void> {
-    setBusy(true);
+  async function setDefaultConnection(c: LLMConnection): Promise<void> {
     setMsg("");
     try {
-      await api.setDefaultLLMConnection(c.id);
-      await load();
+      await setDefault.mutateAsync(c.id);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
-  async function remove(c: LLMConnection): Promise<void> {
+  async function removeConnection(c: LLMConnection): Promise<void> {
     // 删掉当前正在用的默认连接会让聊天立刻失去模型，所以必须先确认。
     const ok = await confirm({
       title: `确定删除连接「${c.name}」？`,
@@ -217,17 +203,13 @@ export default function LlmSettingsScreen(): JSX.Element {
       destructive: true,
     });
     if (!ok) return;
-    setBusy(true);
     setMsg("");
     try {
-      await api.deleteLLMConnection(c.id);
-      const list = await load();
+      await remove.mutateAsync(c.id);
       // 删掉的正好是正在编辑的那条时，让表单退回新建态而不是留在脏数据上。
-      if (editingId === c.id) resetForm(list.length > 0);
+      if (editingId === c.id) resetForm(freshList().length > 0);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -235,9 +217,9 @@ export default function LlmSettingsScreen(): JSX.Element {
     <ScreenScaffold
       title="模型"
       subtitle="OpenAI 兼容连接"
-      loading={loading}
-      error={error}
-      onRetry={() => void load()}
+      loading={llm.isLoading}
+      error={llm.error?.message || null}
+      onRetry={() => void llm.refetch()}
     >
       <Typography.Paragraph color="muted">
         每个用户可配置多个 OpenAI 兼容连接；聊天默认使用「默认」连接。密钥不会完整回显。
@@ -277,7 +259,7 @@ export default function LlmSettingsScreen(): JSX.Element {
                     size="sm"
                     variant="secondary"
                     isDisabled={busy}
-                    onPress={() => void setDefault(c)}
+                    onPress={() => void setDefaultConnection(c)}
                   >
                     <Button.Label>设默认</Button.Label>
                   </Button>
@@ -285,7 +267,12 @@ export default function LlmSettingsScreen(): JSX.Element {
                 <Button size="sm" variant="outline" isDisabled={busy} onPress={() => startEdit(c)}>
                   <Button.Label>编辑</Button.Label>
                 </Button>
-                <Button size="sm" variant="danger" isDisabled={busy} onPress={() => void remove(c)}>
+                <Button
+                  size="sm"
+                  variant="danger"
+                  isDisabled={busy}
+                  onPress={() => void removeConnection(c)}
+                >
                   <Button.Label>删除</Button.Label>
                 </Button>
               </View>

@@ -1,16 +1,17 @@
 import { Button, Card, Chip, ListGroup, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Pressable, View } from "react-native";
 
 import * as api from "@/api";
-import type { Sandbox, SandboxDirEntry } from "@/api/types";
+import type { SandboxDirEntry } from "@/api/types";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { FormField, SectionTitle } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { WebPreviewModal } from "@/components/chat/WebPreviewModal";
 import { formatDateTime, formatSize } from "@/lib/format";
 import { friendlyOpenError, normalizeWorkspacePath, previewTitleFromPath } from "@/lib/workspace";
+import { useBusy, useSandbox, useSandboxMutations } from "@/queries";
 
 /**
  * 运行环境（高级）。
@@ -89,11 +90,13 @@ function joinPath(base: string, name: string): string {
 export default function SandboxScreen(): JSX.Element {
   const { confirm } = useConfirm();
 
-  const [sandbox, setSandbox] = useState<Sandbox | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  /**
+   * 「跑一条命令 / 读一个文件 / 写一个文件」期间的忙碌态。
+   * 它们不是缓存里的任何一把键（结果只回显在当前面板里），所以留在本地 state；
+   * 但按钮的禁用口径要和原来一样是「整页一起禁」，所以并进下面的 busy。
+   */
+  const [fileBusy, setFileBusy] = useState(false);
 
   const [cmd, setCmd] = useState("echo hi");
   const [execOut, setExecOut] = useState("");
@@ -113,50 +116,38 @@ export default function SandboxScreen(): JSX.Element {
   /** 实际读/写过的文件（内部路径），用于展示文件名标题 */
   const [openedFile, setOpenedFile] = useState<string>("");
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      // 不带 ensure：单纯打开页面不应该有「把运行环境拉起来」的副作用，
-      // 启动是用户显式点「确保启动」或「打开桌面」才发生的事。
-      setSandbox(await api.getSandbox());
-    } catch (err) {
-      setError(publicError(err, "读取运行环境状态失败"));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // 运行环境状态是服务端状态；这几个接口都把最新的 Sandbox 原样返回，
+  // 所以成功回调里直接写缓存即可，不用再回打一次 GET。
+  const sandboxQuery = useSandbox();
+  const {
+    ensure: ensureMut,
+    stop: stopMut,
+    checkpoint: checkpointMut,
+    reset: resetMut,
+  } = useSandboxMutations();
+  const sandbox = sandboxQuery.data ?? null;
+  const busy = useBusy(ensureMut, stopMut, checkpointMut, resetMut) || fileBusy;
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
-
-  const refresh = useCallback(() => {
-    void load();
-  }, [load]);
+  const refresh = () => {
+    void sandboxQuery.refetch();
+  };
 
   async function ensure(): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
       // ensureSandbox() 与 GET /v1/sandbox?ensure=1 是同一件事：
       // 幂等——已在运行就直接返回现状，不会重启。语义上等于「确保它开着」。
-      const s = await api.ensureSandbox();
-      setSandbox(s);
+      const s = await ensureMut.mutateAsync();
       setMsg(s.status === "running" ? "运行环境已在运行" : "运行环境状态：" + statusText(s.status));
     } catch (err) {
       setMsg(publicError(err, "启动运行环境失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function openDesktop(): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
-      const s = await api.ensureSandbox({ desktop: true });
-      setSandbox(s);
+      const s = await ensureMut.mutateAsync({ desktop: true });
       if (!s.desktop_port) {
         setMsg(
           publicLastError(s.last_error) || "桌面预览未就绪，请联系管理员确认桌面环境是否已安装"
@@ -170,24 +161,18 @@ export default function SandboxScreen(): JSX.Element {
       setDesktop({ open: true, url });
     } catch (err) {
       setMsg(publicError(err, "无法打开桌面"));
-    } finally {
-      setBusy(false);
     }
   }
 
   async function checkpoint(): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
-      const res = await api.checkpointSandbox();
-      setSandbox(res.sandbox);
+      const res = await checkpointMut.mutateAsync();
       // checkpoint_path 是宿主机目录，绝不能整段显示，只取最后一段名字
       const name = previewTitleFromPath(res.checkpoint_path || "");
       setMsg(name ? `已保存快照：${name}` : "已保存快照");
     } catch (err) {
       setMsg(publicError(err, "保存快照失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -200,16 +185,12 @@ export default function SandboxScreen(): JSX.Element {
     });
     if (!ok) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      const s = await api.stopSandbox();
-      setSandbox(s);
+      await stopMut.mutateAsync();
       setMsg("已停止");
     } catch (err) {
       setMsg(publicError(err, "停止运行环境失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -224,11 +205,9 @@ export default function SandboxScreen(): JSX.Element {
     });
     if (!ok) return;
 
-    setBusy(true);
     setMsg("");
     try {
-      const res = await api.resetSandbox();
-      setSandbox(res.sandbox);
+      await resetMut.mutateAsync();
       // 后端 warning 是英文内部文案（含 workspace / container 等实现细节），
       // 这里只保留它的语义：已清空，但快照还在。
       setMsg("已重置：运行文件已全部清空并重建运行环境（系统保留了一份快照）");
@@ -237,8 +216,6 @@ export default function SandboxScreen(): JSX.Element {
       setOpenedFile("");
     } catch (err) {
       setMsg(publicError(err, "重置运行环境失败"));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -248,7 +225,7 @@ export default function SandboxScreen(): JSX.Element {
       setMsg("请填写要执行的命令");
       return;
     }
-    setBusy(true);
+    setFileBusy(true);
     setMsg("");
     setExecOut("");
     try {
@@ -259,7 +236,7 @@ export default function SandboxScreen(): JSX.Element {
     } catch (err) {
       setMsg(publicError(err, "执行命令失败"));
     } finally {
-      setBusy(false);
+      setFileBusy(false);
     }
   }
 
@@ -279,7 +256,7 @@ export default function SandboxScreen(): JSX.Element {
   }
 
   async function openFile(path: string): Promise<void> {
-    setBusy(true);
+    setFileBusy(true);
     setMsg("");
     try {
       const res = await api.readSandboxFile(normalizeWorkspacePath(path));
@@ -290,7 +267,7 @@ export default function SandboxScreen(): JSX.Element {
     } catch (err) {
       setMsg(friendlyOpenError(err));
     } finally {
-      setBusy(false);
+      setFileBusy(false);
     }
   }
 
@@ -300,7 +277,7 @@ export default function SandboxScreen(): JSX.Element {
       setMsg("请填写文件路径");
       return;
     }
-    setBusy(true);
+    setFileBusy(true);
     setMsg("");
     try {
       const res = await api.writeSandboxFile(normalizeWorkspacePath(path), fileContent);
@@ -310,7 +287,7 @@ export default function SandboxScreen(): JSX.Element {
     } catch (err) {
       setMsg(friendlyOpenError(err));
     } finally {
-      setBusy(false);
+      setFileBusy(false);
     }
   }
 
@@ -320,8 +297,8 @@ export default function SandboxScreen(): JSX.Element {
     <ScreenScaffold
       title="运行环境"
       subtitle="助手生成脚本、临时文件与预览时使用的隔离环境"
-      loading={loading}
-      error={error}
+      loading={sandboxQuery.isLoading}
+      error={sandboxQuery.error ? publicError(sandboxQuery.error, "读取运行环境状态失败") : null}
       onRetry={refresh}
       headerRight={
         <Button size="sm" variant="secondary" onPress={refresh}>

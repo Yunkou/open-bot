@@ -1,14 +1,14 @@
 import { Button, Card, Chip, Typography } from "heroui-native";
 import * as DocumentPicker from "expo-document-picker";
 import type { JSX } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { View } from "react-native";
 
-import * as api from "@/api";
 import type { Skill } from "@/api/types";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
+import { useBusy, useSkillMutations, useSkills } from "@/queries";
 
 /**
  * Skills 管理。行为对齐 `apps/web/src/App.tsx` 的 `settingsTab === "skills"` 分区。
@@ -35,48 +35,30 @@ type PickedZip = { uri: string; name: string; mime: string };
 export default function SkillsSettingsScreen(): JSX.Element {
   const { confirm } = useConfirm();
 
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
-
   const [skillName, setSkillName] = useState("");
   const [skillDesc, setSkillDesc] = useState("");
   const [skillBody, setSkillBody] = useState("");
   const [zip, setZip] = useState<PickedZip | null>(null);
   const [errors, setErrors] = useState<UploadErrors>({});
+  const [msg, setMsg] = useState("");
 
-  const load = useCallback(async () => {
-    try {
-      setError(null);
-      setSkills(await api.listSkills());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
+  // 列表与三个写操作都在查询层；这里只留上传表单这类本地状态。
+  const skillsQuery = useSkills();
+  // 改名 uploadSkill：下面那个 `upload()` 是页面的表单提交函数，别和 mutation 撞名。
+  const { setEnabled, upload: uploadSkill, remove } = useSkillMutations();
+  const busy = useBusy(setEnabled, uploadSkill, remove);
+  const skills = skillsQuery.data ?? [];
 
   async function toggle(s: Skill, enabled: boolean): Promise<void> {
-    setBusy(true);
     setMsg("");
     try {
-      await api.setSkillEnabled(s.name, enabled);
-      await load();
+      await setEnabled.mutateAsync({ name: s.name, enabled });
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
-  async function remove(s: Skill): Promise<void> {
+  async function removeSkill(s: Skill): Promise<void> {
     if (!s.custom) return;
     const ok = await confirm({
       title: `删除自定义技能「${s.name}」？`,
@@ -86,16 +68,12 @@ export default function SkillsSettingsScreen(): JSX.Element {
       destructive: true,
     });
     if (!ok) return;
-    setBusy(true);
     setMsg("");
     try {
-      await api.deleteSkill(s.name);
-      await load();
+      await remove.mutateAsync(s.name);
       setMsg("已删除");
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -135,24 +113,20 @@ export default function SkillsSettingsScreen(): JSX.Element {
     setErrors(nextErrors);
     if (nextErrors.name || nextErrors.description) return;
 
-    setBusy(true);
     setMsg("");
     try {
       const result = zip
-        ? await api.uploadSkillPackage(zip)
-        : await api.uploadSkill({ name, description, body_markdown: skillBody });
+        ? await uploadSkill.mutateAsync({ zip })
+        : await uploadSkill.mutateAsync({ name, description, body_markdown: skillBody });
       // 上传成功后清空表单：正文可能很长，留着下次容易被误提交两次。
       setSkillName("");
       setSkillDesc("");
       setSkillBody("");
       setZip(null);
-      await load();
       const n = result.file_count ?? result.files?.length ?? 1;
       setMsg(`技能「${result.name}」已上传并默认启用（${n} 个文件）`);
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -160,9 +134,9 @@ export default function SkillsSettingsScreen(): JSX.Element {
     <ScreenScaffold
       title="Skills"
       subtitle="技能启用与上传"
-      loading={loading}
-      error={error}
-      onRetry={() => void load()}
+      loading={skillsQuery.isLoading}
+      error={skillsQuery.error?.message || "加载失败"}
+      onRetry={() => void skillsQuery.refetch()}
     >
       <Typography.Paragraph color="muted">
         关闭后该技能不会注入 runtime 系统提示，也无法被 load_skill 加载。默认全部启用。
@@ -269,7 +243,7 @@ export default function SkillsSettingsScreen(): JSX.Element {
                       size="sm"
                       variant="danger"
                       isDisabled={busy}
-                      onPress={() => void remove(s)}
+                      onPress={() => void removeSkill(s)}
                     >
                       <Button.Label>删除</Button.Label>
                     </Button>
