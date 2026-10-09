@@ -15,7 +15,9 @@ from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
-_TRUNCATE = 12_000  # ~12KB; avoid shipping huge prompts / secrets
+_TRUNCATE = 12_000  # ~12KB; general IO (tool args, outputs)
+_GEN_INPUT_TRUNCATE = 48_000  # generation prompts incl. system; still capped
+
 
 _client: Any | None = None
 _init_attempted = False
@@ -262,29 +264,68 @@ def trace_run(
                 logger.debug("langfuse trace_run exit skipped: %s", e)
 
 
-def _redact_generation_input(input_messages: Any) -> Any:
-    """Redact system role content (may contain persona / secrets)."""
+def _gen_input_limit() -> int:
+    """Max chars for generation input payloads (env LANGFUSE_IO_TRUNCATE)."""
+    raw = (os.getenv("LANGFUSE_IO_TRUNCATE") or "").strip()
+    if raw.isdigit():
+        return max(1024, int(raw))
+    return _GEN_INPUT_TRUNCATE
+
+
+def _redact_system_enabled() -> bool:
+    """When true, replace system message bodies with an omit placeholder.
+
+    Default **off** so local Langfuse debug shows full system text (persona /
+    tools routing / memory / client_env). Set LANGFUSE_REDACT_SYSTEM=1 in
+    shared/prod environments if prompts must stay out of traces.
+    """
+    return _env_truthy("LANGFUSE_REDACT_SYSTEM", "0")
+
+
+def _prepare_generation_input(input_messages: Any) -> Any:
+    """Truncate generation input; optionally redact system role content.
+
+    Never drops system messages entirely: either full (truncated) text or an
+    explicit ``[omitted system prompt, N chars]`` placeholder when redacting.
+    """
     if input_messages is None:
         return None
+    limit = _gen_input_limit()
+    redact = _redact_system_enabled()
     if isinstance(input_messages, list):
         safe_in: list[Any] = []
         for m in input_messages:
             if not isinstance(m, dict):
-                safe_in.append(truncate(m))
+                safe_in.append(truncate(m, max(256, limit // 4)))
                 continue
             role = str(m.get("role") or "")
             content = m.get("content")
-            if role == "system":
+            # Preserve extra keys (tool_calls etc.) lightly via role/content focus
+            if role == "system" and redact:
                 safe_in.append(
                     {
                         "role": "system",
                         "content": f"[omitted system prompt, {len(str(content or ''))} chars]",
                     }
                 )
+            elif role == "system":
+                # Prefer keeping system text: half the budget (min 8KB when limit allows)
+                sys_limit = max(256, min(limit, max(8_000, limit // 2)))
+                entry = {k: v for k, v in m.items() if k != "content"}
+                entry["role"] = "system"
+                entry["content"] = truncate(content, sys_limit)
+                safe_in.append(entry)
             else:
-                safe_in.append({"role": role, "content": truncate(content)})
-        return truncate(safe_in)
-    return truncate(input_messages)
+                entry = {k: v for k, v in m.items() if k != "content"}
+                entry["role"] = role
+                entry["content"] = truncate(content, max(256, limit // 4))
+                safe_in.append(entry)
+        return truncate(safe_in, limit)
+    return truncate(input_messages, limit)
+
+
+# Back-compat alias (older tests / callers).
+_redact_generation_input = _prepare_generation_input
 
 
 @contextmanager
@@ -304,7 +345,7 @@ def observation_generation(
         yield _Noop()
         return
 
-    safe_in = _redact_generation_input(input_messages)
+    safe_in = _prepare_generation_input(input_messages)
     obs_cm: Any | None = None
     gen: Any = _Noop()
     entered = False
@@ -488,6 +529,16 @@ def merge_usage_details(
                 continue
             acc[k] = acc.get(k, 0) + int(v)
     return acc or None
+
+
+def trace_id_of(obs: Any) -> str:
+    """Best-effort Langfuse/OTEL trace id from a root observation (empty if noop/off)."""
+    if obs is None or isinstance(obs, _Noop):
+        return ""
+    tid = getattr(obs, "trace_id", None)
+    if isinstance(tid, str) and tid.strip():
+        return tid.strip()
+    return ""
 
 
 def update_obs(obs: Any, **kwargs: Any) -> None:

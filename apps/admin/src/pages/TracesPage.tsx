@@ -1,14 +1,89 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Drawer, Empty, Space, Typography, message } from "antd";
+import { Button, Drawer, Empty, List, Space, Tag, Typography, message } from "antd";
 import { PageContainer, ProTable, type ActionType, type ProColumns } from "@ant-design/pro-components";
 import {
   adminGetTrace,
+  adminListMemoryRecalls,
   adminListTraces,
   adminTracesStatus,
+  type AdminMemoryRecall,
+  type AdminMemoryRecallItem,
   type AdminTrace,
 } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
-const { Paragraph, Text, Link } = Typography;
+const { Paragraph, Text, Link, Title } = Typography;
+
+const SOURCE_LABEL: Record<string, string> = {
+  explicit: "显式",
+  mem0: "Mem0",
+};
+
+function pickClosestRecall(recalls: AdminMemoryRecall[], timestamp?: string): AdminMemoryRecall | null {
+  if (!recalls.length) return null;
+  if (!timestamp) return recalls[0];
+  const target = Date.parse(timestamp);
+  if (Number.isNaN(target)) return recalls[0];
+  let best = recalls[0];
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const r of recalls) {
+    const t = Date.parse(r.created_at || "");
+    if (Number.isNaN(t)) continue;
+    const dist = Math.abs(t - target);
+    if (dist < bestDist) {
+      best = r;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+async function fetchRecallForTrace(trace: AdminTrace): Promise<{
+  recall: AdminMemoryRecall | null;
+  matchedBy: "langfuse_trace_id" | "conversation_id" | null;
+}> {
+  const traceId = (trace.id || "").trim();
+  if (traceId) {
+    const byTrace = await adminListMemoryRecalls({ langfuse_trace_id: traceId, limit: 5 });
+    const hit = (byTrace.recalls || [])[0];
+    if (hit) return { recall: hit, matchedBy: "langfuse_trace_id" };
+  }
+  const convId = (trace.sessionId || "").trim();
+  if (convId) {
+    const byConv = await adminListMemoryRecalls({ conversation_id: convId, limit: 20 });
+    const hit = pickClosestRecall(byConv.recalls || [], trace.timestamp);
+    if (hit) return { recall: hit, matchedBy: "conversation_id" };
+  }
+  return { recall: null, matchedBy: null };
+}
+
+function RecallItems({ items }: { items: AdminMemoryRecallItem[] }) {
+  if (!items.length) {
+    return <Text type="secondary">本轮未注入记忆片段</Text>;
+  }
+  return (
+    <List
+      size="small"
+      bordered
+      dataSource={items}
+      renderItem={(item, idx) => (
+        <List.Item key={`${item.memory_id || item.source}-${idx}`}>
+          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+            <Space wrap size={4}>
+              <Tag color={item.source === "mem0" ? "purple" : "blue"}>
+                {SOURCE_LABEL[item.source] || item.source || "—"}
+              </Tag>
+              {item.scope ? <Tag>{item.scope}</Tag> : null}
+              {item.tier ? <Tag>{item.tier}</Tag> : null}
+              {item.score != null ? <Text type="secondary">score {item.score.toFixed(2)}</Text> : null}
+            </Space>
+            <Text style={{ whiteSpace: "pre-wrap" }}>{item.snippet || item.content || "—"}</Text>
+          </Space>
+        </List.Item>
+      )}
+    />
+  );
+}
 
 export default function TracesPage() {
   const actionRef = useRef<ActionType>(null);
@@ -26,6 +101,11 @@ export default function TracesPage() {
     reason?: string;
   } | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [recall, setRecall] = useState<AdminMemoryRecall | null>(null);
+  const [recallMatchedBy, setRecallMatchedBy] = useState<"langfuse_trace_id" | "conversation_id" | null>(
+    null,
+  );
+  const [recallLoading, setRecallLoading] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -46,7 +126,10 @@ export default function TracesPage() {
   const openDetail = async (id: string) => {
     setDrawerOpen(true);
     setDetailLoading(true);
+    setRecallLoading(true);
     setDetail(null);
+    setRecall(null);
+    setRecallMatchedBy(null);
     try {
       const data = await adminGetTrace(id);
       setDetail({
@@ -54,11 +137,21 @@ export default function TracesPage() {
         observations: data.observations,
         reason: data.reason,
       });
+      if (data.trace) {
+        try {
+          const { recall: hit, matchedBy } = await fetchRecallForTrace(data.trace);
+          setRecall(hit);
+          setRecallMatchedBy(matchedBy);
+        } catch (err) {
+          message.warning(err instanceof Error ? err.message : String(err));
+        }
+      }
     } catch (err) {
       message.error(err instanceof Error ? err.message : String(err));
       setDetail({ trace: null, reason: err instanceof Error ? err.message : String(err) });
     } finally {
       setDetailLoading(false);
+      setRecallLoading(false);
     }
   };
 
@@ -68,14 +161,43 @@ export default function TracesPage() {
       dataIndex: "timestamp",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")),
     },
-    { title: "名称", dataIndex: "name", ellipsis: true },
+    { title: "名称", dataIndex: "name", ellipsis: true, width: 140 },
     {
-      title: "用户 ID",
-      dataIndex: "userId",
-      width: 160,
+      title: "Bot",
+      dataIndex: "agentName",
+      width: 140,
+      ellipsis: true,
+      render: (_, row) => row.agentName || row.agentId || "—",
+    },
+    {
+      title: "用户",
+      dataIndex: "userName",
+      width: 140,
+      ellipsis: true,
+      render: (_, row) =>
+        row.userName ? (
+          <span>
+            {row.userName}
+            {row.userId ? (
+              <Text type="secondary" style={{ marginLeft: 6, fontSize: 12 }}>
+                {row.userId.slice(0, 8)}…
+              </Text>
+            ) : null}
+          </span>
+        ) : (
+          row.userId || "—"
+        ),
+    },
+    {
+      title: "会话",
+      dataIndex: "sessionId",
+      width: 140,
       ellipsis: true,
       copyable: true,
+      render: (_, row) => row.sessionId || "—",
     },
     {
       title: "耗时 (s)",
@@ -131,7 +253,8 @@ export default function TracesPage() {
       ) : (
         <>
           <Paragraph type="secondary">
-            数据来自本地 Langfuse（经管理 API 代理）。详细分析请使用「在 Langfuse 打开」。
+            数据来自本地 Langfuse（经管理 API 代理）。打开详情可看「本轮召回」（按 Langfuse trace id /
+            会话匹配 `memory_recalls`）。全量检索仍在「记忆与压缩 → 本轮召回」。
             {status?.reason ? `（${status.reason}）` : ""}
           </Paragraph>
           <ProTable<AdminTrace>
@@ -140,7 +263,7 @@ export default function TracesPage() {
             rowKey="id"
             search={false}
             options={{ reload: true }}
-            pagination={{ pageSize: 20 }}
+            pagination={{ ...LIST_PAGINATION }}
             columns={columns}
             request={async (params) => {
               try {
@@ -181,7 +304,7 @@ export default function TracesPage() {
 
       <Drawer
         title="Trace 详情"
-        width={640}
+        width={720}
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         destroyOnClose
@@ -213,8 +336,36 @@ export default function TracesPage() {
               <div>{detail.trace.name || "—"}</div>
             </div>
             <div>
+              <Text type="secondary">Bot</Text>
+              <div>
+                {detail.trace.agentName || "—"}
+                {detail.trace.agentId ? (
+                  <Text type="secondary" style={{ marginLeft: 8 }} copyable={{ text: detail.trace.agentId }}>
+                    {detail.trace.agentId.slice(0, 8)}…
+                  </Text>
+                ) : null}
+              </div>
+            </div>
+            <div>
               <Text type="secondary">用户</Text>
-              <div>{detail.trace.userId || "—"}</div>
+              <div>
+                {detail.trace.userName || "—"}
+                {detail.trace.userId ? (
+                  <Text type="secondary" style={{ marginLeft: 8 }} copyable={{ text: detail.trace.userId }}>
+                    {detail.trace.userId.slice(0, 8)}…
+                  </Text>
+                ) : null}
+              </div>
+            </div>
+            <div>
+              <Text type="secondary">会话（conversation_id）</Text>
+              <div>
+                {detail.trace.sessionId ? (
+                  <Text copyable>{detail.trace.sessionId}</Text>
+                ) : (
+                  "—"
+                )}
+              </div>
             </div>
             <div>
               <Text type="secondary">时间</Text>
@@ -224,6 +375,40 @@ export default function TracesPage() {
               <Text type="secondary">耗时</Text>
               <div>{detail.trace.latency ?? "—"}</div>
             </div>
+
+            <div>
+              <Title level={5} style={{ marginTop: 8, marginBottom: 8 }}>
+                本轮召回
+              </Title>
+              {recallLoading ? (
+                <Text type="secondary">加载召回…</Text>
+              ) : recall ? (
+                <Space direction="vertical" style={{ width: "100%" }} size="small">
+                  <Text type="secondary">
+                    显式 {recall.explicit_count ?? 0} / Mem0 {recall.mem0_count ?? 0}
+                    {recall.scene ? ` · 场景 ${recall.scene}` : ""}
+                    {recallMatchedBy === "langfuse_trace_id"
+                      ? " · 按 Langfuse trace 匹配"
+                      : recallMatchedBy === "conversation_id"
+                        ? " · 按会话就近匹配"
+                        : ""}
+                    {recall.run_id ? (
+                      <>
+                        {" "}
+                        · run <Text code copyable={{ text: recall.run_id }}>{recall.run_id.slice(0, 8)}…</Text>
+                      </>
+                    ) : null}
+                  </Text>
+                  <RecallItems items={recall.items || []} />
+                </Space>
+              ) : (
+                <Empty
+                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                  description="未找到对应本轮召回（可能早于 ID 落库，或本轮未注入记忆）"
+                />
+              )}
+            </div>
+
             <div>
               <Text type="secondary">Observations（原始 JSON）</Text>
               <pre

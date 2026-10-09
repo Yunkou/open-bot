@@ -200,6 +200,8 @@ func (s *Server) deliverAgentMessage(
 	if priority {
 		s.schedulePriorityWake(userID, m)
 	}
+	// P1 projection: visible Bot↔Bot handoff → current session timeline (not model history).
+	s.projectHandoffAfterBusWrite(userID, m)
 	return m, nil
 }
 

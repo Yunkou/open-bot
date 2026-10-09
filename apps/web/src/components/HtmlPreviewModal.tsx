@@ -7,11 +7,61 @@ type Props = {
   html: string | null;
   loading?: boolean;
   error?: string | null;
+  downloading?: boolean;
+  downloadError?: string | null;
+  onDownload?: () => void;
   onClose: () => void;
 };
 
+/**
+ * Opaque-origin preview cannot use the real Storage API (no allow-same-origin).
+ * Shadow localStorage/sessionStorage with an in-memory stand-in so generated
+ * pages keep working without gaining the parent origin.
+ */
+const PREVIEW_STORAGE_SHIM = `<script>(function(){
+  function createStorage(){
+    var data=Object.create(null);
+    var api={
+      getItem:function(k){k=String(k);return Object.prototype.hasOwnProperty.call(data,k)?data[k]:null;},
+      setItem:function(k,v){data[String(k)]=String(v);},
+      removeItem:function(k){delete data[String(k)];},
+      clear:function(){Object.keys(data).forEach(function(k){delete data[k];});},
+      key:function(i){var keys=Object.keys(data);return keys[i]||null;},
+      get length(){return Object.keys(data).length;}
+    };
+    return new Proxy(api,{
+      get:function(t,p){if(p in t)return t[p];if(typeof p==="string")return t.getItem(p);return undefined;},
+      set:function(t,p,v){if(p!=="length")t.setItem(p,v);return true;},
+      deleteProperty:function(t,p){t.removeItem(p);return true;}
+    });
+  }
+  function install(name){
+    var store=createStorage();
+    try{
+      Object.defineProperty(window,name,{configurable:true,enumerable:true,get:function(){return store;}});
+    }catch(e){}
+  }
+  install("localStorage");
+  install("sessionStorage");
+})();</script>`;
+
+export function withPreviewStorage(html: string): string {
+  if (html.includes("install(\"localStorage\")")) return html;
+  return PREVIEW_STORAGE_SHIM + html;
+}
+
 /** Safe in-app HTML preview: srcDoc + sandbox without allow-same-origin. */
-export function HtmlPreviewModal({ open, title, html, loading, error, onClose }: Props) {
+export function HtmlPreviewModal({
+  open,
+  title,
+  html,
+  loading,
+  error,
+  downloading,
+  downloadError,
+  onDownload,
+  onClose,
+}: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -34,19 +84,27 @@ export function HtmlPreviewModal({ open, title, html, loading, error, onClose }:
       >
         <div className="modal-head">
           <h3>{title || "HTML 预览"}</h3>
-          <button type="button" className="ghost" onClick={onClose}>
-            关闭
-          </button>
+          <div className="modal-head-actions">
+            {onDownload ? (
+              <button type="button" className="ghost" onClick={onDownload} disabled={downloading || loading}>
+                {downloading ? "下载中…" : "下载"}
+              </button>
+            ) : null}
+            <button type="button" className="ghost" onClick={onClose}>
+              关闭
+            </button>
+          </div>
         </div>
         {loading ? <div className="preview-status">加载中…</div> : null}
         {error ? <div className="preview-error">{error}</div> : null}
+        {downloadError ? <div className="preview-error">{downloadError}</div> : null}
         {!loading && !error && html != null ? (
           <iframe
             className="preview-iframe"
             title={title || "HTML 预览"}
             sandbox="allow-scripts allow-forms allow-modals"
             referrerPolicy="no-referrer"
-            srcDoc={html}
+            srcDoc={withPreviewStorage(html)}
           />
         ) : null}
       </div>
@@ -103,6 +161,12 @@ export function previewTitleFromPath(path: string): string {
 }
 
 /** Soften API/OS errors so UI never dumps host or /workspace paths. */
+export function friendlyFileError(err: unknown, action: "打开" | "下载" = "打开"): string {
+  const msg = friendlyOpenError(err);
+  if (action === "下载") return msg.replaceAll("打开", "下载");
+  return msg;
+}
+
 export function friendlyOpenError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err ?? "");
   const lower = raw.toLowerCase();

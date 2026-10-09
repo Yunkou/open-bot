@@ -1,0 +1,198 @@
+"""LLM node: one model turn; populates pending_tool_calls or final_text."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from langchain_core.runnables import RunnableConfig
+
+from ... import langfuse_trace as lf
+from ...llm import (
+    AutoToolChoiceUnsupported,
+    TOOL_DEFS,
+    chat_completion,
+    is_context_length_error,
+    openai_config,
+    postprocess_text,
+    profile_for,
+    sanitize_fake_tool_narration,
+    strip_think,
+    tools_enabled,
+)
+from ...tool_markup import (
+    content_has_tool_markup,
+    parse_tool_markup,
+    strip_tool_markup,
+    to_openai_tool_calls,
+)
+from ..state import AgentState
+from .. import tracing
+
+
+def _cfg(config: dict[str, Any]) -> dict[str, Any]:
+    return (config or {}).get("configurable") or {}
+
+
+async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
+    cfg = _cfg(config)
+    api_key = str(cfg.get("api_key") or "")
+    override = cfg.get("override")
+    on_status = cfg.get("on_status")
+    extra_tools = list(cfg.get("extra_tools") or [])
+    msgs = list(state.get("messages") or [])
+    rnd = int(state.get("round") or 0) + 1
+    max_rounds = int(state.get("max_rounds") or 12)
+
+    if rnd > max_rounds:
+        return {
+            "status": "done",
+            "final_text": state.get("final_text")
+            or "（已达工具轮次上限，请缩小任务或使用 defer_work。）",
+            "pending_tool_calls": [],
+            "round": rnd,
+        }
+
+    # Merge follow-ups before the next model call.
+    follow = list(state.get("follow_up_queue") or [])
+    if follow:
+        for text in follow:
+            t = (text or "").strip()
+            if t:
+                msgs.append({"role": "user", "content": t})
+
+    _, base, model = openai_config(override)
+    profile = profile_for(model, base)
+    tools_on = tools_enabled(override)
+
+    if on_status is not None:
+        await on_status({"phase": "thinking", "label": "思考中"})
+
+    usage_acc = state.get("usage")
+
+    def _accumulate(data: dict[str, Any]) -> None:
+        nonlocal usage_acc
+        usage_acc = lf.merge_usage_details(
+            usage_acc, lf.parse_usage_details(_raw_usage(data))
+        )
+
+    with tracing.generation_span(model=model, messages=msgs) as gen_obs:
+        if not tools_on:
+            data = await chat_completion(msgs, api_key=api_key, tools=None, override=override)
+            _accumulate(data)
+            choices = data.get("choices") or []
+            final = ""
+            if choices:
+                raw = str((choices[0].get("message") or {}).get("content") or "")
+                final = postprocess_text(strip_think(strip_tool_markup(raw)), profile)
+                final = sanitize_fake_tool_narration(final)
+            lf.update_obs(gen_obs, output=lf.truncate(final))
+            return {
+                "messages": msgs,
+                "final_text": final,
+                "pending_tool_calls": [],
+                "status": "done",
+                "round": rnd,
+                "usage": usage_acc,
+                "follow_up_queue": [],
+            }
+
+        tools = list(TOOL_DEFS) + extra_tools
+        choice: str | None = "auto" if profile.tool_choice_auto else None
+        try:
+            data = await chat_completion(
+                msgs,
+                api_key=api_key,
+                tools=tools,
+                tool_choice=choice,
+                override=override,
+            )
+        except AutoToolChoiceUnsupported:
+            # Fall back to text-only completion this turn; tools node may parse markup.
+            data = await chat_completion(
+                msgs, api_key=api_key, tools=None, override=override
+            )
+        except RuntimeError as exc:
+            if not is_context_length_error(str(exc)):
+                raise
+            from ... import compact as compact_mod
+
+            compacted, meta = await compact_mod.compact_messages(
+                msgs, api_key=api_key, model=model
+            )
+            if meta.get("compacted"):
+                msgs = list(compacted)
+            data = await chat_completion(
+                msgs,
+                api_key=api_key,
+                tools=tools,
+                tool_choice=choice,
+                override=override,
+            )
+
+        _accumulate(data)
+        choices = data.get("choices") or []
+        if not choices:
+            lf.update_obs(gen_obs, output="")
+            return {
+                "messages": msgs,
+                "final_text": state.get("final_text") or "",
+                "pending_tool_calls": [],
+                "status": "done",
+                "round": rnd,
+                "usage": usage_acc,
+                "follow_up_queue": [],
+            }
+
+        msg = choices[0].get("message") or {}
+        tool_calls = list(msg.get("tool_calls") or [])
+        content = msg.get("content")
+        content_str = str(content or "")
+
+        if not tool_calls and content_has_tool_markup(content_str):
+            parsed = parse_tool_markup(content_str)
+            if parsed:
+                tool_calls = to_openai_tool_calls(parsed)
+                cleaned = strip_tool_markup(content_str)
+                content = cleaned if cleaned else None
+                content_str = str(content or "")
+
+        if tool_calls:
+            msgs.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": tool_calls,
+                }
+            )
+            lf.update_obs(
+                gen_obs,
+                output=lf.truncate({"content": content, "tool_calls": len(tool_calls)}),
+            )
+            return {
+                "messages": msgs,
+                "pending_tool_calls": tool_calls,
+                "final_text": "",
+                "status": "running",
+                "round": rnd,
+                "usage": usage_acc,
+                "follow_up_queue": [],
+            }
+
+        final = postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
+        final = sanitize_fake_tool_narration(final)
+        msgs.append({"role": "assistant", "content": content})
+        lf.update_obs(gen_obs, output=lf.truncate(final))
+        return {
+            "messages": msgs,
+            "pending_tool_calls": [],
+            "final_text": final,
+            "status": "done",
+            "round": rnd,
+            "usage": usage_acc,
+            "follow_up_queue": [],
+        }
+
+
+def _raw_usage(data: dict[str, Any]) -> dict[str, Any] | None:
+    u = data.get("usage")
+    return u if isinstance(u, dict) else None

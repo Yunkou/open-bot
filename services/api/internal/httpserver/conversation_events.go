@@ -2,9 +2,12 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // newSSEEmitter writes SSE to the initiating client when still connected and
@@ -45,8 +48,10 @@ func (s *Server) handleConversationRunStatus(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"active": s.runs.isActive(id)})
 }
 
-// handleConversationEvents lets a client rejoin an in-flight run after refresh
-// or reconnect. Disconnecting this stream does not cancel the run.
+// handleConversationEvents serves GET /v1/conversations/{id}/events.
+// - reaction_updated: always available via conversation SSE hub (source of truth).
+// - In-flight run frames: multiplexed when a run is active (resume / reconnect).
+// Idle (no run) connections stay open with pings so reaction subscribers work.
 func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
@@ -72,15 +77,65 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 		flusher.Flush()
 		return true
 	}
+	// convEventName names a conversation-hub frame by its JSON "type"
+	// (reaction_updated, bot_presence, …); legacy payloads default to reaction_updated.
+	convEventName := func(payload []byte) string {
+		var meta struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(payload, &meta) == nil && strings.TrimSpace(meta.Type) != "" {
+			return strings.TrimSpace(meta.Type)
+		}
+		return "reaction_updated"
+	}
+	writeRaw := func(event string, payload []byte) bool {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, payload); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+
+	var reactCh chan []byte
+	if s.convEvents != nil {
+		reactCh = s.convEvents.subscribe(id)
+		defer s.convEvents.unsubscribe(id, reactCh)
+	}
 
 	handle := s.runs.get(id)
 	if handle == nil {
-		_ = writeFrame("done", map[string]any{"ok": true, "active": false})
-		return
+		// No active run: long-lived stream for reaction_updated / bot_presence.
+		if !writeFrame("ready", map[string]any{"conversation_id": id, "active": false}) {
+			return
+		}
+		ticker := time.NewTicker(25 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if _, err := fmt.Fprintf(w, ": ping\n\n"); err != nil {
+					return
+				}
+				flusher.Flush()
+			case payload, open := <-reactCh:
+				if !open {
+					return
+				}
+				if !writeRaw(convEventName(payload), payload) {
+					return
+				}
+			}
+		}
 	}
+
 	sub, catchup, okSub := handle.Subscribe()
 	if !okSub || sub == nil {
-		_ = writeFrame("done", map[string]any{"ok": true, "active": false})
+		// Race: run finished between get and Subscribe — fall through as idle reaction stream.
+		if !writeFrame("done", map[string]any{"ok": true, "active": false}) {
+			return
+		}
 		return
 	}
 	defer handle.Unsubscribe(sub)
@@ -96,10 +151,14 @@ func (s *Server) handleConversationEvents(w http.ResponseWriter, r *http.Request
 		case <-r.Context().Done():
 			// Subscriber left; run continues on the server.
 			return
+		case payload, open := <-reactCh:
+			if open {
+				if !writeRaw(convEventName(payload), payload) {
+					return
+				}
+			}
 		case ev, open := <-sub.ch:
 			if !open {
-				// Run finished; if terminal done/cancelled was already published,
-				// client saw it. Otherwise signal completion so UI can refresh.
 				_ = writeFrame("done", map[string]any{"ok": true, "active": false})
 				return
 			}

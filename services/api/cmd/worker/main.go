@@ -53,24 +53,34 @@ func tick(database *db.DB, apiURL, token string) {
 	}
 	now := time.Now()
 	for _, rt := range list {
-		if !cronMatchesMinute(rt.ScheduleCron, now) {
+		if strings.TrimSpace(rt.ScheduleCron) == "" {
+			continue // event-only
+		}
+		loc := time.Local
+		if tz := strings.TrimSpace(rt.Timezone); tz != "" {
+			if l, err := time.LoadLocation(tz); err == nil {
+				loc = l
+			}
+		}
+		localNow := now.In(loc)
+		if !cronMatchesMinute(rt.ScheduleCron, localNow) {
 			continue
 		}
 		if rt.LastRunAt != nil {
-			lr := rt.LastRunAt.In(now.Location())
-			if lr.Year() == now.Year() && lr.Month() == now.Month() && lr.Day() == now.Day() &&
-				lr.Hour() == now.Hour() && lr.Minute() == now.Minute() {
+			lr := rt.LastRunAt.In(loc)
+			if lr.Year() == localNow.Year() && lr.Month() == localNow.Month() && lr.Day() == localNow.Day() &&
+				lr.Hour() == localNow.Hour() && lr.Minute() == localNow.Minute() {
 				continue
 			}
 		}
-		log.Printf("claim routine %s (%s)", rt.ID, rt.Name)
+		log.Printf("claim routine %s (%s) tz=%s", rt.ID, rt.Name, rt.Timezone)
 		if err := triggerRun(apiURL, token, rt.ID); err != nil {
 			log.Printf("routine %s failed: %v", rt.ID, err)
-			next := nextCron(rt.ScheduleCron, now)
+			next := nextCron(rt.ScheduleCron, localNow)
 			_ = database.MarkRoutineSchedule(rt.ID, rt.LastRunAt, next, err.Error())
 			continue
 		}
-		next := nextCron(rt.ScheduleCron, now)
+		next := nextCron(rt.ScheduleCron, localNow)
 		ts := now.UTC()
 		_ = database.MarkRoutineSchedule(rt.ID, &ts, next, "")
 		log.Printf("routine %s ok next=%v", rt.ID, next)
@@ -79,7 +89,7 @@ func tick(database *db.DB, apiURL, token string) {
 
 func triggerRun(apiURL, token, routineID string) error {
 	payload, _ := json.Marshal(map[string]string{"routine_id": routineID})
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/internal/routines/run", bytes.NewReader(payload))
 	if err != nil {

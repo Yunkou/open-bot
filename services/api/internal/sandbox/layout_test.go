@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -75,7 +76,6 @@ func TestEnsureLayoutPrivate(t *testing.T) {
 	}
 }
 
-
 func TestRemapWritePathBareAbsolute(t *testing.T) {
 	p, err := RemapWritePath("/workspace/tetris.html", "d4112a62-a53b-4e6b-8cc0-daed1d7446eb", ModeTeam)
 	if err != nil {
@@ -126,6 +126,36 @@ func TestReadFileTeamCandidates(t *testing.T) {
 	content, err = m.ReadFile(FileOp{UserID: uid, AgentID: aid, Mode: ModeTeam, Path: "/workspace/shared/note.txt"}, 0)
 	if err != nil || content != "shared" {
 		t.Fatalf("shared: %v %q", err, content)
+	}
+}
+
+func TestOpenWorkspaceFileKeepsBytes(t *testing.T) {
+	root := t.TempDir()
+	m := NewManager(Config{DataRoot: root, Enabled: true, Image: "x", DockerBin: "docker"})
+	uid := "user-dl"
+	aid := "bot-dl"
+	if _, err := m.EnsureLayout(uid, aid, ModeTeam); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte{0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x0a}
+	botFile := filepath.Join(m.BotHost(uid, aid), "chart.png")
+	if err := os.WriteFile(botFile, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, st, err := m.OpenWorkspaceFile(FileOp{UserID: uid, AgentID: aid, Mode: ModeTeam, Path: "/workspace/chart.png"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if st.Size() != int64(len(payload)) {
+		t.Fatalf("size=%d", st.Size())
+	}
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("bytes mismatch")
 	}
 }
 

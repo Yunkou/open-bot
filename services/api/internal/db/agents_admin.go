@@ -34,7 +34,8 @@ SELECT a.id, COALESCE(a.user_id,''), a.name, a.description, a.system_prompt, a.i
 FROM agents a
 JOIN users u ON u.id = a.user_id
 WHERE u.org_id = $1 AND LOWER(u.username) <> LOWER($2)
-ORDER BY a.created_at DESC
+  AND a.deleted_at IS NULL AND u.deleted_at IS NULL
+ORDER BY a.updated_at DESC
 `, orgID, A2ASystemUsername)
 	if err != nil {
 		return nil, err
@@ -55,7 +56,7 @@ ORDER BY a.created_at DESC
 
 // GetAgentByID loads an agent by id without user ownership filter.
 func (d *DB) GetAgentByID(id string) (*Agent, error) {
-	row := d.SQL.QueryRow(`SELECT `+agentSelectCols+` FROM agents WHERE id = $1`, id)
+	row := d.SQL.QueryRow(`SELECT `+agentSelectCols+` FROM agents WHERE id = $1 AND deleted_at IS NULL`, id)
 	a, err := scanAgentRow(row.Scan)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -73,7 +74,7 @@ SELECT a.id, COALESCE(a.user_id,''), a.name, a.description, a.system_prompt, a.i
        COALESCE(a.computer_mode,'team'), a.created_at, a.updated_at, COALESCE(u.username, '')
 FROM agents a
 JOIN users u ON u.id = a.user_id
-WHERE a.id = $1 AND u.org_id = $2
+WHERE a.id = $1 AND u.org_id = $2 AND a.deleted_at IS NULL AND u.deleted_at IS NULL
 `, id, orgID)
 	var a Agent
 	var uid, owner string
@@ -109,11 +110,23 @@ func (d *DB) CreateAgentFull(userID, name, description, systemPrompt, computerMo
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	_, err := d.SQL.Exec(`
-INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, created_at, updated_at)
-VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8)
-`, a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.CreatedAt, a.UpdatedAt)
+	tx, err := d.SQL.Begin()
 	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	shape, color, err := assignAvatarUnderLock(tx, userID, a.ID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	a.AvatarShape, a.AvatarColor, a.AvatarUserSet = shape, color, false
+	if _, err := tx.Exec(`
+INSERT INTO agents (id, user_id, name, description, system_prompt, is_builtin, computer_mode, avatar_shape, avatar_color, avatar_user_set, created_at, updated_at)
+VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,$8,FALSE,$9,$10)
+`, a.ID, a.UserID, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.AvatarShape, a.AvatarColor, a.CreatedAt, a.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return a, nil
@@ -143,7 +156,7 @@ func (d *DB) UpdateAgentAdmin(id, name, description, systemPrompt string, comput
 	a.UpdatedAt = Now()
 	_, err = d.SQL.Exec(`
 UPDATE agents SET name=$1, description=$2, system_prompt=$3, computer_mode=$4, updated_at=$5
-WHERE id=$6 AND is_builtin = FALSE
+WHERE id=$6 AND is_builtin = FALSE AND deleted_at IS NULL
 `, a.Name, a.Description, a.SystemPrompt, a.ComputerMode, a.UpdatedAt, id)
 	if err != nil {
 		return nil, err
@@ -151,9 +164,12 @@ WHERE id=$6 AND is_builtin = FALSE
 	return a, nil
 }
 
-// DeleteAgentByID deletes a non-builtin agent by id (admin path).
+// DeleteAgentByID soft-deletes a non-builtin agent by id (admin path).
 func (d *DB) DeleteAgentByID(id string) error {
-	res, err := d.SQL.Exec(`DELETE FROM agents WHERE id = $1 AND is_builtin = FALSE`, id)
+	res, err := d.SQL.Exec(`
+UPDATE agents SET deleted_at = $2, updated_at = $2
+WHERE id = $1 AND is_builtin = FALSE AND deleted_at IS NULL
+`, id, Now())
 	if err != nil {
 		return err
 	}
@@ -162,4 +178,28 @@ func (d *DB) DeleteAgentByID(id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+// LookupAgentNames returns id→name for agents (includes soft-deleted rows).
+// soft-delete: include deleted — hard-purged agents will simply be missing.
+func (d *DB) LookupAgentNames(ids []string) map[string]string {
+	out := map[string]string{}
+	clean := uniqueNonEmpty(ids)
+	if d == nil || d.SQL == nil || len(clean) == 0 {
+		return out
+	}
+	q, args := buildIDInQuery(`SELECT id, name FROM agents WHERE id IN (`, clean)
+	rows, err := d.SQL.Query(q, args...)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			continue
+		}
+		out[id] = name
+	}
+	return out
 }

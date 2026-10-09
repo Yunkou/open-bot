@@ -17,6 +17,18 @@ type Channel struct {
 	CreatedAt      time.Time `json:"created_at"`
 	Members        []string  `json:"members,omitempty"`
 	ConversationID string    `json:"conversation_id,omitempty"`
+	TaskActive     bool      `json:"task_active,omitempty"`
+	// MemberProfiles carries avatar shape/color for each member agent.
+	MemberProfiles []ChannelMemberProfile `json:"member_profiles,omitempty"`
+}
+
+type ChannelMemberProfile struct {
+	AgentID     string `json:"agent_id"`
+	Name        string `json:"name,omitempty"`
+	AvatarShape string `json:"avatar_shape"`
+	AvatarColor string `json:"avatar_color"`
+	// Online is computed by the API from this agent's bound machine_id; not stored.
+	Online bool `json:"online"`
 }
 
 type AgentBusMessage struct {
@@ -71,6 +83,7 @@ func (d *DB) ListChannels(userID string) ([]*Channel, error) {
 		}
 		members, _ := d.ListChannelMembers(c.ID)
 		c.Members = members
+		c.MemberProfiles = d.channelMemberProfiles(userID, members)
 		out = append(out, &c)
 	}
 	return out, rows.Err()
@@ -90,6 +103,7 @@ func (d *DB) GetChannel(userID, id string) (*Channel, error) {
 	}
 	members, _ := d.ListChannelMembers(c.ID)
 	c.Members = members
+	c.MemberProfiles = d.channelMemberProfiles(userID, members)
 	return &c, nil
 }
 
@@ -322,4 +336,25 @@ func (d *DB) MarkAgentMessageRead(userID, id string) error {
 		}
 	}
 	return nil
+}
+
+// ChannelMemberProfiles builds avatar profiles for agent IDs (online stamped by API).
+func (d *DB) ChannelMemberProfiles(userID string, agentIDs []string) []ChannelMemberProfile {
+	return d.channelMemberProfiles(userID, agentIDs)
+}
+
+func (d *DB) channelMemberProfiles(userID string, agentIDs []string) []ChannelMemberProfile {
+	out := make([]ChannelMemberProfile, 0, len(agentIDs))
+	for _, id := range agentIDs {
+		a, err := d.GetAgent(userID, id)
+		if err != nil {
+			shape, color := AssignAvatarFromID(id)
+			out = append(out, ChannelMemberProfile{AgentID: id, AvatarShape: shape, AvatarColor: color})
+			continue
+		}
+		out = append(out, ChannelMemberProfile{
+			AgentID: a.ID, Name: a.Name, AvatarShape: a.AvatarShape, AvatarColor: a.AvatarColor,
+		})
+	}
+	return out
 }

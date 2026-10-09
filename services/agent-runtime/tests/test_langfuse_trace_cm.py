@@ -195,3 +195,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+def test_trace_id_of_noop_and_attr():
+    assert lf.trace_id_of(None) == ""
+    assert lf.trace_id_of(lf._Noop()) == ""
+
+    class _Obs:
+        trace_id = "abc123"
+
+    assert lf.trace_id_of(_Obs()) == "abc123"
+

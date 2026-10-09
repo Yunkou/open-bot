@@ -132,17 +132,27 @@ func (s *Server) upsertOIDCUser(info *auth.OIDCUserInfo) (*db.User, error) {
 	if info == nil {
 		return nil, errors.New("nil userinfo")
 	}
-	if u, err := s.db.GetUserByCasdoorSub(info.Sub); err == nil {
+	var u *db.User
+	var err error
+	if u, err = s.db.GetUserByCasdoorSub(info.Sub); err == nil {
 		_ = s.db.LinkCasdoorSub(u.ID, info.Sub, info.Email)
 		_ = s.db.ApplyPendingInviteIfAny(u)
-		return s.db.GetUserByID(u.ID)
+		u, err = s.db.GetUserByID(u.ID)
+		if err != nil {
+			return nil, err
+		}
+		return s.syncOIDCRole(u, info)
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return nil, err
 	}
-	if u, err := s.db.GetUserByUsername(info.Username); err == nil {
+	if u, err = s.db.GetUserByUsername(info.Username); err == nil {
 		_ = s.db.LinkCasdoorSub(u.ID, info.Sub, info.Email)
 		_ = s.db.ApplyPendingInviteIfAny(u)
-		return s.db.GetUserByID(u.ID)
+		u, err = s.db.GetUserByID(u.ID)
+		if err != nil {
+			return nil, err
+		}
+		return s.syncOIDCRole(u, info)
 	} else if !errors.Is(err, db.ErrNotFound) {
 		return nil, err
 	}
@@ -152,14 +162,19 @@ func (s *Server) upsertOIDCUser(info *auth.OIDCUserInfo) (*db.User, error) {
 	if err != nil {
 		return nil, err
 	}
-	u, err := s.db.CreateUserFull(info.Username, hash, info.Email, info.Sub, db.RoleMember)
+	// New OIDC users: map Casdoor roles when present, else member.
+	role := db.RoleMember
+	if mapped, ok := auth.MapOIDCRolesToLocal(info.Roles, info.Groups); ok {
+		role = mapped
+	}
+	u, err = s.db.CreateUserFull(info.Username, hash, info.Email, info.Sub, role)
 	if err != nil {
 		if errors.Is(err, db.ErrUserExists) {
 			alt := info.Username + "_" + strings.ReplaceAll(info.Sub, "/", "_")
 			if len(alt) > 64 {
 				alt = alt[:64]
 			}
-			u, err = s.db.CreateUserFull(alt, hash, info.Email, info.Sub, db.RoleMember)
+			u, err = s.db.CreateUserFull(alt, hash, info.Email, info.Sub, role)
 			if err != nil {
 				return nil, err
 			}
@@ -168,7 +183,56 @@ func (s *Server) upsertOIDCUser(info *auth.OIDCUserInfo) (*db.User, error) {
 		}
 	}
 	s.seedDefaultLLM(u.ID)
+	if role != db.RoleMember {
+		s.writeAudit(u.OrgID, u.ID, "auth.oidc_role_sync", "user", u.ID, map[string]any{
+			"from": "", "to": role, "roles": info.Roles, "groups": info.Groups, "new_user": true,
+		})
+	}
 	return u, nil
+}
+
+// syncOIDCRole maps Casdoor roles/groups → users.role when env mapping matches.
+// Never demotes the last remaining platform_admin.
+func (s *Server) syncOIDCRole(u *db.User, info *auth.OIDCUserInfo) (*db.User, error) {
+	if u == nil || info == nil {
+		return u, nil
+	}
+	mapped, matched := auth.MapOIDCRolesToLocal(info.Roles, info.Groups)
+	if !matched {
+		return u, nil
+	}
+	mapped = db.NormalizeRole(mapped)
+	cur := db.NormalizeRole(u.Role)
+	if mapped == cur {
+		return u, nil
+	}
+	// Guard: do not demote the last platform_admin.
+	if cur == db.RolePlatformAdmin && mapped != db.RolePlatformAdmin {
+		n, err := s.db.CountPlatformAdmins()
+		if err != nil {
+			return u, nil
+		}
+		if n <= 1 {
+			s.writeAudit(u.OrgID, u.ID, "auth.oidc_role_sync_blocked", "user", u.ID, map[string]any{
+				"from": cur, "to": mapped, "reason": "last_platform_admin",
+				"roles": info.Roles, "groups": info.Groups,
+			})
+			return u, nil
+		}
+	}
+	orgID := u.OrgID
+	if orgID == "" {
+		if org, err := s.db.EnsureDefaultOrg(); err == nil {
+			orgID = org.ID
+		}
+	}
+	if err := s.db.SetUserOrgRole(u.ID, orgID, mapped); err != nil {
+		return u, nil
+	}
+	s.writeAudit(orgID, u.ID, "auth.oidc_role_sync", "user", u.ID, map[string]any{
+		"from": cur, "to": mapped, "roles": info.Roles, "groups": info.Groups,
+	})
+	return s.db.GetUserByID(u.ID)
 }
 
 func (s *Server) seedDefaultLLM(userID string) {

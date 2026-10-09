@@ -2,6 +2,7 @@ import { useRef } from "react";
 import { Typography, message } from "antd";
 import { PageContainer, ProTable, type ActionType, type ProColumns } from "@ant-design/pro-components";
 import { adminListAuditLogs, type AuditLog } from "../api";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph } = Typography;
 
@@ -14,6 +15,8 @@ export default function AuditPage() {
       dataIndex: "created_at",
       valueType: "dateTime",
       width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
     },
     {
       title: "操作者",
@@ -48,12 +51,12 @@ export default function AuditPage() {
         rowKey="id"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 50 }}
+        pagination={{ ...LIST_PAGINATION }}
         columns={columns}
         request={async () => {
           try {
             const data = await adminListAuditLogs(150);
-            return { data: data.logs || [], success: true };
+            return { data: data.logs || [], success: true, total: (data.logs || []).length };
           } catch (err) {
             message.error(err instanceof Error ? err.message : String(err));
             return { data: [], success: false };

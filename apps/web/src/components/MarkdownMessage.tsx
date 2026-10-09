@@ -1,9 +1,31 @@
-import { isValidElement, useCallback, useState, type ReactNode } from "react";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+import {
+  createContext,
+  isValidElement,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { readSandboxFile } from "../api";
+import {
+  downloadSandboxFile,
+  downloadTextFile,
+  isAttachmentAuthUrl,
+  readSandboxFile,
+} from "../api";
+import {
+  isFencePending,
+  isHtmlDiagramLang,
+  isMermaidLang,
+  type SourcePosition,
+} from "../lib/mermaidFence";
+import { DiagramCard } from "./DiagramCard";
+import { ImageDiagramCard } from "./ImageDiagramCard";
 import {
   HtmlPreviewModal,
+  friendlyFileError,
   friendlyOpenError,
   looksLikeHtml,
   normalizeWorkspacePath,
@@ -27,18 +49,20 @@ function extractText(node: ReactNode): string {
   return "";
 }
 
-/** Keep sandbox: links; defaultUrlTransform strips non-http(s)/mailto/irc. */
+/** Keep sandbox: links + auth attachment paths; defaultUrlTransform strips non-http(s)/mailto/irc. */
 function urlTransform(url: string): string {
   const trimmed = (url || "").trim();
   if (/^sandbox:/i.test(trimmed)) return trimmed;
+  if (isAttachmentAuthUrl(trimmed)) return trimmed;
   return defaultUrlTransform(url);
 }
 
-const PREVIEWABLE_LANGS = new Set(["html", "htm", "svg", "xhtml"]);
+const PREVIEWABLE_LANGS = new Set(["htm", "svg", "xhtml"]); // `html` / `html-diagram` → DiagramCard
 
 type PreviewState = {
   open: boolean;
   title: string;
+  path: string | null;
   html: string | null;
   loading: boolean;
   error: string | null;
@@ -47,6 +71,7 @@ type PreviewState = {
 const PREVIEW_CLOSED: PreviewState = {
   open: false,
   title: "",
+  path: null,
   html: null,
   loading: false,
   error: null,
@@ -96,21 +121,72 @@ function CodeBlock({
   );
 }
 
+/**
+ * Current markdown text + streaming flag for block renderers. Passed by context (not closure) so
+ * the `components` map stays referentially stable across stream ticks — otherwise every token
+ * would give react-markdown new component types and remount every block (diagram flicker).
+ */
+const MdRenderContext = createContext<{ markdown: string; streaming: boolean }>({
+  markdown: "",
+  streaming: false,
+});
+
+/** ```mermaid / ```html fence → DiagramCard. Pending until the fence closes or the stream ends. */
+function DiagramFenceBlock({
+  kind,
+  code,
+  position,
+}: {
+  kind: "mermaid" | "html";
+  code: string;
+  position: SourcePosition;
+}) {
+  const { markdown, streaming } = useContext(MdRenderContext);
+  const pending = isFencePending(markdown, position, streaming);
+  return <DiagramCard kind={kind} source={code} pending={pending} />;
+}
+
 export function MarkdownMessage({ content, streaming, agentId }: Props) {
   const text = content || (streaming ? "…" : "");
   const [preview, setPreview] = useState<PreviewState>(PREVIEW_CLOSED);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
-  const closePreview = useCallback(() => setPreview(PREVIEW_CLOSED), []);
+  const closePreview = useCallback(() => {
+    setPreview(PREVIEW_CLOSED);
+    setDownloadError(null);
+  }, []);
 
   const openHtmlPreview = useCallback((html: string, title: string) => {
-    setPreview({ open: true, title, html, loading: false, error: null });
+    setDownloadError(null);
+    setPreview({ open: true, title, path: null, html, loading: false, error: null });
   }, []);
+
+  const downloadPreview = useCallback(async () => {
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      if (preview.path) {
+        await downloadSandboxFile(preview.path, agentId ? { agent_id: agentId } : undefined);
+      } else if (preview.html) {
+        const name = preview.title && !preview.title.includes("/") ? preview.title : "preview.html";
+        const filename = /\.html?$/i.test(name) ? name : `${name}.html`;
+        downloadTextFile(filename, preview.html, "text/html;charset=utf-8");
+      }
+    } catch (err) {
+      setDownloadError(friendlyFileError(err, "下载"));
+    } finally {
+      setDownloading(false);
+    }
+  }, [agentId, preview.html, preview.path, preview.title]);
 
   const openSandboxLink = useCallback(async (path: string) => {
     const wp = normalizeWorkspacePath(path);
+    setDownloadError(null);
     setPreview({
       open: true,
       title: previewTitleFromPath(wp),
+      path: wp,
       html: null,
       loading: true,
       error: null,
@@ -129,6 +205,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
         setPreview({
           open: true,
           title: previewTitleFromPath(wp),
+          path: wp,
           html: wrapped,
           loading: false,
           error: null,
@@ -138,6 +215,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
       setPreview({
         open: true,
         title: previewTitleFromPath(wp),
+        path: wp,
         html: fileContent,
         loading: false,
         error: null,
@@ -146,6 +224,7 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
       setPreview({
         open: true,
         title: previewTitleFromPath(wp),
+        path: wp,
         html: null,
         loading: false,
         error: friendlyOpenError(err),
@@ -153,60 +232,104 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
     }
   }, [agentId]);
 
+  const components = useMemo<Components>(
+    () => ({
+      img: ({ src, alt }) => {
+        const url = (src || "").trim();
+        // Auth attachment / relative attachment GET → same image diagram card (with token).
+        if (url && isAttachmentAuthUrl(url)) {
+          return <ImageDiagramCard src={url} alt={alt || undefined} name={alt || undefined} />;
+        }
+        // External / data / other: keep native img so we do not break ordinary markdown images.
+        if (!url) return null;
+        return (
+          <img
+            className="md-inline-img"
+            src={url}
+            alt={alt || ""}
+            loading="lazy"
+          />
+        );
+      },
+      a: ({ href, children }) => {
+        const sandboxPath = parseSandboxHref(href);
+        if (sandboxPath) {
+          const labelText = extractText(children).trim();
+          const friendly =
+            !labelText ||
+            /(?:^sandbox:)|\/workspace\//i.test(labelText) ||
+            labelText === sandboxPath
+              ? previewTitleFromPath(sandboxPath)
+              : children;
+          return (
+            <a
+              href={href}
+              className="md-sandbox-link"
+              onClick={(e) => {
+                e.preventDefault();
+                void openSandboxLink(sandboxPath);
+              }}
+            >
+              {friendly}
+            </a>
+          );
+        }
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener">
+            {children}
+          </a>
+        );
+      },
+      // Flatten <pre> so our code handler owns the block chrome.
+      pre: ({ children }) => <>{children}</>,
+      code: ({ className, children, node }) => {
+        const raw = extractText(children);
+        const isBlock =
+          Boolean(className && /language-/.test(className)) || raw.includes("\n");
+        if (!isBlock) {
+          return <code className="md-inline-code">{children}</code>;
+        }
+        const lang = /language-([\w-]+)/.exec(className || "")?.[1];
+        if (isMermaidLang(lang)) {
+          return (
+            <DiagramFenceBlock
+              kind="mermaid"
+              code={raw.replace(/\n$/, "")}
+              position={node?.position}
+            />
+          );
+        }
+        if (isHtmlDiagramLang(lang)) {
+          return (
+            <DiagramFenceBlock
+              kind="html"
+              code={raw.replace(/\n$/, "")}
+              position={node?.position}
+            />
+          );
+        }
+        return (
+          <CodeBlock className={className} onPreview={openHtmlPreview}>
+            {children}
+          </CodeBlock>
+        );
+      },
+    }),
+    [openHtmlPreview, openSandboxLink],
+  );
+  const renderCtx = useMemo(() => ({ markdown: text, streaming: Boolean(streaming) }), [text, streaming]);
+
   return (
     <div className={`md-body${streaming ? " streaming" : ""}`}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        urlTransform={urlTransform}
-        components={{
-          a: ({ href, children }) => {
-            const sandboxPath = parseSandboxHref(href);
-            if (sandboxPath) {
-              const labelText = extractText(children).trim();
-              const friendly =
-                !labelText ||
-                /(?:^sandbox:)|\/workspace\//i.test(labelText) ||
-                labelText === sandboxPath
-                  ? previewTitleFromPath(sandboxPath)
-                  : children;
-              return (
-                <a
-                  href={href}
-                  className="md-sandbox-link"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void openSandboxLink(sandboxPath);
-                  }}
-                >
-                  {friendly}
-                </a>
-              );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer noopener">
-                {children}
-              </a>
-            );
-          },
-          // Flatten <pre> so our code handler owns the block chrome.
-          pre: ({ children }) => <>{children}</>,
-          code: ({ className, children }) => {
-            const raw = extractText(children);
-            const isBlock =
-              Boolean(className && /language-/.test(className)) || raw.includes("\n");
-            if (!isBlock) {
-              return <code className="md-inline-code">{children}</code>;
-            }
-            return (
-              <CodeBlock className={className} onPreview={openHtmlPreview}>
-                {children}
-              </CodeBlock>
-            );
-          },
-        }}
-      >
-        {text}
-      </ReactMarkdown>
+      <MdRenderContext.Provider value={renderCtx}>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          urlTransform={urlTransform}
+          components={components}
+        >
+          {text}
+        </ReactMarkdown>
+      </MdRenderContext.Provider>
       {streaming ? <span className="caret" /> : null}
       <HtmlPreviewModal
         open={preview.open}
@@ -214,6 +337,9 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
         html={preview.html}
         loading={preview.loading}
         error={preview.error}
+        downloading={downloading}
+        downloadError={downloadError}
+        onDownload={preview.path || preview.html ? () => void downloadPreview() : undefined}
         onClose={closePreview}
       />
     </div>

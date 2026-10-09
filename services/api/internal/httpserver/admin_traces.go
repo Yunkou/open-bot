@@ -1,12 +1,15 @@
 package httpserver
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +56,12 @@ func loadLangfuseConfig() langfuseConfig {
 }
 
 func (s *Server) langfuseGET(path string, query url.Values) (int, []byte, error) {
+	return s.langfuseRequest(context.Background(), http.MethodGet, path, query, nil)
+}
+
+// langfuseRequest calls Langfuse public API with Basic auth (pk/sk).
+// body may be nil for GET/DELETE-without-body.
+func (s *Server) langfuseRequest(ctx context.Context, method, path string, query url.Values, body []byte) (int, []byte, error) {
 	cfg := loadLangfuseConfig()
 	if !cfg.Configured {
 		return 0, nil, fmt.Errorf("%s", cfg.Reason)
@@ -61,23 +70,179 @@ func (s *Server) langfuseGET(path string, query url.Values) (int, []byte, error)
 	if len(query) > 0 {
 		u = u + "?" + query.Encode()
 	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	var rdr io.Reader
+	if body != nil {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
 	if err != nil {
 		return 0, nil, err
 	}
 	req.SetBasicAuth(cfg.PublicKey, cfg.SecretKey)
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	client := &http.Client{Timeout: 20 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer res.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+	respBody, err := io.ReadAll(io.LimitReader(res.Body, 8<<20))
 	if err != nil {
 		return res.StatusCode, nil, err
 	}
-	return res.StatusCode, body, nil
+	return res.StatusCode, respBody, nil
+}
+
+const (
+	langfusePurgePageLimit   = 100
+	langfusePurgeMaxPages    = 50
+	langfusePurgeDeleteBatch = 100 // Langfuse allows up to 1000; keep moderate batches
+)
+
+// purgeLangfuseUserTraces best-effort deletes Langfuse traces for userID.
+//
+// Langfuse v4 events_only: list via GET /api/public/v2/observations (userId
+// filter, plus metadata.user_id fallback), then DELETE /api/public/traces
+// {"traceIds":[…]}. Deletion is asynchronous on the Langfuse worker (often
+// seconds, up to ~15m). Never fails the caller — returns a status string for
+// side_effects.langfuse (like mem0).
+func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) string {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "skipped: empty user"
+	}
+	cfg := loadLangfuseConfig()
+	if !cfg.Configured {
+		reason := cfg.Reason
+		if reason == "" {
+			reason = "not configured"
+		}
+		return "skipped: " + reason
+	}
+
+	now := time.Now().UTC()
+	from := now.Add(-10 * 365 * 24 * time.Hour) // ~10y window; purge should cover history
+	to := now.Add(time.Minute)
+	fromStr := from.Format(time.RFC3339)
+	toStr := to.Format(time.RFC3339)
+
+	seen := map[string]struct{}{}
+	var allIDs []string
+
+	collect := func(label string, q url.Values) string {
+		cursor := ""
+		for page := 0; page < langfusePurgeMaxPages; page++ {
+			qq := cloneURLValues(q)
+			qq.Set("limit", strconv.Itoa(langfusePurgePageLimit))
+			qq.Set("fields", "core,basic,metadata")
+			qq.Set("fromStartTime", fromStr)
+			qq.Set("toStartTime", toStr)
+			if cursor != "" {
+				qq.Set("cursor", cursor)
+			}
+			code, body, err := s.langfuseRequest(ctx, http.MethodGet, "/api/public/v2/observations", qq, nil)
+			if err != nil {
+				return fmt.Sprintf("%s_list_err=%s", label, err.Error())
+			}
+			if code < 200 || code >= 300 {
+				return fmt.Sprintf("%s_list_http=%d %s", label, code, truncateStr(string(body), 160))
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				return fmt.Sprintf("%s_parse_err=%s", label, err.Error())
+			}
+			data, _ := raw["data"].([]any)
+			for _, item := range data {
+				row, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				traceID := strings.TrimSpace(asString(row["traceId"]))
+				if traceID == "" {
+					continue
+				}
+				if _, ok := seen[traceID]; ok {
+					continue
+				}
+				seen[traceID] = struct{}{}
+				allIDs = append(allIDs, traceID)
+			}
+			meta, _ := raw["meta"].(map[string]any)
+			next := ""
+			if meta != nil {
+				next = strings.TrimSpace(asString(meta["cursor"]))
+			}
+			if next == "" || len(data) == 0 {
+				break
+			}
+			cursor = next
+		}
+		return ""
+	}
+
+	// Primary: exact userId on the trace (SDK propagate_attributes).
+	qUser := url.Values{}
+	qUser.Set("userId", userID)
+	if errMsg := collect("userId", qUser); errMsg != "" && len(allIDs) == 0 {
+		switch {
+		case strings.HasPrefix(errMsg, "userId_list_err="):
+			return "unreachable: " + strings.TrimPrefix(errMsg, "userId_list_err=")
+		case strings.HasPrefix(errMsg, "userId_list_http="):
+			return "list HTTP " + strings.TrimPrefix(errMsg, "userId_list_http=")
+		case strings.HasPrefix(errMsg, "userId_parse_err="):
+			return "parse error: " + strings.TrimPrefix(errMsg, "userId_parse_err=")
+		default:
+			return errMsg
+		}
+	}
+
+	// Fallback: metadata.user_id (always written by open-bot even if propagate fails).
+	qMeta := url.Values{}
+	filter, _ := json.Marshal([]map[string]any{{
+		"type":     "stringObject",
+		"column":   "metadata",
+		"key":      "user_id",
+		"operator": "=",
+		"value":    userID,
+	}})
+	qMeta.Set("filter", string(filter))
+	_ = collect("metadata", qMeta) // best-effort; ignore errors if primary already found IDs
+
+	if len(allIDs) == 0 {
+		return fmt.Sprintf("deleted:0 (no traces matched userId=%s or metadata.user_id)", userID)
+	}
+
+	deleted := 0
+	for i := 0; i < len(allIDs); i += langfusePurgeDeleteBatch {
+		end := i + langfusePurgeDeleteBatch
+		if end > len(allIDs) {
+			end = len(allIDs)
+		}
+		chunk := allIDs[i:end]
+		payload, _ := json.Marshal(map[string]any{"traceIds": chunk})
+		dCode, dBody, dErr := s.langfuseRequest(ctx, http.MethodDelete, "/api/public/traces", nil, payload)
+		if dErr != nil {
+			return fmt.Sprintf("partial: deleted=%d delete_err=%s", deleted, dErr.Error())
+		}
+		if dCode < 200 || dCode >= 300 {
+			return fmt.Sprintf("partial: deleted=%d delete_http=%d %s", deleted, dCode, truncateStr(string(dBody), 200))
+		}
+		deleted += len(chunk)
+	}
+
+	// Langfuse applies deletes asynchronously (worker → ClickHouse events table).
+	return fmt.Sprintf("deleted:%d queued (async; typically visible within minutes)", deleted)
+}
+
+func cloneURLValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for k, vs := range in {
+		out[k] = append([]string(nil), vs...)
+	}
+	return out
 }
 
 // buildLangfuseTraceURL returns the Langfuse v4 UI deep link for a trace.
@@ -93,20 +258,30 @@ func buildLangfuseTraceURL(ui, projectID, traceID string) string {
 }
 
 func normalizeRootObs(row map[string]any, cfg langfuseConfig) map[string]any {
-	traceID, _ := row["traceId"].(string)
+	traceID := strings.TrimSpace(asString(row["traceId"]))
 	if traceID == "" {
-		traceID, _ = row["id"].(string)
+		traceID = strings.TrimSpace(asString(row["id"]))
 	}
-	name, _ := row["traceName"].(string)
+	name := strings.TrimSpace(asString(row["traceName"]))
 	if name == "" {
-		name, _ = row["name"].(string)
+		name = strings.TrimSpace(asString(row["name"]))
 	}
-	userID, _ := row["userId"].(string)
-	sessionID, _ := row["sessionId"].(string)
-	ts, _ := row["startTime"].(string)
-	projectID, _ := row["projectId"].(string)
+	userID := strings.TrimSpace(asString(row["userId"]))
+	sessionID := strings.TrimSpace(asString(row["sessionId"]))
+	ts := strings.TrimSpace(asString(row["startTime"]))
+	projectID := strings.TrimSpace(asString(row["projectId"]))
 	if projectID == "" {
 		projectID = cfg.ProjectID
+	}
+	agentID := ""
+	if meta, ok := row["metadata"].(map[string]any); ok {
+		agentID = strings.TrimSpace(asString(meta["agent_id"]))
+		if userID == "" {
+			userID = strings.TrimSpace(asString(meta["user_id"]))
+		}
+		if sessionID == "" {
+			sessionID = strings.TrimSpace(asString(meta["conversation_id"]))
+		}
 	}
 	var latency any
 	if v, ok := row["latency"]; ok {
@@ -123,11 +298,55 @@ func normalizeRootObs(row map[string]any, cfg langfuseConfig) map[string]any {
 		"type":          row["type"],
 		"level":         row["level"],
 		"projectId":     projectID,
+		"agentId":       agentID,
 	}
 	if u := buildLangfuseTraceURL(cfg.PublicUI, projectID, traceID); u != "" {
 		out["langfuse_url"] = u
 	}
 	return out
+}
+
+// enrichTracesWithNames fills userName / agentName (bot display name) from local DB.
+func (s *Server) enrichTracesWithNames(traces []map[string]any) {
+	if s == nil || s.db == nil || len(traces) == 0 {
+		return
+	}
+	userIDs := make([]string, 0, len(traces))
+	agentIDs := make([]string, 0, len(traces))
+	seenU := map[string]struct{}{}
+	seenA := map[string]struct{}{}
+	for _, t := range traces {
+		uid := strings.TrimSpace(asString(t["userId"]))
+		if uid != "" {
+			if _, ok := seenU[uid]; !ok {
+				seenU[uid] = struct{}{}
+				userIDs = append(userIDs, uid)
+			}
+		}
+		aid := strings.TrimSpace(asString(t["agentId"]))
+		if aid != "" {
+			if _, ok := seenA[aid]; !ok {
+				seenA[aid] = struct{}{}
+				agentIDs = append(agentIDs, aid)
+			}
+		}
+	}
+	users := s.db.LookupUsernames(userIDs)
+	agents := s.db.LookupAgentNames(agentIDs)
+	for _, t := range traces {
+		uid := strings.TrimSpace(asString(t["userId"]))
+		if uid != "" {
+			if name := users[uid]; name != "" {
+				t["userName"] = name
+			}
+		}
+		aid := strings.TrimSpace(asString(t["agentId"]))
+		if aid != "" {
+			if name := agents[aid]; name != "" {
+				t["agentName"] = name
+			}
+		}
+	}
 }
 
 func (s *Server) handleAdminTracesStatus(w http.ResponseWriter, r *http.Request) {
@@ -212,7 +431,7 @@ func (s *Server) handleAdminListTraces(w http.ResponseWriter, r *http.Request) {
 
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(limit))
-	q.Set("fields", "core,basic,trace_context")
+	q.Set("fields", "core,basic,trace_context,metadata")
 	q.Set("isRootObservation", "true")
 	q.Set("fromStartTime", from.Format(time.RFC3339))
 	q.Set("toStartTime", to.Format(time.RFC3339))
@@ -262,6 +481,12 @@ func (s *Server) handleAdminListTraces(w http.ResponseWriter, r *http.Request) {
 		}
 		traces = append(traces, normalizeRootObs(row, cfg))
 	}
+	sort.SliceStable(traces, func(i, j int) bool {
+		ti, _ := traces[i]["timestamp"].(string)
+		tj, _ := traces[j]["timestamp"].(string)
+		return ti > tj
+	})
+	s.enrichTracesWithNames(traces)
 	meta, _ := raw["meta"].(map[string]any)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":       true,
@@ -297,7 +522,7 @@ func (s *Server) handleAdminGetTrace(w http.ResponseWriter, r *http.Request) {
 	q := url.Values{}
 	q.Set("traceId", traceID)
 	q.Set("limit", "100")
-	q.Set("fields", "core,basic,io,trace_context")
+	q.Set("fields", "core,basic,io,trace_context,metadata")
 	q.Set("fromStartTime", from.Format(time.RFC3339))
 	q.Set("toStartTime", to.Format(time.RFC3339))
 
@@ -362,6 +587,7 @@ func (s *Server) handleAdminGetTrace(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	s.enrichTracesWithNames([]map[string]any{summary})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":       true,
 		"reason":        "",

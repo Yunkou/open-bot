@@ -17,6 +17,7 @@ import {
   type AdminMember,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
+import { LIST_PAGINATION } from "../pagination";
 
 const { Paragraph } = Typography;
 
@@ -72,6 +73,14 @@ export default function MembersPage() {
         />
       ),
     },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
   ];
 
   const inviteColumns: ProColumns<AdminInvite>[] = [
@@ -86,7 +95,14 @@ export default function MembersPage() {
       },
     },
     { title: "状态", dataIndex: "status", width: 100 },
-    { title: "创建时间", dataIndex: "created_at", valueType: "dateTime", width: 180 },
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      valueType: "dateTime",
+      width: 180,
+      defaultSortOrder: "descend",
+      sorter: (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")),
+    },
   ];
 
   return (
@@ -135,11 +151,11 @@ export default function MembersPage() {
         rowKey="id"
         search={false}
         options={{ reload: true }}
-        pagination={{ pageSize: 20 }}
+        pagination={{ ...LIST_PAGINATION }}
         columns={memberColumns}
         request={async () => {
           const data = await adminListMembers();
-          return { data: data.members || [], success: true };
+          return { data: data.members || [], success: true, total: (data.members || []).length };
         }}
       />
 

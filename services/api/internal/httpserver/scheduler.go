@@ -8,10 +8,9 @@ import (
 	"time"
 )
 
-// StartRoutineScheduler ticks every minute inside the API process and runs due routines.
+// StartRoutineScheduler ticks every minute inside the API process and runs due cron routines.
 func (s *Server) StartRoutineScheduler(ctx context.Context) {
 	go func() {
-		// Align to next minute boundary.
 		now := time.Now()
 		wait := time.Until(now.Truncate(time.Minute).Add(time.Minute))
 		if wait > 0 && wait < time.Minute+time.Second {
@@ -33,7 +32,7 @@ func (s *Server) StartRoutineScheduler(ctx context.Context) {
 			}
 		}
 	}()
-	log.Printf("routines scheduler started (in-process, 1m tick)")
+	log.Printf("routines scheduler started (in-process, 1m tick, IANA timezone)")
 }
 
 func (s *Server) tickRoutines(now time.Time) {
@@ -45,14 +44,23 @@ func (s *Server) tickRoutines(now time.Time) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3)
 	for _, rt := range list {
-		if !cronMatchesMinute(rt.ScheduleCron, now) {
+		if strings.TrimSpace(rt.ScheduleCron) == "" {
+			continue // event-only routine
+		}
+		loc := time.Local
+		if tz := strings.TrimSpace(rt.Timezone); tz != "" {
+			if l, err := time.LoadLocation(tz); err == nil {
+				loc = l
+			}
+		}
+		localNow := now.In(loc)
+		if !cronMatchesMinute(rt.ScheduleCron, localNow) {
 			continue
 		}
-		// Skip if already ran in this minute (restart / double tick).
 		if rt.LastRunAt != nil {
-			lr := rt.LastRunAt.In(now.Location())
-			if lr.Year() == now.Year() && lr.Month() == now.Month() && lr.Day() == now.Day() &&
-				lr.Hour() == now.Hour() && lr.Minute() == now.Minute() {
+			lr := rt.LastRunAt.In(loc)
+			if lr.Year() == localNow.Year() && lr.Month() == localNow.Month() && lr.Day() == localNow.Day() &&
+				lr.Hour() == localNow.Hour() && lr.Minute() == localNow.Minute() {
 				continue
 			}
 		}
@@ -62,9 +70,9 @@ func (s *Server) tickRoutines(now time.Time) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 			defer cancel()
-			if _, err := s.executeRoutine(ctx, rt); err != nil {
+			if _, err := s.executeRoutine(ctx, rt, ""); err != nil {
 				log.Printf("routine %s (%s) failed: %v", rt.ID, rt.Name, err)
 			} else {
 				log.Printf("routine %s (%s) ok", rt.ID, rt.Name)
@@ -83,7 +91,6 @@ func cronMatchesMinute(expr string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
-	// Next after (now - 1s) should land in the current minute.
 	prev := now.Add(-time.Second)
 	next := sched.Next(prev)
 	return next.Year() == now.Year() &&

@@ -1,0 +1,65 @@
+"""Compile the durable agent StateGraph."""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from langgraph.graph import END, START, StateGraph
+
+from .nodes.finish import finish_node
+from .nodes.llm import llm_node
+from .nodes.prepare import prepare_node
+from .nodes.tools import tools_node
+from .state import AgentState
+
+_compiled: Any | None = None
+
+
+def _route_after_llm(state: AgentState) -> Literal["tools", "finish"]:
+    if state.get("pending_tool_calls"):
+        return "tools"
+    return "finish"
+
+
+def _route_after_tools(state: AgentState) -> Literal["llm", "finish"]:
+    if str(state.get("status") or "") in ("aborted", "failed"):
+        return "finish"
+    if int(state.get("round") or 0) >= int(state.get("max_rounds") or 12):
+        return "finish"
+    return "llm"
+
+
+def build_graph() -> Any:
+    g: StateGraph = StateGraph(AgentState)
+    g.add_node("prepare", prepare_node)
+    g.add_node("llm", llm_node)
+    g.add_node("tools", tools_node)
+    g.add_node("finish", finish_node)
+    g.add_edge(START, "prepare")
+    g.add_edge("prepare", "llm")
+    g.add_conditional_edges("llm", _route_after_llm, {"tools": "tools", "finish": "finish"})
+    g.add_conditional_edges("tools", _route_after_tools, {"llm": "llm", "finish": "finish"})
+    g.add_edge("finish", END)
+    return g
+
+
+async def get_compiled_graph(checkpointer: Any | None = None) -> Any:
+    """Compile with checkpointer. Cached per checkpointer identity."""
+    global _compiled
+    if checkpointer is None:
+        from .checkpointer import get_checkpointer
+
+        checkpointer = await get_checkpointer()
+    # Recompile when checkpointer instance changes (tests swap MemorySaver).
+    key = id(checkpointer)
+    if _compiled is not None and getattr(_compiled, "_ob_ckpt_id", None) == key:
+        return _compiled
+    compiled = build_graph().compile(checkpointer=checkpointer)
+    setattr(compiled, "_ob_ckpt_id", key)
+    _compiled = compiled
+    return compiled
+
+
+def reset_compiled_graph() -> None:
+    global _compiled
+    _compiled = None
