@@ -54,12 +54,18 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
     };
   }, []);
 
-  const apply = useCallback(async (username: string, password: string, mode: "in" | "up") => {
-    const res = mode === "in" ? await api.login(username, password) : await api.register(username, password);
-    await setSession(res.token, res.user);
-    setUser(res.user);
-    router.replace("/chats");
-  }, [router]);
+  const apply = useCallback(
+    async (username: string, password: string, mode: "in" | "up") => {
+      const res =
+        mode === "in"
+          ? await api.login(username, password)
+          : await api.register(username, password);
+      await setSession(res.token, res.user);
+      setUser(res.user);
+      router.replace("/chats");
+    },
+    [router]
+  );
 
   const value = useMemo<SessionState>(
     () => ({
@@ -73,7 +79,7 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
         router.replace("/login");
       },
     }),
-    [user, restoring, apply, router],
+    [user, restoring, apply, router]
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

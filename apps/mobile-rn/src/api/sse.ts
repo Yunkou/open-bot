@@ -12,7 +12,7 @@ import type { StatusEvent, StreamHandlers } from "./types";
  */
 export async function readSSEStream(
   body: ReadableStream<Uint8Array>,
-  handlers: StreamHandlers,
+  handlers: StreamHandlers
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();

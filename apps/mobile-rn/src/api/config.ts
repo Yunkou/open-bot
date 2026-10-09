@@ -9,7 +9,8 @@ import { Platform } from "react-native";
  *   `EXPO_PUBLIC_OPENBOT_API_BASE=http://192.168.1.23:18080`
  *   改完要重启 Metro（`pnpm start -c`）才会重新注入。
  */
-const DEFAULT_API_BASE = Platform.OS === "android" ? "http://10.0.2.2:18080" : "http://127.0.0.1:18080";
+const DEFAULT_API_BASE =
+  Platform.OS === "android" ? "http://10.0.2.2:18080" : "http://127.0.0.1:18080";
 
 export const API_BASE = (
   process.env.EXPO_PUBLIC_OPENBOT_API_BASE?.trim() || DEFAULT_API_BASE
