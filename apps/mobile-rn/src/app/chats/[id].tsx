@@ -8,7 +8,7 @@ import { KeyboardAvoidingView, Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import * as api from "@/api";
-import type { Agent, AttachmentMeta, Message } from "@/api/types";
+import type { Agent, AttachmentMeta, Message, ReactionUpdatedEvent } from "@/api/types";
 import { BotOnboarding } from "@/components/BotOnboarding";
 import { Composer } from "@/components/Composer";
 import { MessageBubble, type UiMessage } from "@/components/MessageBubble";
@@ -32,6 +32,7 @@ import {
   type OnboardingOption,
 } from "@/lib/onboarding";
 import { friendlyOpenError, parseSandboxHref, previewTitleFromPath } from "@/lib/workspace";
+import { useRealtimeEvents } from "@/providers/realtime";
 import { useSecretPrompt } from "@/providers/secretPrompt";
 
 const STREAMING_ID = "__streaming__";
@@ -277,6 +278,23 @@ export default function ChatScreen(): JSX.Element {
       );
     },
     []
+  );
+
+  /**
+   * 跨端表情同步：另一台设备（或 Web 端）给当前会话的消息点了表情，
+   * 服务端通过全局 WS 推过来，这里按事件里的权威值写回本地。
+   * 没有它就会出现「在这台设备点了没反应、在另一台又不同步」。
+   */
+  useRealtimeEvents(
+    useCallback(
+      (evt) => {
+        if (evt.type !== "reaction_updated") return;
+        const e = evt as ReactionUpdatedEvent;
+        if (e.conversation_id !== conversationId) return;
+        onReactionChange(e.message_id, e);
+      },
+      [conversationId, onReactionChange]
+    )
   );
 
   const openFeedback = useCallback(

@@ -13,14 +13,8 @@ import { FormField } from "@/components/FormField";
 import { EmptyState, ErrorAlert, ListSkeleton } from "@/components/states";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { formatRelativeTime } from "@/lib/format";
-import {
-  getCollapsed,
-  getLastOpened,
-  setCollapsed,
-  setLastOpened as setLastOpenedPref,
-  type LastOpened,
-} from "@/lib/listPrefs";
 import { useSession } from "@/providers/session";
+import { useListPrefs, type ListPrefsState } from "@/stores/client";
 
 type Row =
   | {
@@ -72,13 +66,12 @@ export default function ChatsScreen(): JSX.Element {
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [query, setQuery] = useState("");
-  // 折叠状态与「上次打开」用惰性初始化直接读。
-  //
-  // 之前这里是 useEffect + 异步读盘：首屏先渲染一帧默认值，再跳成真实值。
-  // MMKV 是同步的（见 lib/storage.ts），所以能直接在初始化阶段读出来，
-  // 既没有那一帧闪烁，也不需要 effect。
-  const [collapsedMap, setCollapsedMap] = useState<Record<string, boolean>>(getCollapsed);
-  const [lastOpened, setLastOpened] = useState<LastOpened | null>(getLastOpened);
+  // 折叠状态与「上次打开」放在全局 store：列表页要读，设置页和聊天页
+  // 也会用到「上次打开」这个概念。持久化由 zustand/middleware 写进 MMKV。
+  const collapsedMap = useListPrefs((s) => s.collapsed);
+  const lastOpened = useListPrefs((s) => s.lastOpened);
+  const setLastOpened = useListPrefs((s) => s.setLastOpened);
+  const toggleSection = useListPrefs((s) => s.toggleSection);
 
   const load = useCallback(async () => {
     try {
@@ -109,14 +102,13 @@ export default function ChatsScreen(): JSX.Element {
       try {
         const conversation = await api.openPrimaryConversation(agentId);
         const agent = agents.find((a) => a.id === agentId);
-        const record: LastOpened = {
+        const record: NonNullable<ListPrefsState["lastOpened"]> = {
           kind: "agent",
           id: agentId,
           name: agent?.name ?? "助手",
           conversation_id: conversation.id,
         };
         setLastOpened(record);
-        setLastOpenedPref(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "打开会话失败");
@@ -124,7 +116,7 @@ export default function ChatsScreen(): JSX.Element {
         setOpeningId(null);
       }
     },
-    [agents, openingId, router]
+    [agents, openingId, router, setLastOpened]
   );
 
   const openChannel = useCallback(
@@ -134,14 +126,13 @@ export default function ChatsScreen(): JSX.Element {
       try {
         const { conversation } = await api.openChannelConversation(channelId);
         const channel = channels.find((c) => c.id === channelId);
-        const record: LastOpened = {
+        const record: NonNullable<ListPrefsState["lastOpened"]> = {
           kind: "channel",
           id: channelId,
           name: channel?.name ?? "群聊",
           conversation_id: conversation.id,
         };
         setLastOpened(record);
-        setLastOpenedPref(record);
         router.push(`/chats/${conversation.id}`);
       } catch (err) {
         setError(err instanceof Error ? err.message : "打开群聊失败");
@@ -149,7 +140,7 @@ export default function ChatsScreen(): JSX.Element {
         setOpeningId(null);
       }
     },
-    [channels, openingId, router]
+    [channels, openingId, router, setLastOpened]
   );
 
   /** 「继续上次」：直接回到上次那个会话，不重新走 openPrimaryConversation。 */
@@ -248,14 +239,6 @@ export default function ChatsScreen(): JSX.Element {
   );
 
   const searching = query.trim().length > 0;
-  const toggleSection = useCallback((key: string) => {
-    setCollapsedMap((prev) => {
-      const next = { ...prev, [key]: !prev[key] };
-      setCollapsed(next);
-      return next;
-    });
-  }, []);
-
   const openNewAgent = (): void => {
     setEditingAgent(null);
     setEditorOpen(true);

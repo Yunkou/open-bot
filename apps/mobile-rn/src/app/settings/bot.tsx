@@ -8,15 +8,15 @@ import type { Agent, AgentSkill } from "@/api/types";
 import { FormField, SectionTitle, SwitchRow } from "@/components/FormField";
 import { ScreenScaffold } from "@/components/ScreenScaffold";
 import { EmptyState } from "@/components/states";
+import { useCurrentBot } from "@/stores/client";
 
 /**
  * Bot 设置。对齐 Web 端 `settingsTab === "bot"`（`components/BotSettingsPanel.tsx`）：
  * 岗位资料 + 电脑模式 + 本 Bot 启用的技能。
  *
- * 与 Web 的结构差异只有一处，而且是必要的：Web 的「当前 Bot」是全局 sidebar 概念
- * （选中态住在 App 顶层，聊天页和设置页共用）。RN 这边没有跨页共享状态的既有设施，
- * 为一个下拉框引入状态管理库不划算，所以这里做成**页内切换**：
- * 顶部一排 Chip 选 Bot，选中态只在本页有效。
+ * 「当前 Bot」是跨页共享的（和 Web 一样：聊天页和设置页说的是同一个 Bot），
+ * 所以选中态放在 `stores/client.ts` 的 Zustand store 里并持久化到 MMKV ——
+ * 顶部一排 Chip 选 Bot，离开页面再回来仍是上次那个。
  */
 
 const COMPUTER_MODES = [
@@ -38,7 +38,11 @@ function errText(err: unknown, fallback: string): string {
 
 export default function BotSettingsScreen(): JSX.Element {
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 当前 Bot 提升到全局 store：这个选择是跨页共享的（设置页选完，
+  // 聊天页也该是同一个），之前做成页内状态，一进页面就重置。
+  const currentBot = useCurrentBot((s) => s.bot);
+  const setCurrentBot = useCurrentBot((s) => s.setBot);
+  const selectedId = currentBot?.id ?? null;
   // 选中态同时存一份 ref：`load` 需要它来保持刷新后的选中项不变，
   // 但又不能把它放进依赖数组（那会让 load 每次渲染都变，进而让初始化 effect 反复跑）。
   const selectedRef = useRef<string | null>(null);
@@ -78,12 +82,12 @@ export default function BotSettingsScreen(): JSX.Element {
   const selectAgent = useCallback(
     (agent: Agent) => {
       selectedRef.current = agent.id;
-      setSelectedId(agent.id);
+      setCurrentBot({ id: agent.id, name: agent.name });
       fillForm(agent);
       setMsg("");
       void loadSkills(agent.id);
     },
-    [fillForm, loadSkills]
+    [fillForm, loadSkills, setCurrentBot]
   );
 
   const load = useCallback(async () => {
@@ -91,11 +95,15 @@ export default function BotSettingsScreen(): JSX.Element {
       setError(null);
       const list = await api.listAgents();
       setAgents(list);
-      // 刷新后尽量保持当前选中项；没有（或已被删）就退回第一个
-      const target = list.find((a) => a.id === selectedRef.current) ?? list[0];
+      // 刷新后尽量保持当前选中项（store 里的选择跨页面保留）；
+      // 没有、或已被删除，就退回第一个
+      const target =
+        list.find((a) => a.id === selectedRef.current) ??
+        list.find((a) => a.id === currentBot?.id) ??
+        list[0];
       if (target) {
         selectedRef.current = target.id;
-        setSelectedId(target.id);
+        setCurrentBot({ id: target.id, name: target.name });
         fillForm(target);
         await loadSkills(target.id);
       }
@@ -104,7 +112,7 @@ export default function BotSettingsScreen(): JSX.Element {
     } finally {
       setLoading(false);
     }
-  }, [fillForm, loadSkills]);
+  }, [currentBot?.id, fillForm, loadSkills, setCurrentBot]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

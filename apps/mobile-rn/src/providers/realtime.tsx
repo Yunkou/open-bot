@@ -1,123 +1,84 @@
 import type { JSX, ReactNode } from "react";
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 
 import * as api from "@/api";
-import type { BotOnlineEvent, BotPresenceEvent, Message, ReactionUpdatedEvent } from "@/api/types";
+import type { BotOnlineEvent, BotPresenceEvent } from "@/api/types";
 import { useSession } from "@/providers/session";
+import { useRealtimeStore, type ChatServerEvent } from "@/stores/realtime";
 
 /**
  * 全局实时通道（`GET /v1/events/ws`）。
  *
- * 单会话 SSE 只覆盖「我正在看的那个会话」，而 Web 端这条全局 WS 负责另外几件事：
+ * 单会话 SSE 只覆盖「我正在看的那个会话」，而这条全局 WS 负责另外几件事：
  * - `bot_online` / `bot_presence`：助手在线绿点与五态表情，列表页要实时跟着变
  * - `reaction_updated`：另一台设备给消息点了表情，当前页面同步
  * - `conversation_message` / `task_status`：群聊里别的助手在回消息
  * - `host_activity`：本机正在执行操作时的顶部提示
  *
+ * ## 分工
+ *
+ * 这个 Provider 只做**连接生命周期**：什么时候开、怎么重连、后台回收后怎么恢复。
+ * 状态本身在 `stores/realtime.ts`（Zustand），因为它被列表页、聊天页、全局提示条
+ * 同时消费 —— 走 Context 的话每次事件都要重渲染所有消费者，按字段订阅只重渲染
+ * 真正用到的那几个。
+ *
  * App 切到后台再回来必须重连：手机系统的后台 socket 回收不可靠，
- * 这里靠 AppState 变化显式重连 + 重连后由各页面自己补拉一次列表
+ * 这里靠 AppState 变化显式重连，重连后由各页面自己补拉一次列表
  * （与 Web 端 `visibilitychange` 拉取补偿同一思路）。
  */
 
-export type ChatServerEvent =
-  | BotOnlineEvent
-  | BotPresenceEvent
-  | ReactionUpdatedEvent
-  | { type: "conversation_message"; message: Message }
-  | {
-      type: "task_status";
-      conversation_id: string;
-      agent_id?: string;
-      channel_id?: string;
-      status: string;
-      label?: string;
-    }
-  | { type: "host_activity"; active: boolean; machine_id?: string; label?: string }
-  | { type: string; [key: string]: unknown };
+type Listener = (evt: ChatServerEvent) => void;
 
-type RealtimeState = {
-  connected: boolean;
-  /** 助手在线状态，key 为 agent_id */
-  online: Record<string, boolean>;
-  /** 助手 presence，key 为 agent_id */
-  presence: Record<string, string>;
-  /** 本机正在执行操作时的提示文案；null = 无 */
-  hostActivity: string | null;
-  /** 订阅事件；返回退订函数 */
-  subscribe: (fn: (evt: ChatServerEvent) => void) => () => void;
-};
-
-const RealtimeContext = createContext<RealtimeState | null>(null);
+/**
+ * 事件监听器集合挂在模块级，而不是 Provider 的 state 里。
+ *
+ * 「有人订阅 / 退订」不是界面状态，把它放进 Provider 只会让订阅关系的变化
+ * 触发整棵子树重渲染。模块级 Set 天然没这个问题。
+ */
+const listeners = new Set<Listener>();
 
 const RECONNECT_MS = 3000;
 
-/** 登出后展示用的空表。模块级常量，保证引用稳定，不会让下游 memo 失效。 */
-const EMPTY_MAP_BOOL: Record<string, boolean> = {};
-const EMPTY_MAP_STR: Record<string, string> = {};
+/** 订阅原始 WS 事件。返回退订函数。 */
+export function useRealtimeEvents(fn: Listener): () => void {
+  // fn 每次渲染都是新引用。放进 ref 避免每次重建订阅，
+  // 但不能在渲染期直接写 ref（react-hooks/refs 会拦），所以挪到 effect 里同步。
+  const fnRef = useRef(fn);
+
+  useEffect(() => {
+    fnRef.current = fn;
+  }, [fn]);
+
+  useEffect(() => {
+    const entry: Listener = (evt) => fnRef.current(evt);
+    listeners.add(entry);
+    return () => {
+      listeners.delete(entry);
+    };
+  }, []);
+
+  return useCallback(() => undefined, []);
+}
 
 export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Element {
   const { user } = useSession();
-  const userId = user?.id ?? null;
+  const scope = user?.id ?? null;
 
-  /**
-   * 状态连同它属于哪个用户一起存。
-   *
-   * 退出登录时不必在 effect 里同步清空 —— 读的时候比对 `userId` 即可：
-   * 上一位用户的在线状态天然不可见，下一位登录也不会看到串号数据。
-   * 这比「登出就 setState({})」少一次级联渲染，也不用写 eslint-disable。
-   */
-  const [state, setState] = useState<{
-    userId: string | null;
-    online: Record<string, boolean>;
-    presence: Record<string, string>;
-    hostActivity: string | null;
-  }>({ userId: null, online: {}, presence: {}, hostActivity: null });
-
-  const [connected, setConnected] = useState(false);
-
-  const online = state.userId === userId ? state.online : EMPTY_MAP_BOOL;
-  const presence = state.userId === userId ? state.presence : EMPTY_MAP_STR;
-  const hostActivity = state.userId === userId ? state.hostActivity : null;
-
-  const listenersRef = useRef(new Set<(evt: ChatServerEvent) => void>());
   const socketRef = useRef<WebSocket | null>(null);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const generationRef = useRef(0);
 
-  const emit = useCallback((evt: ChatServerEvent) => {
-    for (const fn of listenersRef.current) {
-      try {
-        fn(evt);
-      } catch {
-        /* 单个订阅者出错不该拖垮整条通道 */
-      }
-    }
-  }, []);
-
-  const subscribe = useCallback((fn: (evt: ChatServerEvent) => void) => {
-    listenersRef.current.add(fn);
-    return () => {
-      listenersRef.current.delete(fn);
-    };
-  }, []);
-
   useEffect(() => {
-    if (!userId) {
+    if (!scope) {
       socketRef.current?.close();
       socketRef.current = null;
+      useRealtimeStore.getState().reset();
       return;
     }
-    const scope = userId;
 
+    const store = useRealtimeStore.getState();
+    store.setScope(scope);
     let disposed = false;
     const generation = ++generationRef.current;
 
@@ -151,7 +112,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
       ws.onopen = () => {
         if (disposed || generation !== generationRef.current) return;
         clearRetry();
-        setConnected(true);
+        useRealtimeStore.getState().setConnected(true);
       };
 
       ws.onmessage = (ev: WebSocketMessageEvent) => {
@@ -162,41 +123,31 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
         } catch {
           return;
         }
+
+        const s = useRealtimeStore.getState();
         switch (evt.type) {
-          case "bot_online": {
-            const e = evt as BotOnlineEvent;
-            setState((prev) => ({
-              ...prev,
-              userId: scope,
-              online: { ...(prev.userId === scope ? prev.online : {}), [e.agent_id]: e.online },
-            }));
+          case "bot_online":
+            s.applyBotOnline(scope, evt as BotOnlineEvent);
             break;
-          }
-          case "bot_presence": {
-            const e = evt as BotPresenceEvent;
-            setState((prev) => ({
-              ...prev,
-              userId: scope,
-              presence: {
-                ...(prev.userId === scope ? prev.presence : {}),
-                [e.agent_id]: e.status,
-              },
-            }));
+          case "bot_presence":
+            s.applyBotPresence(scope, evt as BotPresenceEvent);
             break;
-          }
           case "host_activity": {
             const e = evt as { active: boolean; label?: string };
-            setState((prev) => ({
-              ...prev,
-              userId: scope,
-              hostActivity: e.active ? (e.label ?? "正在操作中") : null,
-            }));
+            s.setHostActivity(scope, e.active ? (e.label ?? "正在操作中") : null);
             break;
           }
           default:
             break;
         }
-        emit(evt);
+
+        for (const fn of listeners) {
+          try {
+            fn(evt);
+          } catch {
+            /* 单个订阅者出错不该拖垮整条通道 */
+          }
+        }
       };
 
       ws.onerror = () => {
@@ -205,7 +156,7 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
 
       ws.onclose = () => {
         if (disposed || generation !== generationRef.current) return;
-        setConnected(false);
+        useRealtimeStore.getState().setConnected(false);
         scheduleRetry();
       };
     };
@@ -236,18 +187,9 @@ export function RealtimeProvider({ children }: { children: ReactNode }): JSX.Ele
       socketRef.current?.close();
       socketRef.current = null;
     };
-  }, [userId, emit]);
+  }, [scope]);
 
-  const value = useMemo<RealtimeState>(
-    () => ({ connected, online, presence, hostActivity, subscribe }),
-    [connected, online, presence, hostActivity, subscribe]
-  );
-
-  return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>;
-}
-
-export function useRealtime(): RealtimeState {
-  const ctx = useContext(RealtimeContext);
-  if (!ctx) throw new Error("useRealtime 必须在 RealtimeProvider 内使用");
-  return ctx;
+  // Provider 本身不产出任何 context —— 它只是给连接生命周期找个挂载点。
+  // 状态从 `stores/realtime` 读，事件用 `useRealtimeEvents` 订阅。
+  return <>{children}</>;
 }
