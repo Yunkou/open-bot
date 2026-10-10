@@ -22,9 +22,11 @@ type Props = {
   onClone?: (agent: Agent) => void;
   /** Open settings「技能」editor for this skill (name link). */
   onOpenSkill?: (name: string) => void;
+  /** Open BotAvatarSettings (形象 + 优先电脑) for this bot. */
+  onOpenAvatar?: (agent: Agent) => void;
 };
 
-export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }: Props) {
+export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill, onOpenAvatar }: Props) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
@@ -62,7 +64,7 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }:
   if (!agent) {
     return (
       <SettingsPage>
-        <SettingsHint>从左侧选择一位助手后，可在此编辑岗位描述、电脑模式与本 Bot 启用的技能。</SettingsHint>
+        <SettingsHint>从左侧选择一位助手后，可在此编辑人设（系统提示）、岗位描述、电脑模式与本 Bot 启用的技能。</SettingsHint>
         <SettingsCard>
           <SettingsEmpty>未选择 Bot</SettingsEmpty>
         </SettingsCard>
@@ -82,7 +84,7 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }:
         computer_mode: computerMode,
       });
       onSaved?.(updated);
-      setMsg("已保存岗位与电脑模式");
+      setMsg("已保存人设、岗位与电脑模式");
     } catch (err) {
       setMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -111,7 +113,7 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }:
   return (
     <SettingsPage>
       <SettingsHint>
-        岗位描述会写入 Bot 资料；「启用的技能」为本 Bot 允许列表。技能正文请在管理端「技能」页编辑。电脑模式：team
+        人设（系统提示）与岗位描述会写入 Bot 资料；「启用的技能」为本 Bot 允许列表。技能正文请在管理端「技能」页编辑。电脑模式：team
         共享账户工作区，private 为该 Bot 独立目录。
       </SettingsHint>
       <SettingsSection title={`Bot · ${agent.name}`}>
@@ -165,6 +167,17 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill }:
                   onClick={() => onClone(agent)}
                 >
                   复制助手
+                </button>
+              ) : null}
+              {onOpenAvatar ? (
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={locked}
+                  title="头像、形状与本 Bot 优先电脑"
+                  onClick={() => onOpenAvatar(agent)}
+                >
+                  形象与优先电脑
                 </button>
               ) : null}
             </div>

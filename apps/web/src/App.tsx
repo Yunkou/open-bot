@@ -4600,6 +4600,16 @@ export default function App() {
               : undefined
         }
         onClose={() => setConvSheet(null)}
+        onSettings={
+          convSheet?.kind === "agent"
+            ? () => {
+                const agent = convSheet.agent;
+                setConvSheet(null);
+                void onSelectAgent(agent.id);
+                void openSettings("bot");
+              }
+            : undefined
+        }
         onClone={
           convSheet?.kind === "agent"
             ? () => {
@@ -4926,6 +4936,7 @@ export default function App() {
                 username={user?.username || "账户"}
                 email={user?.email}
                 accountInitials={accountInitials(user?.username || "")}
+                focusBot={activeAgent || agents[0] || null}
                 preferredMachineLabel={(() => {
                   const focus = activeAgent || agents[0];
                   const mid = focus?.machine_id;
@@ -4938,6 +4949,16 @@ export default function App() {
                   return raw.length > 28 ? `${raw.slice(0, 27)}…` : raw;
                 })()}
                 onClose={() => setShowSettings(false)}
+                onOpenBotAvatar={() => {
+                  const focus = activeAgent || agents[0];
+                  if (focus) {
+                    setShowSettings(false);
+                    openAvatarSettings(focus);
+                  } else {
+                    setSettingsShellHub(false);
+                    setSettingsTab("bot");
+                  }
+                }}
                 onLogout={() => {
                   setShowSettings(false);
                   onLogout();
@@ -5233,6 +5254,10 @@ export default function App() {
               <BotSettingsPanel
                 agent={activeAgent ?? null}
                 onClone={(a) => setCloneTarget(a)}
+                onOpenAvatar={(a) => {
+                  setShowSettings(false);
+                  openAvatarSettings(a);
+                }}
                 onSaved={(a) => {
                   void refreshAgents().then(() => {
                     toast.success(`已更新「${a.name}」`);
