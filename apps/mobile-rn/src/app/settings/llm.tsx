@@ -56,6 +56,9 @@ export default function LlmSettingsScreen(): JSX.Element {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
   const modelsReqSeq = useRef(0);
+  const [cacheProbing, setCacheProbing] = useState(false);
+  const [cacheProbeMsg, setCacheProbeMsg] = useState("");
+  const cacheReqSeq = useRef(0);
 
   // 列表与四个写操作都在查询层；页面只留表单这类真正的本地状态。
   const llm = useLlmConnections();
@@ -108,6 +111,43 @@ export default function LlmSettingsScreen(): JSX.Element {
     return () => clearTimeout(timer);
   }, [form.base_url, form.api_key, editingId, connections]);
 
+  // 填写 Base URL + 密钥 + 模型后自动检测 prompt cache 是否支持。
+  useEffect(() => {
+    const base = form.base_url.trim();
+    const key = (form.api_key || "").trim();
+    const model = form.model.trim();
+    const editing = connections.find((c: LLMConnection) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || !model || (!key && !canReuseSaved)) {
+      setCacheProbeMsg("");
+      setCacheProbing(false);
+      return;
+    }
+    const seq = ++cacheReqSeq.current;
+    const timer = setTimeout(() => {
+      setCacheProbing(true);
+      void api
+        .probeLLMPromptCache({
+          base_url: base,
+          model,
+          ...(key ? { api_key: key } : {}),
+          ...(editingId ? { connection_id: editingId } : {}),
+        })
+        .then((res) => {
+          if (seq !== cacheReqSeq.current) return;
+          setCacheProbeMsg(api.formatLLMPromptCacheProbe(res));
+        })
+        .catch((err) => {
+          if (seq !== cacheReqSeq.current) return;
+          setCacheProbeMsg(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === cacheReqSeq.current) setCacheProbing(false);
+        });
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [form.base_url, form.api_key, form.model, editingId, connections]);
+
   /**
    * 刚写完要按「刷新后的列表」决定表单状态。
    * mutation 的 onSuccess 已经等列表重取落定（见 useLlmMutations），所以直接读缓存即可。
@@ -128,6 +168,7 @@ export default function LlmSettingsScreen(): JSX.Element {
     setProbeMsg("");
     setModelOptions([]);
     setModelsError("");
+    setCacheProbeMsg("");
   }
 
   function patch(next: Partial<LLMInput>): void {
@@ -148,6 +189,7 @@ export default function LlmSettingsScreen(): JSX.Element {
     });
     setErrors({});
     setProbeMsg("");
+    setCacheProbeMsg("");
     setMsg(c.api_key_set ? `已保存密钥 ${c.api_key_hint || ""}（留空则不修改）` : "");
   }
 
@@ -420,6 +462,11 @@ export default function LlmSettingsScreen(): JSX.Element {
             onValueChange={(v) => patch({ is_default: v })}
           />
 
+          {cacheProbing ? (
+            <Typography.Paragraph color="muted">正在检测 prompt cache…</Typography.Paragraph>
+          ) : cacheProbeMsg ? (
+            <Typography.Paragraph color="muted">{cacheProbeMsg}</Typography.Paragraph>
+          ) : null}
           {probeMsg ? <Typography.Paragraph color="muted">{probeMsg}</Typography.Paragraph> : null}
           {msg ? <Typography.Paragraph color="muted">{msg}</Typography.Paragraph> : null}
 

@@ -816,6 +816,48 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   return bits.filter(Boolean).join(" ");
 }
 
+export type LLMPromptCacheProbeResult = {
+  ok: boolean;
+  supports_prompt_cache: boolean;
+  mode: "blocks" | "key" | "none" | "error" | string;
+  detail: string;
+  hint?: string;
+  error?: string;
+  http_status?: number;
+  heuristic_mode?: string;
+};
+
+export async function probeLLMPromptCache(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  connection_id?: string;
+}): Promise<LLMPromptCacheProbeResult> {
+  const res = await fetch(`${API_BASE}/v1/llm/probe-cache`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function formatLLMPromptCacheProbe(result: LLMPromptCacheProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    blocks: "cache_control 内容块",
+    key: "prompt_cache_key",
+    none: "不支持",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.supports_prompt_cache
+    ? `Prompt cache：支持（${label}）`
+    : `Prompt cache：不支持（${label}）`;
+  const bits = [head, result.detail];
+  if (result.hint) bits.push(result.hint);
+  return bits.filter(Boolean).join(" ");
+}
+
 export type AttachmentMeta = {
   id: string;
   name: string;

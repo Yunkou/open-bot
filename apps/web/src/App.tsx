@@ -39,8 +39,10 @@ import {
   uploadSkillPackage,
   deleteSkill,
   applyAgentOnboarding,
+  formatLLMPromptCacheProbe,
   formatLLMToolsProbe,
   listLLMModels,
+  probeLLMPromptCache,
   probeLLMTools,
   login,
   mcpCallTool,
@@ -542,6 +544,9 @@ export default function App() {
   const [llmModelsLoading, setLLMModelsLoading] = useState(false);
   const [llmModelsError, setLLMModelsError] = useState("");
   const llmModelsReqSeq = useRef(0);
+  const [llmCacheProbing, setLLMCacheProbing] = useState(false);
+  const [llmCacheProbeMsg, setLLMCacheProbeMsg] = useState("");
+  const llmCacheReqSeq = useRef(0);
 
   const [agentBusy, setAgentBusy] = useState(false);
   const [channelBusy, setChannelBusy] = useState(false);
@@ -3637,6 +3642,7 @@ export default function App() {
     setLLMMsg("");
     setLLMModelOptions([]);
     setLLMModelsError("");
+    setLLMCacheProbeMsg("");
   };
 
   const saveLLM = async (e: FormEvent) => {
@@ -3759,6 +3765,42 @@ export default function App() {
     }, 450);
     return () => window.clearTimeout(timer);
   }, [llmForm.base_url, llmForm.api_key, editingId, llms]);
+
+  // Auto-detect prompt-cache support when endpoint + key + model are ready.
+  useEffect(() => {
+    const base = llmForm.base_url.trim();
+    const key = (llmForm.api_key || "").trim();
+    const model = llmForm.model.trim();
+    const editing = llms.find((c) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || !model || (!key && !canReuseSaved)) {
+      setLLMCacheProbeMsg("");
+      setLLMCacheProbing(false);
+      return;
+    }
+    const seq = ++llmCacheReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setLLMCacheProbing(true);
+      void probeLLMPromptCache({
+        base_url: base,
+        model,
+        ...(key ? { api_key: key } : {}),
+        ...(editingId ? { connection_id: editingId } : {}),
+      })
+        .then((res) => {
+          if (seq !== llmCacheReqSeq.current) return;
+          setLLMCacheProbeMsg(formatLLMPromptCacheProbe(res));
+        })
+        .catch((err) => {
+          if (seq !== llmCacheReqSeq.current) return;
+          setLLMCacheProbeMsg(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === llmCacheReqSeq.current) setLLMCacheProbing(false);
+        });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [llmForm.base_url, llmForm.api_key, llmForm.model, editingId, llms]);
 
 
   const CONV_LONG_PRESS_MS = 400;
@@ -4948,6 +4990,7 @@ export default function App() {
                 <SettingsHint>
                   可配置多个 OpenAI 兼容连接；聊天默认使用标记为「默认」的连接。密钥不会完整回显。
                   勾选「启用 tools」前可用「检测 tools 能力」验证上游是否支持 function calling；不支持时无法开启。
+                  选定模型后会自动检测该端点是否支持 prompt cache（与运行时 OPENBOT_PROMPT_CACHE 一致）。
                 </SettingsHint>
                 <SettingsSection title="已有连接">
                   <SettingsCard>
@@ -5054,6 +5097,11 @@ export default function App() {
                           <span className="settings-status">
                             已加载 {llmModelOptions.length} 个模型，可下拉选择或手动输入
                           </span>
+                        ) : null}
+                        {llmCacheProbing ? (
+                          <span className="settings-status">正在检测 prompt cache…</span>
+                        ) : llmCacheProbeMsg ? (
+                          <span className="settings-status">{llmCacheProbeMsg}</span>
                         ) : null}
                       </label>
                       <label>

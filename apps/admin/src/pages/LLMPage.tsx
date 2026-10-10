@@ -10,8 +10,10 @@ import {
 import {
   adminGetOrgLLM,
   adminListOrgLLMModels,
+  adminProbeOrgLLMPromptCache,
   adminProbeOrgLLMTools,
   adminPutOrgLLM,
+  formatLLMPromptCacheProbe,
   formatLLMToolsProbe,
   type OrgLLMSettings,
 } from "../api";
@@ -25,6 +27,8 @@ export default function LLMPage() {
   const [loading, setLoading] = useState(true);
   const [probing, setProbing] = useState(false);
   const [probeMsg, setProbeMsg] = useState("");
+  const [cacheProbing, setCacheProbing] = useState(false);
+  const [cacheProbeMsg, setCacheProbeMsg] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
@@ -32,6 +36,8 @@ export default function LLMPage() {
   const modelsReqSeq = useRef(0);
   const watchedBaseURL = Form.useWatch("base_url", form);
   const watchedAPIKey = Form.useWatch("api_key", form);
+  const watchedModel = Form.useWatch("model", form);
+  const cacheReqSeq = useRef(0);
 
   useEffect(() => {
     setLoading(true);
@@ -97,6 +103,42 @@ export default function LLMPage() {
     return () => window.clearTimeout(timer);
   }, [watchedBaseURL, watchedAPIKey, llm?.api_key_set]);
 
+  // Auto-detect prompt-cache support when endpoint + key + model are ready.
+  useEffect(() => {
+    const base = String(watchedBaseURL || "").trim();
+    const key = String(watchedAPIKey || "").trim();
+    const model = String(watchedModel || "").trim();
+    const canReuseSaved = Boolean(llm?.api_key_set);
+    if (!base || !model || (!key && !canReuseSaved)) {
+      setCacheProbeMsg("");
+      setCacheProbing(false);
+      return;
+    }
+
+    const seq = ++cacheReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setCacheProbing(true);
+      void adminProbeOrgLLMPromptCache({
+        base_url: base,
+        model,
+        ...(key ? { api_key: key } : {}),
+      })
+        .then((res) => {
+          if (seq !== cacheReqSeq.current) return;
+          setCacheProbeMsg(formatLLMPromptCacheProbe(res));
+        })
+        .catch((err) => {
+          if (seq !== cacheReqSeq.current) return;
+          setCacheProbeMsg(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === cacheReqSeq.current) setCacheProbing(false);
+        });
+    }, MODELS_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [watchedBaseURL, watchedAPIKey, watchedModel, llm?.api_key_set]);
+
   const runProbe = async () => {
     setProbing(true);
     setProbeMsg("");
@@ -134,7 +176,7 @@ export default function LLMPage() {
           {llm?.api_key_hint ? `：${llm.api_key_hint}` : ""}）。
           优先级：个人默认/首个连接 &gt; 组织默认 &gt; 无。
           勾选「启用 tools」前请先检测上游是否支持 function calling；不支持时无法保存开启状态。
-          填写 Base URL 与 API Key 后会自动拉取可用模型列表（仍可手动输入）。
+          填写 Base URL 与 API Key 后会自动拉取可用模型列表（仍可手动输入）。选定模型后会检测该端点是否支持 prompt cache。
         </Paragraph>
         <ProForm
           form={form}
@@ -254,6 +296,15 @@ export default function LLMPage() {
             extra="需上游支持 OpenAI function calling；保存前会自动检测"
           />
         </ProForm>
+        {cacheProbing ? (
+          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+            正在检测 prompt cache…
+          </Text>
+        ) : cacheProbeMsg ? (
+          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+            {cacheProbeMsg}
+          </Text>
+        ) : null}
         {probeMsg ? (
           <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
             {probeMsg}

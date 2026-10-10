@@ -27,6 +27,7 @@ import type {
   LLMConnection,
   LLMInput,
   LLMListModelsResult,
+  LLMPromptCacheProbeResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,
@@ -843,6 +844,33 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   return [head, result.detail, result.hint].filter(Boolean).join(" ");
 }
 
+export async function probeLLMPromptCache(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  connection_id?: string;
+}): Promise<LLMPromptCacheProbeResult> {
+  return request("/v1/llm/probe-cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function formatLLMPromptCacheProbe(result: LLMPromptCacheProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    blocks: "cache_control 内容块",
+    key: "prompt_cache_key",
+    none: "不支持",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.supports_prompt_cache
+    ? `Prompt cache：支持（${label}）`
+    : `Prompt cache：不支持（${label}）`;
+  return [head, result.detail, result.hint].filter(Boolean).join(" ");
+}
+
 /* ------------------------------------------------------------------ 附件地址 */
 
 export function isImageAttachmentMime(mime?: string | null): boolean {
@@ -1127,6 +1155,7 @@ export type {
   HostConfirmPayload,
   InboundHook,
   LLMListModelsResult,
+  LLMPromptCacheProbeResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,
