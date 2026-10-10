@@ -376,3 +376,88 @@ func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
 		t.Fatal("must reject raw agent id echo")
 	}
 }
+
+func TestIsAllHandsIntent(t *testing.T) {
+	positives := []string{
+		"都介绍下自己",
+		"都介绍一下自己",
+		"大家介绍一下",
+		"大家介绍自己",
+		"各位介绍一下",
+		"各自介绍一下",
+		"都说说",
+		"大家都说说",
+		"每人介绍一下",
+		"轮流介绍",
+		"everyone introduce yourselves",
+		"Please all introduce yourselves",
+		"everybody introduce",
+	}
+	for _, p := range positives {
+		if !isAllHandsIntent(p) {
+			t.Fatalf("want all-hands for %q", p)
+		}
+	}
+	negatives := []string{
+		"",
+		"帮我写个函数",
+		"谁会写代码",
+		"介绍一下码农",
+		"介绍一下",
+		"都很好",
+		"大家好",
+		"随便聊聊天气",
+		"@码农 介绍一下",
+	}
+	for _, n := range negatives {
+		if isAllHandsIntent(n) {
+			t.Fatalf("want NOT all-hands for %q", n)
+		}
+	}
+}
+
+func TestRunAutoPickAllHandsDecisionSkipsDecide(t *testing.T) {
+	members, agents := testGroupAgents()
+	decideCalled := false
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			decideCalled = true
+			t.Fatal("all-hands must not call decision model")
+			return nil, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, "lead", 1, "", deps)
+	if decideCalled {
+		t.Fatal("decide should be skipped")
+	}
+	if got.Method != "decision->all_hands" {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if got.Fallback != "all" || len(got.AgentIDs) != 3 {
+		t.Fatalf("want all 3 candidates, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("all candidates already; second fail-open should be off")
+	}
+	// Non-forced: LeadFallback empty (unlike lead fail-open).
+	if len(got.LeadFallback) != 0 {
+		t.Fatalf("LeadFallback=%#v", got.LeadFallback)
+	}
+}
+
+func TestRunAutoPickAllHandsHeuristic(t *testing.T) {
+	members, agents := testGroupAgents()
+	got := runAutoPickByMode(db.AutoPickHeuristic, "大家介绍一下", members, agents, "lead", 1, "", nil)
+	if got.Method != "heuristic->all_hands" {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
+		t.Fatalf("want all members, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+	// Contrast: specialty question still picks coder, not all.
+	got2 := runAutoPickByMode(db.AutoPickHeuristic, "帮我写个函数", members, agents, "lead", 1, "", nil)
+	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "coder" {
+		t.Fatalf("specialty should still pick coder, got %#v", got2.AgentIDs)
+	}
+}

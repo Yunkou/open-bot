@@ -468,11 +468,101 @@ func orgAutoPickEnabled(flagsJSON string) bool {
 	return orgAutoPickMode(flagsJSON) != db.AutoPickOff
 }
 
+// isAllHandsIntent detects no-@ phrasing that asks every member to speak
+// (self-intro / round-robin), e.g. 「都介绍下自己」「大家介绍一下」「everyone introduce」.
+// MVP: heuristic substring / collective+action match — enough to avoid decision/heuristic
+// collapsing to K=1 when the user clearly wants all bots.
+func isAllHandsIntent(userText string) bool {
+	text := strings.ToLower(strings.TrimSpace(userText))
+	if text == "" {
+		return false
+	}
+	for _, p := range allHandsFixedPhrases {
+		if p != "" && strings.Contains(text, strings.ToLower(p)) {
+			return true
+		}
+	}
+	hasCollective := false
+	for _, c := range allHandsCollectiveMarkers {
+		if c != "" && strings.Contains(text, strings.ToLower(c)) {
+			hasCollective = true
+			break
+		}
+	}
+	if !hasCollective {
+		return false
+	}
+	for _, a := range allHandsActionMarkers {
+		if a != "" && strings.Contains(text, strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// Fixed multi-char phrases (ZH/EN). Checked first for precision.
+var allHandsFixedPhrases = []string{
+	"都介绍", "大家都介绍", "各位介绍", "各自介绍",
+	"都自我介绍", "大家自我介绍", "各位自我介绍", "各自自我介绍",
+	"都说说", "大家都说说", "各位说说", "各自说说",
+	"都说一下", "大家都说一下", "各位说一下",
+	"都讲讲", "大家讲讲", "各位讲讲",
+	"都讲一下", "大家讲一下",
+	"每人介绍", "每位介绍", "每个人介绍", "每一位介绍",
+	"逐个介绍", "轮流介绍", "全员介绍", "所有人介绍",
+	"都来介绍", "一起来介绍", "都来自我介绍",
+	"轮流发言", "每人发言", "各自发言",
+	"introduce yourselves", "everyone introduce", "everybody introduce",
+	"all introduce", "all of you introduce", "each of you introduce",
+	"everyone introduce yourselves", "introduce yourself everyone",
+}
+
+// Collective markers that must co-occur with an action marker.
+var allHandsCollectiveMarkers = []string{
+	"都", "大家", "各位", "各自", "每人", "每位", "每个人", "每一位",
+	"所有人", "全员", "轮流", "逐个",
+	"everyone", "everybody", "all of you", "each of you",
+}
+
+// Speak / intro actions paired with collective markers.
+var allHandsActionMarkers = []string{
+	"介绍", "自我介绍", "说说", "说一下", "讲讲", "讲一下", "发言",
+	"introduce", "say hi", "say hello",
+}
+
+// autoPickAllCandidates returns every member as a non-forced candidate (same as auto_pick=off).
+// Each may PASS; Method is mode-prefixed for logs (heuristic->all_hands / decision->all_hands).
+func autoPickAllCandidates(method string, members []string) groupAutoPickResult {
+	if strings.TrimSpace(method) == "" {
+		method = "all_hands"
+	}
+	out := copyStringSlice(members)
+	log.Printf("auto_pick=%s ids=%v conf=1.00 fallback=all", method, out)
+	return groupAutoPickResult{
+		AgentIDs:            out,
+		Confidence:          1.0,
+		Method:              method,
+		Fallback:            "all",
+		LeadFallback:        map[string]bool{},
+		AllowSecondFailOpen: false,
+	}
+}
+
 // runAutoPickByMode applies org auto_pick mode for a no-@ turn.
+// All-hands phrasing (「都介绍下自己」…) short-circuits to all members as candidates
+// (non-forced, may PASS) for both decision and heuristic — same candidacy as off.
 // decision (B-tier): org SystemOne choice → agent_ids; on parse/timeout/empty/low-conf/off
 // fail-open to heuristic (product lock — not lead-only), then heuristic's own lead/all rules.
 func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {
 	mode = db.NormalizeAutoPickMode(mode)
+	if isAllHandsIntent(userText) {
+		switch mode {
+		case db.AutoPickDecision:
+			return autoPickAllCandidates("decision->all_hands", members)
+		default:
+			return autoPickAllCandidates("heuristic->all_hands", members)
+		}
+	}
 	switch mode {
 	case db.AutoPickDecision:
 		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {

@@ -17,6 +17,7 @@
 | `@某人` / 多 `@` | 仅被点名者（forced，不可 PASS） | **不变** |
 | `@everyone` / `@all` | 全员 forced | **不变** |
 | **无人 `@`** | 按 org `auto_pick` 模式（见 §3） | **新增** |
+| 无人 `@` 且全员意图（「都介绍下自己」等） | **全员候选**（非 forced，可 PASS；同 `off`） | **新增**（phrase 短路） |
 | Auto 失败 / 超时 / 无把握 | decision → **heuristic**；heuristic 无命中 → **lead**（`conv.AgentID`） | **fail-open 链** |
 
 K 默认 **1**（org 级默认；上限 3）。Lead 始终可作为兜底，不因 Auto 静默丢回复。
@@ -44,8 +45,8 @@ resolveGroupSendTargets / planSendTargets
   ├─ @ / @everyone / explicit → 现状（forced）
   └─ no @ → org feature_flags.auto_pick（忽略 channel）
         auto_pick=off        → 全员候选（现状）
-        auto_pick=heuristic  → AutoPick(K) A 档
-        auto_pick=decision   → SystemOne choice → ≤K ids；失败 → heuristic
+        auto_pick=heuristic  → 若全员意图 → 全员候选；否则 AutoPick(K) A 档
+        auto_pick=decision   → 若全员意图 → 全员候选（跳过 SystemOne）；否则 choice → ≤K；失败 → heuristic
         heuristic 无命中      → [lead]（非 forced；lead 提示「你是兜底，请回答」）
 ```
 
@@ -77,6 +78,29 @@ resolveGroupSendTargets / planSendTargets
 - heuristic：无命中 / 低分 → `[lead]`；lead 不在群成员里 → 退回**全员候选**
 - Auto 选人**不得**替代 `@` 强制集合
 
+## 4.1 全员意图（all-hands）短路
+
+无人 `@` 时，若用户话术明确要求**每位成员发言**（自我介绍 / 轮流说），`heuristic` 与 `decision` 均**不再**压到 K=1，而是与 `auto_pick=off` 相同：全员作为非 forced 候选（可 PASS）。
+
+**MVP：启发式短语检测**（不依赖决策模型返回 `all`）。命中后日志：
+
+- `auto_pick=heuristic->all_hands ids=[…] conf=1.00 fallback=all`
+- `auto_pick=decision->all_hands ids=[…] conf=1.00 fallback=all`（且**不**调用 SystemOne）
+
+**覆盖短语（示例，非穷尽）：**
+
+| 类 | 例子 |
+|---|---|
+| 集体 + 介绍 | 「都介绍下自己」「大家介绍一下」「各位介绍」「各自介绍」「每人介绍」「轮流介绍」 |
+| 集体 + 说说 | 「都说说」「大家都说一下」「轮流发言」 |
+| 英文 | `everyone introduce` / `introduce yourselves` / `all of you introduce` |
+
+**不命中（仍走原 AutoPick）：** 「介绍一下」「介绍一下码农」「都很好」「帮我写个函数」。
+
+`@everyone` / `@all` 仍走强制全员（不可 PASS），与本短路无关。可选后续：决策 choice 增加 opaque `all` 选项；当前 phrase 检测已够用。
+
+---
+
 ## 5. 与 PASS / 全员候选并存
 
 - 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑。  
@@ -85,7 +109,7 @@ resolveGroupSendTargets / planSendTargets
 
 ## 6. 文案 / 可观测
 
-- 内部日志：`auto_pick=decision ids=… conf=… fallback=`；失败时 `auto_pick=decision->heuristic ids=… conf=… fallback=lead|all`  
+- 内部日志：`auto_pick=decision ids=… conf=… fallback=`；失败时 `auto_pick=decision->heuristic ids=… conf=… fallback=lead|all`；全员意图 `auto_pick=decision->all_hands` / `heuristic->all_hands`  
 - 用户侧不展示选人过程；可选调试：`show_reply_candidates`（默认关；无客户端群设置 UI 要求）。
 - **永不**在用户气泡泄漏 Auto / PASS 等内部词。
 
@@ -116,6 +140,7 @@ resolveGroupSendTargets / planSendTargets
 
 1. 「@码农 修 bug」→ 仅码农，无 Auto。  
 2. 「大家介绍自己」`@everyone` → 全员 forced。  
+2b. 「都介绍下自己」/「大家介绍一下」无人 `@` + decision/heuristic → 全员候选（非 forced，可 PASS）；日志 `*->all_hands`；decision **不**调 SystemOne。  
 3. 「帮我写个函数」无人 `@` + heuristic → 优先角色匹配的 1 人；其 PASS → lead 补答。  
 4. heuristic 无命中 → 仅 lead 答，不出现空回合。  
 5. org `auto_pick=off` → 与今日全员+PASS 一致。  
