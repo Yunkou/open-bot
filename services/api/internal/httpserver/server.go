@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -216,6 +217,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/channels", s.requireAuth(s.handleListChannels))
 	mux.HandleFunc("POST /v1/channels", s.requireAuth(s.handleCreateChannel))
 	mux.HandleFunc("DELETE /v1/channels/{id}", s.requireAuth(s.handleDeleteChannel))
+	mux.HandleFunc("PATCH /v1/channels/{id}", s.requireAuth(s.handlePatchChannel))
 	mux.HandleFunc("POST /v1/channels/{id}/members", s.requireAuth(s.handleAddChannelMember))
 	mux.HandleFunc("GET /v1/channels/{id}/conversation", s.requireAuth(s.handleChannelConversation))
 	mux.HandleFunc("POST /v1/agent-bus/messages", s.requireAuth(s.handlePostAgentBusMessage))
@@ -1441,13 +1443,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	targetAgents, terr := s.resolveSendTargets(uid, conv, body.AgentIDs, content, replyParent)
+	sendPlan, terr := s.planSendTargets(uid, conv, body.AgentIDs, content, replyParent)
 	if terr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": terr.Error()})
 		return
 	}
+	targetAgents := sendPlan.Targets
 	if len(targetAgents) == 0 {
 		targetAgents = []string{conv.AgentID}
+	}
+	leadFallbackAgents := map[string]bool{}
+	if sendPlan.AutoPick != nil {
+		for id, v := range sendPlan.AutoPick.LeadFallback {
+			if v {
+				leadFallbackAgents[id] = true
+			}
+		}
 	}
 
 	var llmPayload map[string]any
@@ -1496,6 +1507,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"agent_ids":  targetAgents,
 		"channel_id": conv.ChannelID,
 	})
+	// Debug「本轮将由谁回答」: names only, no agent_id; default off.
+	if sendPlan.ShowReplyCandidates && conv.ChannelID != "" {
+		emit("meta", map[string]any{
+			"phase": "reply_candidates",
+			"names": sendPlan.DebugNames,
+		})
+	}
 	// Replace optimistic local-user-* id with the real persisted id.
 	emit("meta", map[string]any{
 		"phase":           "user_saved",
@@ -1632,13 +1650,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			systemPrompt = agent.SystemPrompt
 			agentName = agent.Name
 		}
-		// Group: each candidate may PASS when not specifically addressed.
-		if conv.ChannelID != "" && len(targetAgents) > 1 {
-			extra := groupParticipationExtraSystem(forcedAgents[agentID], selfAgent, channelMembers, channelAgents)
-			if strings.TrimSpace(systemPrompt) != "" {
-				systemPrompt = systemPrompt + "\n\n" + extra
-			} else {
-				systemPrompt = extra
+		// Group: @ / @everyone forced; AutoPick / lead-fallback may be single-candidate but still need prompts.
+		if conv.ChannelID != "" {
+			extra := groupParticipationExtraSystemMode(forcedAgents[agentID], leadFallbackAgents[agentID], selfAgent, channelMembers, channelAgents)
+			// Skip empty DM-style when forced solo historically had no prompt — still attach for channel.
+			if strings.TrimSpace(extra) != "" {
+				if strings.TrimSpace(systemPrompt) != "" {
+					systemPrompt = systemPrompt + "\n\n" + extra
+				} else {
+					systemPrompt = extra
+				}
 			}
 		}
 		var history []runtimeMsg
@@ -1723,102 +1744,109 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		// (DM / one @) still goes through the same path with wg size 1.
 		// On hard runErr for one agent: continue others (parallel usefulness);
 		// emit per-agent error + failure bubble, then a single terminal done.
-		var (
-			wg           sync.WaitGroup
-			cancelledMu  sync.Mutex
-			hardErrMu    sync.Mutex
-			firstHardErr error
-		)
-		for _, prep := range preps {
-			wg.Add(1)
-			go func(prep groupCandidatePrep) {
-				defer wg.Done()
-				if runCtx.Err() != nil {
-					cancelledMu.Lock()
-					cancelled = true
-					cancelledMu.Unlock()
-					// Empty cancel before candidate ran: no 「（已停止）」 bubble.
-					return
-				}
-				agentEmit := stampEmitAgentID(emit, prep.agentID)
-				agentEmit("meta", map[string]any{
-					"phase":      "agent_start",
-					"agent_id":   prep.agentID,
-					"agent_name": prep.agentName,
-					"index":      prep.index,
-					"total":      len(targetAgents),
-					"forced":     forcedAgents[prep.agentID],
-				})
-				assistantText, pendingSummary, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
-				if pendingSummary != "" {
-					sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
-						ThreadRootID: threadRootID,
-						At:           sumAt,
-					})
-				}
-				runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
-				// A failed run with empty tokens must NOT look like group PASS silence —
-				// that is the "直接无返回" path (bubble dropped as PASS / never persisted).
-				passed := conv.ChannelID != "" && !runCancelled && runErr == nil && isGroupPassReply(assistantText)
-				// Persist partial assistant text even when cancelled mid-stream.
-				// Empty cancel: no 「（已停止）」 marker (Stop or supersede).
-				// Group PASS / empty optional silence: do not persist a bubble.
-				if passed {
-					// Durable journal may have already projected PASS via commit_assistant(project=True).
-					// Remove that row so silence never survives refresh / listMessages.
-					s.dropProjectedGroupPass(conv.ID, runID)
+		runCandidateWave := func(wavePreps []groupCandidatePrep, waveTotal int) (replied int, ran []string, firstHardErr error) {
+			var (
+				wg          sync.WaitGroup
+				cancelledMu sync.Mutex
+				hardErrMu   sync.Mutex
+				outcomeMu   sync.Mutex
+			)
+			for _, prep := range wavePreps {
+				wg.Add(1)
+				go func(prep groupCandidatePrep) {
+					defer wg.Done()
+					if runCtx.Err() != nil {
+						cancelledMu.Lock()
+						cancelled = true
+						cancelledMu.Unlock()
+						return
+					}
+					agentEmit := stampEmitAgentID(emit, prep.agentID)
 					agentEmit("meta", map[string]any{
-						"phase":    "agent_skipped",
-						"agent_id": prep.agentID,
-						"reason":   "pass",
-						"index":    prep.index,
+						"phase":      "agent_start",
+						"agent_id":   prep.agentID,
+						"agent_name": prep.agentName,
+						"index":      prep.index,
+						"total":      waveTotal,
+						"forced":     forcedAgents[prep.agentID],
 					})
-				} else if strings.TrimSpace(assistantText) != "" {
-					// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
-				} else if runErr != nil && !runCancelled {
-					// Persist a visible failure bubble so refresh
-					// and other clients still see the turn instead of silent empty.
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, nil, agentEmit)
-				}
-				if runErr != nil {
+					assistantText, pendingSummary, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
+					if pendingSummary != "" {
+						sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
+						_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
+							ThreadRootID: threadRootID,
+							At:           sumAt,
+						})
+					}
+					runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
+					passed := conv.ChannelID != "" && !runCancelled && runErr == nil && isGroupPassReply(assistantText)
+					if passed {
+						s.dropProjectedGroupPass(conv.ID, runID)
+						agentEmit("meta", map[string]any{
+							"phase":    "agent_skipped",
+							"agent_id": prep.agentID,
+							"reason":   "pass",
+							"index":    prep.index,
+						})
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else if strings.TrimSpace(assistantText) != "" {
+						s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
+						outcomeMu.Lock()
+						replied++
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else if runErr != nil && !runCancelled {
+						s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, nil, agentEmit)
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else {
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					}
+					if runErr != nil {
+						if runCancelled {
+							cancelledMu.Lock()
+							cancelled = true
+							cancelledMu.Unlock()
+							return
+						}
+						agentEmit("error", map[string]any{
+							"message":  runErr.Error(),
+							"agent_id": prep.agentID,
+						})
+						hardErrMu.Lock()
+						if firstHardErr == nil {
+							firstHardErr = runErr
+						}
+						hardErrMu.Unlock()
+						return
+					}
 					if runCancelled {
 						cancelledMu.Lock()
 						cancelled = true
 						cancelledMu.Unlock()
 						return
 					}
-					// Continue sibling candidates; do not emit terminal done here.
-					agentEmit("error", map[string]any{
-						"message":  runErr.Error(),
-						"agent_id": prep.agentID,
-					})
-					hardErrMu.Lock()
-					if firstHardErr == nil {
-						firstHardErr = runErr
+					if !passed {
+						agentEmit("meta", map[string]any{
+							"phase":    "agent_done",
+							"agent_id": prep.agentID,
+							"index":    prep.index,
+						})
 					}
-					hardErrMu.Unlock()
-					return
-				}
-				if runCancelled {
-					cancelledMu.Lock()
-					cancelled = true
-					cancelledMu.Unlock()
-					return
-				}
-				if !passed {
-					agentEmit("meta", map[string]any{
-						"phase":    "agent_done",
-						"agent_id": prep.agentID,
-						"index":    prep.index,
-					})
-				}
-				_ = s.db.RecordUsageRun("", uid, prep.agentID, conv.ID, "chat",
-					runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
-			}(prep)
+					_ = s.db.RecordUsageRun("", uid, prep.agentID, conv.ID, "chat",
+						runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
+				}(prep)
+			}
+			wg.Wait()
+			return replied, ran, firstHardErr
 		}
-		wg.Wait()
+
+		replied, ranIDs, firstHardErr := runCandidateWave(preps, len(targetAgents))
 		if cancelled {
 			emit("meta", map[string]any{"phase": "cancelled"})
 			emit("done", map[string]any{"ok": false, "cancelled": true})
@@ -1827,6 +1855,115 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if firstHardErr != nil {
 			emit("done", map[string]any{"ok": false, "error": firstHardErr.Error(), "partial": true})
 			return
+		}
+
+		// Second fail-open: AutoPick (or lead-fallback) candidates all PASS → run lead (or all).
+		// User-visible bubbles must not leak 「Auto 选人」/「PASS」.
+		allowSecond := sendPlan.AutoPick != nil && sendPlan.AutoPick.AllowSecondFailOpen
+		if allowSecond && replied == 0 && conv.ChannelID != "" && len(channelMembers) > 0 {
+			secondTargets, secondLeadFB, fb := secondFailOpenTargets(channelMembers, ranIDs, conv.AgentID)
+			if len(secondTargets) > 0 {
+				log.Printf("auto_pick=heuristic ids=%v conf=0.00 fallback=%s", secondTargets, fb)
+				leadFallbackAgents = secondLeadFB
+				if sendPlan.ShowReplyCandidates {
+					emit("meta", map[string]any{
+						"phase": "reply_candidates",
+						"names": displayNamesForAgents(secondTargets, channelAgents),
+					})
+				}
+				secondPreps := make([]groupCandidatePrep, 0, len(secondTargets))
+				for i, agentID := range secondTargets {
+					systemPrompt := ""
+					agentName := agentID
+					var selfAgent *db.Agent
+					if agent, aerr := s.db.GetAgent(uid, agentID); aerr == nil {
+						selfAgent = agent
+						systemPrompt = agent.SystemPrompt
+						agentName = agent.Name
+					}
+					extra := groupParticipationExtraSystemMode(false, leadFallbackAgents[agentID], selfAgent, channelMembers, channelAgents)
+					if strings.TrimSpace(extra) != "" {
+						if strings.TrimSpace(systemPrompt) != "" {
+							systemPrompt = systemPrompt + "\n\n" + extra
+						} else {
+							systemPrompt = extra
+						}
+					}
+					var history []runtimeMsg
+					runtimeContent := storedContent
+					agentNames := speakerNamesForHistory(s.db, msgs, agentID, agentName)
+					if threadRootID != "" {
+						history = historyForThreadRuntime(msgs, threadRootID, agentID, agentNames)
+					} else {
+						history = historyForRuntime(msgs, agentID, agentNames)
+					}
+					if len(body.HandoffContext) > 0 {
+						history = mergeHandoffContext(history, body.HandoffContext)
+					}
+					enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(uid, agentID)
+					if enabledSkills == nil {
+						enabledSkills = []string{}
+					}
+					payloadMap := map[string]any{
+						"conversation_id": id,
+						"content":         runtimeContent,
+						"agent_id":        agentID,
+						"user_id":         uid,
+						"channel_id":      conv.ChannelID,
+						"system_prompt":   systemPrompt,
+						"messages":        history,
+						"enabled_skills":  enabledSkills,
+						"request_id":      uuid.NewString(),
+						"max_tool_rounds": s.effectiveMaxToolRounds(uid),
+					}
+					if afterInterrupt {
+						payloadMap["after_interrupt"] = true
+					}
+					if replyToID != "" {
+						payloadMap["reply_to_id"] = replyToID
+					}
+					if replyQuote != "" {
+						payloadMap["reply_to_content"] = replyQuote
+					}
+					if threadRootID != "" {
+						payloadMap["thread_root_id"] = threadRootID
+						threadMsgs := filterThreadMessages(msgs, threadRootID)
+						payloadMap["reply_context"] = threadRecallQuery(storedContent, replyParent, threadMsgs)
+					}
+					if llmPayload != nil {
+						payloadMap["llm"] = llmPayload
+					}
+					attachDecision(payloadMap, s.decisionRuntimePayload(uid))
+					if body.Client != nil {
+						payloadMap["client"] = body.Client
+					}
+					attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+					s.attachPreferredMachine(payloadMap, uid, agentID)
+					secondPreps = append(secondPreps, groupCandidatePrep{
+						index:      i,
+						agentID:    agentID,
+						agentName:  agentName,
+						payloadMap: payloadMap,
+						recallCtx: &recallPersistContext{
+							UserID:         uid,
+							AgentID:        agentID,
+							ConversationID: conv.ID,
+							MessageID:      userMsg.ID,
+							Source:         "chat",
+						},
+					})
+				}
+				_, _, secondHard := runCandidateWave(secondPreps, len(secondTargets))
+				if cancelled {
+					emit("meta", map[string]any{"phase": "cancelled"})
+					emit("done", map[string]any{"ok": false, "cancelled": true})
+					return
+				}
+				if secondHard != nil {
+					emit("done", map[string]any{"ok": false, "error": secondHard.Error(), "partial": true})
+					return
+				}
+			}
 		}
 	}
 	if cancelled {
@@ -1877,13 +2014,30 @@ func stampEmitAgentID(emit func(event string, data any), agentID string) func(ev
 	}
 }
 
+// groupSendPlan is the resolved candidate set for one user turn (DM or group).
+type groupSendPlan struct {
+	Targets             []string
+	AutoPick            *groupAutoPickResult // nil when AutoPick not applied (@ / off / DM)
+	ShowReplyCandidates bool
+	DebugNames          []string // display names only when ShowReplyCandidates
+}
+
 // resolveSendTargets picks which agents should answer this turn.
 // DM: always the conversation's agent.
-// Group: see resolveGroupSendTargets — candidates are @mentions, @everyone→all, or
-// all members when no @; each optional candidate may PASS (see groupParticipationExtraSystem).
+// Group: @ / @everyone forced; no @ → AutoPick (A-tier) or all members when disabled.
 func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) ([]string, error) {
+	plan, err := s.planSendTargets(uid, conv, explicit, content, replyParent)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Targets, nil
+}
+
+// planSendTargets resolves targets and optional AutoPick metadata for the send pipeline.
+func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) (*groupSendPlan, error) {
+	plan := &groupSendPlan{Targets: []string{conv.AgentID}}
 	if conv.ChannelID == "" {
-		return []string{conv.AgentID}, nil
+		return plan, nil
 	}
 	ch, err := s.db.GetChannel(uid, conv.ChannelID)
 	if err != nil {
@@ -1891,10 +2045,44 @@ func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit 
 	}
 	members := ch.Members
 	if len(members) == 0 {
-		return []string{conv.AgentID}, nil
+		return plan, nil
 	}
 	agents, _ := s.db.ListAgents(uid)
-	return resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID), nil
+	base := resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID)
+	plan.ShowReplyCandidates = ch.Settings.ShowReplyCandidates
+
+	orgEnabled := true
+	if u, uerr := s.db.GetUserByID(uid); uerr == nil && u != nil && u.OrgID != "" {
+		if settings, serr := s.db.GetOrgSettings(u.OrgID); serr == nil && settings != nil {
+			orgEnabled = orgAutoPickEnabled(settings.FeatureFlagsJSON)
+		}
+	}
+	autoOn := ch.Settings.EffectiveAutoPick(orgEnabled)
+
+	// Never replace @ / @everyone / explicit agent_ids.
+	if groupHasExplicitAddressing(content, explicit, members, agents) || !autoOn {
+		plan.Targets = base
+		if plan.ShowReplyCandidates {
+			plan.DebugNames = displayNamesForAgents(plan.Targets, agents)
+		}
+		return plan, nil
+	}
+
+	synopsis := ""
+	if msgs, lerr := s.db.ListMessages(uid, conv.ID); lerr == nil {
+		// Exclude the user message just saved if present as last; still useful as soft signal.
+		synopsis = recentMessagesSynopsis(msgs, 2)
+	}
+	pick := autoPickHeuristic(content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis)
+	plan.AutoPick = &pick
+	plan.Targets = pick.AgentIDs
+	if len(plan.Targets) == 0 {
+		plan.Targets = []string{conv.AgentID}
+	}
+	if plan.ShowReplyCandidates {
+		plan.DebugNames = displayNamesForAgents(plan.Targets, agents)
+	}
+	return plan, nil
 }
 
 type runtimeUsage struct {
@@ -2306,6 +2494,54 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePatchChannel updates channel settings (auto_pick / show_reply_candidates).
+// show_reply_candidates powers client debug「本轮将由谁回答」(default off; names only, no agent_id).
+func (s *Server) handlePatchChannel(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body struct {
+		AutoPick            *bool `json:"auto_pick"`
+		AutoPickK           *int  `json:"auto_pick_k"`
+		ShowReplyCandidates *bool `json:"show_reply_candidates"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	patch := db.ChannelSettings{}
+	setAuto, setK, setShow := false, false, false
+	if body.AutoPick != nil {
+		patch.AutoPick = body.AutoPick
+		setAuto = true
+	}
+	if body.AutoPickK != nil {
+		patch.AutoPickK = *body.AutoPickK
+		setK = true
+	}
+	if body.ShowReplyCandidates != nil {
+		patch.ShowReplyCandidates = *body.ShowReplyCandidates
+		setShow = true
+	}
+	if !setAuto && !setK && !setShow {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings fields"})
+		return
+	}
+	c, err := s.db.UpdateChannelSettings(uid, id, patch, setAuto, setK, setShow)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if conv, e := s.db.GetConversationByChannel(uid, c.ID); e == nil && conv != nil {
+		c.ConversationID = conv.ID
+	}
+	s.enrichChannelOnline(uid, c)
+	writeJSON(w, http.StatusOK, c)
 }
 
 func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) {

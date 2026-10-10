@@ -1,6 +1,6 @@
 # 群 Auto 选人（轻量设计）
 
-日期：2026-10-10 · 状态：设计稿（未实现）· 范围：群聊无人 `@` 时的候选收敛  
+日期：2026-10-10 · 状态：A 档已实现（启发式；见 planSendTargets / autoPickHeuristic）· 范围：群聊无人 `@` 时的候选收敛  
 对照现状：`resolveGroupSendTargets` — 无人 `@` → **全员候选**；各员可 `[PASS]`；`@` / `@everyone` 强制回复。
 
 ---
