@@ -3,8 +3,9 @@
 Used when the bot fetched web/KB/MCP/memory content that exposes real http(s)
 URLs. Deduplicated and ordered by first appearance. Never invents URLs.
 
-The sources footer only lists URLs actually cited in the final assistant answer
-(or in structured citations), not every URL seen in retrieval tool results.
+The sources footer prefers URLs cited in the final assistant answer (or structured
+citations). Soft host/title matches and a curated paraphrase fallback keep the
+footer when the model used retrieval but did not paste raw links.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from urllib.parse import urlparse, urlunparse
 
 # Absolute http(s) URLs in free text / JSON string values.
 _URL_RE = re.compile(r"https?://[^\s<>\"'\\)\]]+", re.IGNORECASE)
+_HOSTISH_RE = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.IGNORECASE)
 
 # Tool names (exact or substring) that typically retrieve external pages.
 _RETRIEVAL_EXACT = frozenset(
@@ -390,44 +392,113 @@ def structured_citation_urls(citations: Any) -> list[str]:
     return found
 
 
-def filter_sources_cited(
-    sources: list[dict[str, str]] | None,
-    answer_text: str | None,
+def _source_host(url: str) -> str:
+    try:
+        host = (urlparse(url).hostname or "").lower().strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+# Hosts / paths that are tooling noise — fine as fetch targets, poor as footer cites.
+_FALLBACK_HOST_BLOCK = frozenset(
+    {
+        "duckduckgo.com",
+        "lite.duckduckgo.com",
+        "google.com",
+        "www.google.com",
+        "bing.com",
+        "www.bing.com",
+    }
+)
+
+
+def _is_noisy_citation_url(url: str) -> bool:
+    """API / RSS / search / xmlns junk — exclude from paraphrase fallback footer."""
+    try:
+        p = urlparse(url)
+    except Exception:  # noqa: BLE001
+        return True
+    host = (p.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host in _FALLBACK_HOST_BLOCK:
+        return True
+    if host.startswith("api.") or host.startswith("search."):
+        return True
+    if host in ("purl.org", "w3.org", "xmlns.com") or host.endswith(".w3.org"):
+        return True
+    path = (p.path or "").lower()
+    if "/api/" in path or path.startswith("/api"):
+        return True
+    if "/rss" in path or path.endswith(".xml") or "/feed" in path or "/atom" in path:
+        return True
+    if "outboundfeeds" in path:
+        return True
+    q = (p.query or "").lower()
+    if "format=json" in q and ("/q/" in path or "/charts/" in path):
+        return True
+    return False
+
+
+def _hosts_mentioned_in_answer(answer: str) -> set[str]:
+    """Host-like tokens in answer text (bare domains or inside URLs)."""
+    found: set[str] = set()
+    if not answer:
+        return found
+    for m in _HOSTISH_RE.findall(answer):
+        h = m.lower().strip(".")
+        if h.startswith("www."):
+            h = h[4:]
+        if "." in h:
+            found.add(h)
+    return found
+
+
+def _host_soft_match(source_host: str, mentioned: set[str]) -> bool:
+    """Match full host, or subdomain of a host named in the answer."""
+    if not source_host or not mentioned:
+        return False
+    if source_host in mentioned:
+        return True
+    for m in mentioned:
+        if source_host.endswith("." + m):
+            return True
+    return False
+
+
+def _answer_mentions_title(answer_l: str, title: str) -> bool:
+    t = (title or "").strip().lower()
+    if len(t) < 6:
+        return False
+    return t in answer_l
+
+
+def _fallback_retrieval_sources(
+    sources: list[dict[str, str]],
     *,
-    structured_citations: Any = None,
-    limit: int = 20,
+    limit: int = 8,
 ) -> list[dict[str, str]]:
-    """Keep only retrieval sources whose URL was cited in the final answer.
-
-    Matching uses normalized URL equality (with and without query). Sources that
-    never appear in answer text / structured citations are dropped so the footer
-    does not list every URL from search/fetch tool results.
-    """
-    if not sources:
-        return []
-    cited_keys: set[str] = set()
-    for u in urls_from_answer_text(answer_text):
-        cited_keys |= _cite_match_keys(u)
-    for u in structured_citation_urls(structured_citations):
-        cited_keys |= _cite_match_keys(u)
-    if not cited_keys:
-        return []
-
+    """When the model paraphrased with no links, still surface readable retrieval URLs."""
     out: list[dict[str, str]] = []
-    seen: set[str] = set()
+    seen_host: set[str] = set()
+    seen_url: set[str] = set()
     for src in sources:
         if not isinstance(src, dict):
             continue
         url = _clean_url(str(src.get("url") or ""))
-        if not url:
+        if not url or _is_noisy_citation_url(url):
             continue
-        keys = _cite_match_keys(url)
-        if not keys.intersection(cited_keys):
+        host = _source_host(url)
+        if not host or host in seen_host:
             continue
         nkey = normalize_url(url)
-        if nkey in seen:
+        if nkey in seen_url:
             continue
-        seen.add(nkey)
+        seen_host.add(host)
+        seen_url.add(nkey)
         item: dict[str, str] = {"url": url}
         title = str(src.get("title") or "").strip()[:200]
         if title:
@@ -436,3 +507,110 @@ def filter_sources_cited(
         if len(out) >= limit:
             break
     return out
+
+
+def filter_sources_cited(
+    sources: list[dict[str, str]] | None,
+    answer_text: str | None,
+    *,
+    structured_citations: Any = None,
+    limit: int = 20,
+) -> list[dict[str, str]]:
+    """Keep retrieval sources that the answer actually used.
+
+    Preference order:
+    1. URLs appearing in the answer (bare / markdown) or structured citations
+    2. Soft match: answer names the source host or title (no raw URL pasted)
+    3. Fallback: answer has no URL cites but retrieval ran — curated readable URLs
+       (drop API/RSS/search noise) so the footer still shows when the model paraphrased
+    """
+    if not sources:
+        return []
+    cited_keys: set[str] = set()
+    for u in urls_from_answer_text(answer_text):
+        cited_keys |= _cite_match_keys(u)
+    for u in structured_citation_urls(structured_citations):
+        cited_keys |= _cite_match_keys(u)
+
+    answer_raw = str(answer_text or "")
+    answer_l = answer_raw.lower()
+    mentioned_hosts = _hosts_mentioned_in_answer(answer_raw)
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _append(src: dict[str, str], url: str) -> None:
+        nkey = normalize_url(url)
+        if nkey in seen:
+            return
+        seen.add(nkey)
+        item: dict[str, str] = {"url": url}
+        title = str(src.get("title") or "").strip()[:200]
+        if title:
+            item["title"] = title
+        out.append(item)
+
+    # Pass 1: exact / query-tolerant URL citations.
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        url = _clean_url(str(src.get("url") or ""))
+        if not url:
+            continue
+        if cited_keys and _cite_match_keys(url).intersection(cited_keys):
+            _append(src, url)
+            if len(out) >= limit:
+                return out
+
+    # Pass 2: soft host / title mentions — only when the answer already has URL cites
+    # (augment exact URL matches). Pure paraphrase goes to pass 3.
+    if cited_keys and len(out) < limit and answer_l.strip():
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            url = _clean_url(str(src.get("url") or ""))
+            if not url:
+                continue
+            host = _source_host(url)
+            title = str(src.get("title") or "")
+            if _is_noisy_citation_url(url):
+                continue
+            if _host_soft_match(host, mentioned_hosts) or _answer_mentions_title(answer_l, title):
+                _append(src, url)
+                if len(out) >= limit:
+                    return out
+
+    if out:
+        return out
+
+    # Pass 3: no raw URL cites — answer clearly rests on retrieval (paraphrase).
+    # Prefer soft host/title hits, then fill with curated readable URLs.
+    if (answer_text or "").strip() and not cited_keys:
+        soft: list[dict[str, str]] = []
+        soft_seen: set[str] = set()
+        for src in sources:
+            if not isinstance(src, dict):
+                continue
+            url = _clean_url(str(src.get("url") or ""))
+            if not url or _is_noisy_citation_url(url):
+                continue
+            host = _source_host(url)
+            title = str(src.get("title") or "")
+            if not (
+                _host_soft_match(host, mentioned_hosts)
+                or _answer_mentions_title(answer_l, title)
+            ):
+                continue
+            nkey = normalize_url(url)
+            if nkey in soft_seen:
+                continue
+            soft_seen.add(nkey)
+            item: dict[str, str] = {"url": url}
+            if title.strip():
+                item["title"] = title.strip()[:200]
+            soft.append(item)
+        fb_limit = min(limit, 8)
+        # Named hosts/titles win alone; otherwise curated retrieval URLs.
+        if soft:
+            return soft[:fb_limit]
+        return _fallback_retrieval_sources(sources, limit=fb_limit)
+    return []

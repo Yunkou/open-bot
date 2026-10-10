@@ -114,12 +114,24 @@ def test_filter_sources_cited_keeps_only_urls_in_answer() -> None:
     ]
 
 
-def test_filter_sources_cited_empty_when_answer_has_no_urls() -> None:
+def test_filter_sources_cited_soft_host_and_paraphrase_fallback() -> None:
     sources = [
         {"url": "https://docs.example.com/guide", "title": "Docs"},
         {"url": "https://blog.example.com/post"},
+        {"url": "https://api.example.com/v1/x"},
+        {"url": "https://news.example.com/rss.xml"},
     ]
-    assert filter_sources_cited(sources, "I summarized the docs without links.") == []
+    # Soft: answer names host without pasting a URL.
+    soft = filter_sources_cited(sources, "I used docs.example.com for the steps.")
+    assert [s["url"] for s in soft] == ["https://docs.example.com/guide"]
+    # Paraphrase fallback: no cites, but retrieval clearly used — skip API/RSS noise.
+    got = filter_sources_cited(sources, "I summarized the material without links.")
+    urls = [s["url"] for s in got]
+    assert "https://docs.example.com/guide" in urls
+    assert "https://blog.example.com/post" in urls
+    assert "https://api.example.com/v1/x" not in urls
+    assert "https://news.example.com/rss.xml" not in urls
+    # Empty / missing answer still yields nothing.
     assert filter_sources_cited(sources, "") == []
     assert filter_sources_cited(sources, None) == []
 
@@ -166,7 +178,7 @@ if __name__ == "__main__":
     test_blocked_ssrf_skips()
     test_sources_from_messages()
     test_filter_sources_cited_keeps_only_urls_in_answer()
-    test_filter_sources_cited_empty_when_answer_has_no_urls()
+    test_filter_sources_cited_soft_host_and_paraphrase_fallback()
     test_filter_sources_cited_query_param_tolerance()
     test_filter_sources_cited_structured_citations()
     test_filter_preserves_order_of_sources_not_answer()

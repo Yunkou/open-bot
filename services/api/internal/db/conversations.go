@@ -21,8 +21,8 @@ type Conversation struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// LastMachineID is the desktop host for the latest user message (session host).
 	// Empty for browser-only / never-desktop sessions. Not required on every SELECT.
-	LastMachineID string `json:"last_machine_id,omitempty"`
-	Messages  []Message `json:"messages,omitempty"`
+	LastMachineID string    `json:"last_machine_id,omitempty"`
+	Messages      []Message `json:"messages,omitempty"`
 	// Participants carries agent avatar + online for the primary bot (DM) or channel members.
 	// Online is stamped by the API; not stored.
 	Participants []ChannelMemberProfile `json:"participants,omitempty"`
@@ -35,22 +35,21 @@ type MessageSource struct {
 }
 
 type Message struct {
-	ID             string               `json:"id"`
-	ConversationID string               `json:"conversation_id,omitempty"`
-	Role           string               `json:"role"`
-	Content        string               `json:"content"`
-	AgentID        string               `json:"agent_id,omitempty"`
-	ReplyToID      string               `json:"reply_to_id,omitempty"`
-	ThreadRootID   string               `json:"thread_root_id,omitempty"`
-	CreatedAt      time.Time            `json:"created_at"`
-	Reactions      []ReactionSummary    `json:"reactions"`
-	Attachments    []MessageAttachment  `json:"attachments,omitempty"`
-	AgentMessageID string               `json:"agent_message_id,omitempty"`
-	RequestID      string               `json:"request_id,omitempty"`
-	Sources        []MessageSource      `json:"sources,omitempty"`
-	Handoff        *HandoffPayload      `json:"handoff,omitempty"`
+	ID             string              `json:"id"`
+	ConversationID string              `json:"conversation_id,omitempty"`
+	Role           string              `json:"role"`
+	Content        string              `json:"content"`
+	AgentID        string              `json:"agent_id,omitempty"`
+	ReplyToID      string              `json:"reply_to_id,omitempty"`
+	ThreadRootID   string              `json:"thread_root_id,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	Reactions      []ReactionSummary   `json:"reactions"`
+	Attachments    []MessageAttachment `json:"attachments,omitempty"`
+	AgentMessageID string              `json:"agent_message_id,omitempty"`
+	RequestID      string              `json:"request_id,omitempty"`
+	Sources        []MessageSource     `json:"sources,omitempty"`
+	Handoff        *HandoffPayload     `json:"handoff,omitempty"`
 }
-
 
 func NormalizeMessageSources(in []MessageSource) []MessageSource {
 	if len(in) == 0 {
@@ -90,16 +89,14 @@ func NormalizeMessageSources(in []MessageSource) []MessageSource {
 	return out
 }
 
-
-
 var messageSourceURLRe = regexp.MustCompile(`(?i)https?://[^\s<>"')\]]+`)
+var messageSourceHostRe = regexp.MustCompile(`(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b`)
 
 func normalizeSourceURLKey(url string) string {
 	u := strings.TrimSpace(url)
 	u = strings.TrimRight(u, `/.,;:)]}>"'`)
 	return strings.TrimRight(strings.ToLower(u), "/")
 }
-
 
 func citeMatchKeys(url string) map[string]struct{} {
 	keys := make(map[string]struct{})
@@ -131,9 +128,139 @@ func urlsCitedInAnswer(answer string) map[string]struct{} {
 	return out
 }
 
-// FilterMessageSourcesCited keeps only sources whose URL appears in the assistant
-// answer text (or in structured citation URLs). Retrieval may return many links;
-// the footer should show only those the bot actually cited.
+func sourceHost(url string) string {
+	u := strings.TrimSpace(url)
+	if u == "" {
+		return ""
+	}
+	// Strip scheme
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
+	}
+	if i := strings.IndexAny(u, "/?#"); i >= 0 {
+		u = u[:i]
+	}
+	if i := strings.Index(u, "@"); i >= 0 {
+		u = u[i+1:]
+	}
+	host := strings.ToLower(strings.TrimSpace(u))
+	if i := strings.Index(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimPrefix(host, "www.")
+	return host
+}
+
+func isNoisyCitationURL(url string) bool {
+	raw := strings.ToLower(strings.TrimSpace(url))
+	host := sourceHost(raw)
+	if host == "" {
+		return true
+	}
+	switch host {
+	case "duckduckgo.com", "lite.duckduckgo.com", "google.com", "bing.com",
+		"purl.org", "w3.org", "xmlns.com":
+		return true
+	}
+	if strings.HasPrefix(host, "api.") || strings.HasPrefix(host, "search.") || strings.HasSuffix(host, ".w3.org") {
+		return true
+	}
+	path := raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		path = raw[i+3:]
+	}
+	if i := strings.Index(path, "/"); i >= 0 {
+		path = path[i:]
+	} else {
+		path = "/"
+	}
+	if strings.Contains(path, "/api/") || strings.HasPrefix(path, "/api") {
+		return true
+	}
+	if strings.Contains(path, "/rss") || strings.Contains(path, "/feed") || strings.Contains(path, "/atom") ||
+		strings.HasSuffix(path, ".xml") || strings.Contains(path, "outboundfeeds") {
+		return true
+	}
+	return false
+}
+
+func hostsMentionedInAnswer(answer string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if strings.TrimSpace(answer) == "" {
+		return out
+	}
+	for _, m := range messageSourceHostRe.FindAllString(answer, -1) {
+		h := strings.ToLower(strings.Trim(m, "."))
+		h = strings.TrimPrefix(h, "www.")
+		if strings.Contains(h, ".") {
+			out[h] = struct{}{}
+		}
+	}
+	return out
+}
+
+func hostSoftMatch(sourceHost string, mentioned map[string]struct{}) bool {
+	if sourceHost == "" || len(mentioned) == 0 {
+		return false
+	}
+	if _, ok := mentioned[sourceHost]; ok {
+		return true
+	}
+	for m := range mentioned {
+		if strings.HasSuffix(sourceHost, "."+m) {
+			return true
+		}
+	}
+	return false
+}
+
+func answerMentionsTitle(answerL, title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if len(t) < 6 {
+		return false
+	}
+	return strings.Contains(answerL, t)
+}
+
+func fallbackRetrievalSources(sources []MessageSource, limit int) []MessageSource {
+	if limit <= 0 {
+		limit = 8
+	}
+	var out []MessageSource
+	seenHost := make(map[string]struct{})
+	seenURL := make(map[string]struct{})
+	for _, s := range NormalizeMessageSources(sources) {
+		if isNoisyCitationURL(s.URL) {
+			continue
+		}
+		host := sourceHost(s.URL)
+		if host == "" {
+			continue
+		}
+		if _, ok := seenHost[host]; ok {
+			continue
+		}
+		key := normalizeSourceURLKey(s.URL)
+		if _, ok := seenURL[key]; ok {
+			continue
+		}
+		seenHost[host] = struct{}{}
+		seenURL[key] = struct{}{}
+		out = append(out, s)
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// FilterMessageSourcesCited keeps sources the assistant answer actually used.
+// Prefer URLs cited in the answer (or structured citations); also soft-match
+// host/title mentioned in the text; if the model paraphrased with no links but
+// retrieval sources exist, fall back to a curated readable subset (no API/RSS).
 func FilterMessageSourcesCited(sources []MessageSource, answer string, structured []MessageSource) []MessageSource {
 	if len(sources) == 0 {
 		return nil
@@ -144,12 +271,21 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 			cited[k] = struct{}{}
 		}
 	}
-	if len(cited) == 0 {
-		return nil
-	}
+	answerL := strings.ToLower(answer)
+	mentioned := hostsMentionedInAnswer(answer)
 	var out []MessageSource
 	seen := make(map[string]struct{})
-	for _, s := range NormalizeMessageSources(sources) {
+	appendSrc := func(s MessageSource) {
+		key := normalizeSourceURLKey(s.URL)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+
+	norm := NormalizeMessageSources(sources)
+	for _, s := range norm {
 		keys := citeMatchKeys(s.URL)
 		hit := false
 		for k := range keys {
@@ -158,22 +294,58 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 				break
 			}
 		}
-		if !hit {
-			continue
+		if hit {
+			appendSrc(s)
 		}
-		key := normalizeSourceURLKey(s.URL)
-		if _, ok := seen[key]; ok {
-			continue
+	}
+	// Soft host/title only augments when the answer already has URL cites.
+	if len(cited) > 0 && len(out) < 20 && strings.TrimSpace(answerL) != "" {
+		for _, s := range norm {
+			if isNoisyCitationURL(s.URL) {
+				continue
+			}
+			host := sourceHost(s.URL)
+			if hostSoftMatch(host, mentioned) || answerMentionsTitle(answerL, s.Title) {
+				appendSrc(s)
+			}
 		}
-		seen[key] = struct{}{}
-		out = append(out, s)
 	}
-	if len(out) == 0 {
-		return nil
+	if len(out) > 0 {
+		if len(out) > 20 {
+			out = out[:20]
+		}
+		return out
 	}
-	return out
+	// No raw URL cites: paraphrase path — soft host/title first, then curated fallback.
+	if strings.TrimSpace(answer) != "" && len(cited) == 0 {
+		var soft []MessageSource
+		softSeen := make(map[string]struct{})
+		for _, s := range norm {
+			if isNoisyCitationURL(s.URL) {
+				continue
+			}
+			host := sourceHost(s.URL)
+			if !hostSoftMatch(host, mentioned) && !answerMentionsTitle(answerL, s.Title) {
+				continue
+			}
+			key := normalizeSourceURLKey(s.URL)
+			if _, ok := softSeen[key]; ok {
+				continue
+			}
+			softSeen[key] = struct{}{}
+			soft = append(soft, s)
+		}
+		fbLimit := 8
+		if len(soft) > 0 {
+			if len(soft) > fbLimit {
+				return soft[:fbLimit]
+			}
+			return soft
+		}
+		return fallbackRetrievalSources(sources, fbLimit)
+	}
+	return nil
 }
-
 
 func EncodeMessageSources(in []MessageSource) string {
 	norm := NormalizeMessageSources(in)
@@ -623,7 +795,6 @@ func (d *DB) DeleteMessage(conversationID, messageID string) error {
 	return nil
 }
 
-
 // SetMessageSources replaces citation sources on an existing message (e.g. after
 // harness projection, when the HTTP finish path learns retrieval URLs).
 func (d *DB) SetMessageSources(conversationID, messageID string, sources []MessageSource) error {
@@ -843,7 +1014,6 @@ func (d *DB) GetAgentThreadPreview(userID, agentID string) (*AgentThreadPreview,
 	return &p, nil
 }
 
-
 func ParseHandoffContent(content string) (*HandoffPayload, error) {
 	var hp HandoffPayload
 	if err := json.Unmarshal([]byte(content), &hp); err != nil {
@@ -935,7 +1105,6 @@ func (d *DB) AddHandoffNote(conversationID, threadRootID string, hp HandoffPaylo
 	}
 	return m, true, nil
 }
-
 
 // ListConversationIDsForAgent returns conversation ids where agent_id is the primary bot
 // (DM thread or channel conversation whose agent_id points at this agent).
