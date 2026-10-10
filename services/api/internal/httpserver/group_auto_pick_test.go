@@ -159,33 +159,34 @@ func TestDisplayNamesForAgentsNoIDs(t *testing.T) {
 func TestChannelSettingsEffectiveAutoPickMode(t *testing.T) {
 	s := db.ChannelSettings{}
 	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickHeuristic {
-		t.Fatal("inherit org heuristic")
+		t.Fatal("org heuristic")
 	}
 	if s.EffectiveAutoPickMode(db.AutoPickOff) != db.AutoPickOff {
-		t.Fatal("inherit org off")
+		t.Fatal("org off")
 	}
 	if s.EffectiveAutoPickMode(db.AutoPickDecision) != db.AutoPickDecision {
-		t.Fatal("inherit org decision")
+		t.Fatal("org decision")
 	}
 	if s.EffectiveAutoPickMode("") != db.AutoPickHeuristic {
 		t.Fatal("empty org → heuristic default")
 	}
+	// Channel auto_pick is ignored; org feature_flags only.
 	s.AutoPick = db.AutoPickOff
-	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickOff {
-		t.Fatal("channel off wins")
-	}
-	s.AutoPick = db.AutoPickHeuristic
-	if s.EffectiveAutoPickMode(db.AutoPickOff) != db.AutoPickHeuristic {
-		t.Fatal("channel heuristic wins")
+	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickHeuristic {
+		t.Fatal("channel off must not override org heuristic")
 	}
 	s.AutoPick = db.AutoPickDecision
-	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickDecision {
-		t.Fatal("channel decision wins")
+	if s.EffectiveAutoPickMode(db.AutoPickOff) != db.AutoPickOff {
+		t.Fatal("channel decision must not override org off")
 	}
-	// Legacy EffectiveAutoPick bool helper
-	s.AutoPick = ""
+	s.AutoPick = db.AutoPickHeuristic
+	if s.EffectiveAutoPickMode(db.AutoPickDecision) != db.AutoPickDecision {
+		t.Fatal("org decision wins")
+	}
+	// Legacy EffectiveAutoPick bool helper (org only)
+	s.AutoPick = db.AutoPickOff
 	if !s.EffectiveAutoPick(true) || s.EffectiveAutoPick(false) {
-		t.Fatal("EffectiveAutoPick bool wrapper")
+		t.Fatal("EffectiveAutoPick bool wrapper ignores channel")
 	}
 }
 

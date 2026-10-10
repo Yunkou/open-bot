@@ -428,7 +428,7 @@ func orgAutoPickEnabled(flagsJSON string) bool {
 	return orgAutoPickMode(flagsJSON) != db.AutoPickOff
 }
 
-// runAutoPickByMode applies channel/org auto_pick mode for a no-@ turn.
+// runAutoPickByMode applies org auto_pick mode for a no-@ turn.
 // decision (B-tier): org SystemOne choice → agent_ids; on parse/timeout/empty/low-conf/off
 // fail-open to heuristic (product lock — not lead-only), then heuristic's own lead/all rules.
 func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {

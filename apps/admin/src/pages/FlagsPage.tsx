@@ -85,7 +85,8 @@ export default function FlagsPage() {
     <PageContainer title="功能开关">
       <Card loading={loading}>
         <Paragraph type="secondary">
-          组织级默认开关。频道设置里的 <Text code>auto_pick</Text> 可覆盖本项；留空则继承此处。
+          组织级开关（唯一生效来源）。群 Auto 选人模式由本页控制，客户端无需配置群级{" "}
+          <Text code>auto_pick</Text>；频道里若仍有历史字段会被忽略。
           「决策模型」模式需在侧栏「决策模型」页配置 Jev / Laya / Unsloth（默认关闭）。
         </Paragraph>
         <ProForm

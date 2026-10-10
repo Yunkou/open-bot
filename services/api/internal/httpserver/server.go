@@ -2060,6 +2060,7 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	base := resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID)
 	plan.ShowReplyCandidates = ch.Settings.ShowReplyCandidates
 
+	// Mode from org feature_flags only (Admin 功能开关). Channel settings.auto_pick ignored.
 	orgMode := db.AutoPickHeuristic
 	if u, uerr := s.db.GetUserByID(uid); uerr == nil && u != nil && u.OrgID != "" {
 		if settings, serr := s.db.GetOrgSettings(u.OrgID); serr == nil && settings != nil {
@@ -2509,9 +2510,10 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handlePatchChannel updates channel settings (auto_pick / show_reply_candidates).
+// handlePatchChannel updates channel settings (auto_pick / auto_pick_k / show_reply_candidates).
+// auto_pick is accepted for back-compat storage but planning ignores it (org feature_flags only).
 // auto_pick: "off" | "heuristic" | "decision" (legacy bool true→heuristic, false→off still accepted).
-// show_reply_candidates powers client debug「本轮将由谁回答」(default off; names only, no agent_id).
+// auto_pick_k: optional; 0→default 1. show_reply_candidates: debug「本轮将由谁回答」(default off).
 func (s *Server) handlePatchChannel(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")

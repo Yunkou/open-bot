@@ -14,12 +14,14 @@ const (
 )
 
 // ChannelSettings is stored in channels.settings_json.
-// Client advanced settings: show_reply_candidates ("本轮将由谁回答", default off).
+// Planning uses org feature_flags_json.auto_pick only; channel auto_pick is legacy/storage
+// (PATCH still accepts it for back-compat but EffectiveAutoPickMode ignores it).
+// Optional: show_reply_candidates ("本轮将由谁回答", default off); auto_pick_k (0→default 1).
 type ChannelSettings struct {
-	// AutoPick: "" = inherit org (default heuristic); "off" | "heuristic" | "decision".
-	// Legacy bool true/omit→heuristic, false→off (see ParseAutoPickMode / parseChannelSettingsJSON).
+	// AutoPick: legacy channel store; ignored for effective mode (org feature flags win).
+	// Still parsed/written by PATCH for back-compat. "off" | "heuristic" | "decision".
 	AutoPick string `json:"auto_pick,omitempty"`
-	// AutoPickK: 0 = default 1; capped at 2–3 by API.
+	// AutoPickK: 0 = default 1 (org-wide default); capped at 3 by API. Optional channel override for K only.
 	AutoPickK int `json:"auto_pick_k,omitempty"`
 	// ShowReplyCandidates: debug toggle for「本轮将由谁回答」; default false.
 	ShowReplyCandidates bool `json:"show_reply_candidates,omitempty"`
@@ -90,17 +92,16 @@ func NormalizeAutoPickMode(mode string) string {
 	}
 }
 
-// EffectiveAutoPickMode resolves channel override vs org mode.
-// Channel empty → org; org empty → heuristic. Always returns off|heuristic|decision.
+// EffectiveAutoPickMode returns the org feature_flags mode only.
+// Channel settings.auto_pick is ignored — clients do not configure per-group mode;
+// Admin「功能开关」is the single source of truth. org empty → heuristic.
+// Always returns off|heuristic|decision. Receiver kept for call-site stability.
 func (s ChannelSettings) EffectiveAutoPickMode(orgMode string) string {
-	if strings.TrimSpace(s.AutoPick) != "" {
-		return NormalizeAutoPickMode(s.AutoPick)
-	}
 	return NormalizeAutoPickMode(orgMode)
 }
 
 // EffectiveAutoPick reports whether AutoPick should run (any mode other than off).
-// Deprecated name kept for call-site clarity during enum migration.
+// Uses orgEnabled only (channel override ignored).
 func (s ChannelSettings) EffectiveAutoPick(orgEnabled bool) bool {
 	org := AutoPickOff
 	if orgEnabled {

@@ -33,9 +33,14 @@ func TestEffectiveAutoPickMode(t *testing.T) {
 	if s.EffectiveAutoPickMode("") != AutoPickHeuristic {
 		t.Fatal("default heuristic")
 	}
+	// Channel settings.auto_pick must NOT override org feature flags.
 	s.AutoPick = AutoPickOff
-	if s.EffectiveAutoPickMode(AutoPickDecision) != AutoPickOff {
-		t.Fatal("channel wins")
+	if s.EffectiveAutoPickMode(AutoPickDecision) != AutoPickDecision {
+		t.Fatal("org wins; channel override ignored")
+	}
+	s.AutoPick = AutoPickDecision
+	if s.EffectiveAutoPickMode(AutoPickOff) != AutoPickOff {
+		t.Fatal("org off wins even if channel says decision")
 	}
 }
 
