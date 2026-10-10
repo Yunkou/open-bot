@@ -549,26 +549,27 @@ func autoPickAllCandidates(method string, members []string) groupAutoPickResult 
 }
 
 // runAutoPickByMode applies org auto_pick mode for a no-@ turn.
-// All-hands phrasing (「都介绍下自己」…) short-circuits to all members as candidates
-// (non-forced, may PASS) for both decision and heuristic — same candidacy as off.
-// decision (B-tier): org SystemOne choice → agent_ids; on parse/timeout/empty/low-conf/off
-// fail-open to heuristic (product lock — not lead-only), then heuristic's own lead/all rules.
+// Heuristic all-hands phrasing (「都介绍下自己」…) short-circuits to all members as
+// candidates (non-forced, may PASS) — same candidacy as off.
+// Decision always calls SystemOne (no phrase skip): schema includes opaque "all" + mN;
+// all-hands raises effective K so the model can return multiple / all agent_ids.
+// On parse/timeout/empty/low-conf/off fail-open to heuristic (or all-hands if phrase).
 func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {
 	mode = db.NormalizeAutoPickMode(mode)
-	if isAllHandsIntent(userText) {
-		switch mode {
-		case db.AutoPickDecision:
-			return autoPickAllCandidates("decision->all_hands", members)
-		default:
-			return autoPickAllCandidates("heuristic->all_hands", members)
-		}
+	allHands := isAllHandsIntent(userText)
+	if allHands && mode != db.AutoPickDecision {
+		return autoPickAllCandidates("heuristic->all_hands", members)
 	}
 	switch mode {
 	case db.AutoPickDecision:
 		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {
 			return pick
 		}
-		// Fail-open logs Method as decision->heuristic (docs §6), not bare heuristic.
+		// Fail-open: all-hands phrase → all candidates (decision path already tried);
+		// else heuristic (docs §6), Method decision->heuristic — not lead-only.
+		if allHands {
+			return autoPickAllCandidates("decision->heuristic->all_hands", members)
+		}
 		return autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
 	default: // heuristic
 		return autoPickHeuristic(userText, members, agents, leadID, k, synopsis)

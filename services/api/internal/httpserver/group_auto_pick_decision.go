@@ -18,6 +18,8 @@ import (
 const (
 	autoPickDecisionTimeout = 8 * time.Second
 	autoPickDecisionQKey    = "pick"
+	autoPickDecisionAllKey  = "all" // opaque criteria: every member should reply
+	autoPickAllHandsMaxK    = 8     // raise K for all-hands; soft specialty K stays ≤ autoPickMaxK
 )
 
 // autoPickDecisionDeps wires org SystemOne settings + an injectable decide call.
@@ -32,12 +34,31 @@ type autoPickDecisionDeps struct {
 	Decide func(ctx context.Context, state any, questions map[string]any) (map[string]any, error)
 }
 
-// autoPickDecision asks org decision model (choice question) for ≤K members.
-// Opaque criteria keys (m0..) map back to agent_ids — never trust free-text ids/names.
+// decisionEffectiveK keeps auto_pick_k as the soft specialty default (≤ autoPickMaxK).
+// All-hands may exceed that up to min(members, autoPickAllHandsMaxK).
+func decisionEffectiveK(k, memberCount int, allHands bool) int {
+	base := clampAutoPickK(k)
+	if !allHands {
+		return base
+	}
+	capN := autoPickAllHandsMaxK
+	if memberCount > 0 && memberCount < capN {
+		capN = memberCount
+	}
+	if capN < base {
+		return base
+	}
+	return capN
+}
+
+// autoPickDecision asks org decision model (choice question) for members.
+// Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
+// Specialty uses soft K (auto_pick_k); all-hands raises effective K / prefers "all".
 // On any soft failure the caller should fail-open to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
-	k = clampAutoPickK(k)
+	allHands := isAllHandsIntent(userText)
+	effectiveK := decisionEffectiveK(k, len(members), allHands)
 	if deps == nil {
 		log.Printf("auto_pick=decision note=deps_nil_failopen_heuristic")
 		return groupAutoPickResult{}, false
@@ -52,7 +73,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		return groupAutoPickResult{}, false
 	}
 
-	keyToID, questions, state := buildAutoPickDecisionPayload(userText, members, agents, synopsis)
+	keyToID, questions, state := buildAutoPickDecisionPayload(userText, members, agents, synopsis, allHands)
 	if len(keyToID) == 0 {
 		return groupAutoPickResult{}, false
 	}
@@ -68,7 +89,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		log.Printf("auto_pick=decision note=decide_err err=%v", err)
 		return groupAutoPickResult{}, false
 	}
-	ids, conf, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, k)
+	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK)
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic")
 		return groupAutoPickResult{}, false
@@ -78,18 +99,26 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		return groupAutoPickResult{}, false
 	}
 
-	log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
+	fallback := ""
+	allowSecond := true
+	if allSelected {
+		fallback = "all"
+		allowSecond = false
+		log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=all", method, ids, conf)
+	} else {
+		log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
+	}
 	return groupAutoPickResult{
 		AgentIDs:            ids,
 		Confidence:          conf,
 		Method:              method,
-		Fallback:            "",
+		Fallback:            fallback,
 		LeadFallback:        map[string]bool{},
-		AllowSecondFailOpen: true,
+		AllowSecondFailOpen: allowSecond,
 	}, true
 }
 
-func buildAutoPickDecisionPayload(userText string, members []string, agents []*db.Agent, synopsis string) (keyToID map[string]string, questions map[string]any, state string) {
+func buildAutoPickDecisionPayload(userText string, members []string, agents []*db.Agent, synopsis string, allHands bool) (keyToID map[string]string, questions map[string]any, state string) {
 	byID := map[string]*db.Agent{}
 	for _, a := range agents {
 		if a != nil {
@@ -98,6 +127,8 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	}
 	keyToID = map[string]string{}
 	criteria := map[string]string{}
+	// Opaque "all" first so models can select every member (intro / round-robin).
+	criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, or explicit all-hands)"
 	for i, id := range members {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -119,17 +150,23 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		keyToID[key] = id
 		criteria[key] = label
 	}
-	if len(criteria) == 0 {
+	if len(keyToID) == 0 {
 		return nil, nil, ""
+	}
+	instr := "Who should reply this turn? Pick one opaque key: a single member (m0, m1, …) by specialty, " +
+		"OR \"all\" when every member should speak (introductions, round-robin, everyone contribute). " +
+		"Prefer a specialist when the request matches their role; prefer \"all\" for collective asks; " +
+		"prefer the generalist only for vague single-responder requests. " +
+		"When several specialists fit, pick the best primary — probabilities may rank extras."
+	if allHands {
+		instr += " The user message looks like an all-hands / everyone-speak request: prefer choice \"all\" " +
+			"unless a single specialist is clearly intended."
 	}
 	questions = map[string]any{
 		autoPickDecisionQKey: map[string]any{
-			"type": "choice",
-			"instructions": "Which group member should reply to the user this turn? " +
-				"Pick the single best fit by specialty and role. " +
-				"Prefer a specialist when the request matches their role; " +
-				"prefer the generalist only for vague or cross-cutting requests.",
-			"criteria": criteria,
+			"type":         "choice",
+			"instructions": instr,
+			"criteria":     criteria,
 		},
 	}
 	var b strings.Builder
@@ -143,11 +180,14 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 }
 
 // mapDecisionChoiceToAgentIDs reads answers.pick (choice) and optional probabilities for K>1.
-// Only opaque criteria keys in keyToID are accepted.
-func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, k int) (ids []string, conf float64, ok bool) {
-	k = clampAutoPickK(k)
+// Opaque "all" → every member in channel order. Only mN keys in keyToID are accepted otherwise.
+// k is the already-clamped / raised effective K (may exceed autoPickMaxK for all-hands).
+func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int) (ids []string, conf float64, allSelected bool, ok bool) {
+	if k <= 0 {
+		k = autoPickDefaultK
+	}
 	if len(answers) == 0 || len(keyToID) == 0 {
-		return nil, 0, false
+		return nil, 0, false, false
 	}
 	raw, _ := answers[autoPickDecisionQKey].(map[string]any)
 	if raw == nil {
@@ -162,16 +202,10 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 	}
 	if raw == nil {
-		return nil, 0, false
+		return nil, 0, false, false
 	}
 
 	choiceKey := strings.TrimSpace(fmt.Sprint(raw["choice"]))
-	primaryID, havePrimary := keyToID[choiceKey]
-	if !havePrimary {
-		// Soft: allow accidental echo of display label only if unique exact criteria match already keyed.
-		return nil, 0, false
-	}
-
 	probs := map[string]float64{}
 	if pRaw, okp := raw["probabilities"].(map[string]any); okp {
 		for pk, pv := range pRaw {
@@ -179,6 +213,20 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 	}
 	conf = autoPickDecisionConfidence(raw, choiceKey, probs)
+
+	if strings.EqualFold(choiceKey, autoPickDecisionAllKey) {
+		ids = orderedDecisionMemberIDs(memberOrder, keyToID)
+		if len(ids) == 0 {
+			return nil, 0, false, false
+		}
+		return ids, conf, true, true
+	}
+
+	primaryID, havePrimary := keyToID[choiceKey]
+	if !havePrimary {
+		return nil, 0, false, false
+	}
+
 	ids = []string{primaryID}
 	seen := map[string]struct{}{primaryID: {}}
 
@@ -189,6 +237,9 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 		var extra []ranked
 		for key, p := range probs {
+			if strings.EqualFold(key, autoPickDecisionAllKey) {
+				continue
+			}
 			id, okm := keyToID[key]
 			if !okm {
 				continue
@@ -216,7 +267,51 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 			seen[id] = struct{}{}
 		}
 	}
-	return ids, conf, true
+	return ids, conf, false, true
+}
+
+// orderedDecisionMemberIDs expands keyToID into channel member order (stable, no dups).
+func orderedDecisionMemberIDs(memberOrder []string, keyToID map[string]string) []string {
+	want := map[string]struct{}{}
+	for _, id := range keyToID {
+		want[id] = struct{}{}
+	}
+	var out []string
+	seen := map[string]struct{}{}
+	for _, id := range memberOrder {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := want[id]; !ok {
+			continue
+		}
+		if _, did := seen[id]; did {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == len(want) {
+		return out
+	}
+	// Fallback: any remaining keys sorted by opaque mN order.
+	type pair struct {
+		key string
+		id  string
+	}
+	var rest []pair
+	for key, id := range keyToID {
+		if _, did := seen[id]; did {
+			continue
+		}
+		rest = append(rest, pair{key: key, id: id})
+	}
+	sort.SliceStable(rest, func(i, j int) bool { return rest[i].key < rest[j].key })
+	for _, p := range rest {
+		out = append(out, p.id)
+	}
+	return out
 }
 
 func autoPickDecisionConfidence(raw map[string]any, choiceKey string, probs map[string]float64) float64 {

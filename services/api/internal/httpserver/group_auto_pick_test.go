@@ -249,8 +249,11 @@ func TestAutoPickDecisionChoiceMapsToCoder(t *testing.T) {
 					}
 				}
 			}
-			if len(crit) != 3 {
-				t.Fatalf("want 3 criteria, got %#v", pick["criteria"])
+			if len(crit) != 4 { // all + m0..m2
+				t.Fatalf("want 4 criteria (all+members), got %#v", pick["criteria"])
+			}
+			if _, ok := crit[autoPickDecisionAllKey]; !ok {
+				t.Fatalf("missing all criterion: %#v", crit)
 			}
 			// coder is members[1] → m1
 			return map[string]any{
@@ -344,7 +347,7 @@ func TestAutoPickDecisionErrorsFailOpenHeuristic(t *testing.T) {
 
 func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	members, agents := testGroupAgents()
-	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API")
+	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false)
 	if keyToID["m0"] != "lead" || keyToID["m1"] != "coder" || keyToID["m2"] != "writer" {
 		t.Fatalf("keyToID=%#v", keyToID)
 	}
@@ -353,8 +356,15 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 		t.Fatal("want choice")
 	}
 	crit := pick["criteria"].(map[string]string)
+	if crit[autoPickDecisionAllKey] == "" {
+		t.Fatalf("want opaque %q in criteria, got %#v", autoPickDecisionAllKey, crit)
+	}
 	if !strings.Contains(crit["m1"], "码农") {
 		t.Fatalf("criteria=%#v", crit)
+	}
+	instr := fmt.Sprint(pick["instructions"])
+	if !strings.Contains(instr, `"all"`) && !strings.Contains(instr, "all") {
+		t.Fatalf("instructions should mention all, got %q", instr)
 	}
 	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
 		t.Fatalf("state=%q", state)
@@ -365,15 +375,52 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 			t.Fatalf("leaked agent id as key: %s", k)
 		}
 	}
+	// allHands strengthens instructions
+	_, q2, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true)
+	pick2 := q2["pick"].(map[string]any)
+	if !strings.Contains(fmt.Sprint(pick2["instructions"]), "all-hands") {
+		t.Fatalf("allHands instructions missing hint: %v", pick2["instructions"])
+	}
 }
 
 func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
 	keyToID := map[string]string{"m0": "lead", "m1": "coder"}
-	_, _, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+	_, _, _, ok := mapDecisionChoiceToAgentIDs(map[string]any{
 		"pick": map[string]any{"choice": "coder", "confidence": 0.9},
-	}, keyToID, 1)
+	}, keyToID, []string{"lead", "coder"}, 1)
 	if ok {
 		t.Fatal("must reject raw agent id echo")
+	}
+}
+
+func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
+	keyToID := map[string]string{"m0": "lead", "m1": "coder", "m2": "writer"}
+	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{"choice": "all", "confidence": 0.91},
+	}, keyToID, []string{"lead", "coder", "writer"}, 1)
+	if !ok || !allSel {
+		t.Fatalf("ok=%v allSel=%v", ok, allSel)
+	}
+	if len(ids) != 3 || ids[0] != "lead" || ids[1] != "coder" || ids[2] != "writer" {
+		t.Fatalf("ids=%#v", ids)
+	}
+	if conf < 0.9 {
+		t.Fatalf("conf=%.2f", conf)
+	}
+}
+
+func TestDecisionEffectiveKAllHandsRaises(t *testing.T) {
+	if got := decisionEffectiveK(1, 5, false); got != 1 {
+		t.Fatalf("specialty k=1 → %d", got)
+	}
+	if got := decisionEffectiveK(2, 5, false); got != 2 {
+		t.Fatalf("specialty k=2 → %d", got)
+	}
+	if got := decisionEffectiveK(1, 5, true); got != 5 {
+		t.Fatalf("all-hands 5 members → %d", got)
+	}
+	if got := decisionEffectiveK(1, 12, true); got != autoPickAllHandsMaxK {
+		t.Fatalf("all-hands 12 members capped → %d", got)
 	}
 }
 
@@ -416,33 +463,105 @@ func TestIsAllHandsIntent(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickAllHandsDecisionSkipsDecide(t *testing.T) {
+func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 	members, agents := testGroupAgents()
 	decideCalled := false
+	var sawAllCriterion bool
+	var sawAllHandsHint bool
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
 			decideCalled = true
-			t.Fatal("all-hands must not call decision model")
-			return nil, nil
+			pick, _ := questions["pick"].(map[string]any)
+			crit, _ := pick["criteria"].(map[string]string)
+			if crit == nil {
+				if raw, ok := pick["criteria"].(map[string]any); ok {
+					crit = map[string]string{}
+					for k, v := range raw {
+						crit[k] = fmt.Sprint(v)
+					}
+				}
+			}
+			if _, ok := crit[autoPickDecisionAllKey]; ok {
+				sawAllCriterion = true
+			}
+			if strings.Contains(fmt.Sprint(pick["instructions"]), "all-hands") {
+				sawAllHandsHint = true
+			}
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "all",
+					"confidence": 0.93,
+				},
+			}, nil
 		},
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, "lead", 1, "", deps)
-	if decideCalled {
-		t.Fatal("decide should be skipped")
+	if !decideCalled {
+		t.Fatal("decision mode must call decide for all-hands (no phrase short-circuit)")
 	}
-	if got.Method != "decision->all_hands" {
-		t.Fatalf("method=%s", got.Method)
+	if !sawAllCriterion || !sawAllHandsHint {
+		t.Fatalf("payload: allCriterion=%v allHandsHint=%v", sawAllCriterion, sawAllHandsHint)
+	}
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision", got.Method)
 	}
 	if got.Fallback != "all" || len(got.AgentIDs) != 3 {
 		t.Fatalf("want all 3 candidates, got %#v fallback=%s", got.AgentIDs, got.Fallback)
 	}
+	if got.AgentIDs[0] != "lead" || got.AgentIDs[1] != "coder" || got.AgentIDs[2] != "writer" {
+		t.Fatalf("order=%#v", got.AgentIDs)
+	}
 	if got.AllowSecondFailOpen {
 		t.Fatal("all candidates already; second fail-open should be off")
 	}
-	// Non-forced: LeadFallback empty (unlike lead fail-open).
 	if len(got.LeadFallback) != 0 {
 		t.Fatalf("LeadFallback=%#v", got.LeadFallback)
+	}
+}
+
+func TestRunAutoPickAllHandsDecisionFailOpenAll(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return nil, context.DeadlineExceeded
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "大家介绍一下", members, agents, "lead", 1, "", deps)
+	if got.Method != "decision->heuristic->all_hands" {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
+		t.Fatalf("want all members on fail-open, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+}
+
+func TestRunAutoPickAllHandsDecisionMultiViaRaisedK(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "jev",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// Model ranks individuals instead of "all"; raised K should still return everyone.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"m0": 0.5, "m1": 0.45, "m2": 0.42,
+					},
+					"confidence": 0.5,
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "everyone introduce yourselves", members, agents, "lead", 1, "", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if len(got.AgentIDs) != 3 {
+		t.Fatalf("raised K should return 3, got %#v", got.AgentIDs)
 	}
 }
 
