@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Card, Divider, Form, Input, Typography } from "antd";
 import {
+  DEFAULT_API_BASE,
   WEB_URL,
   clearSession,
   exchangeOIDCCode,
   fetchOIDCConfig,
+  formatApiHealthProbe,
+  getApiBase,
   login,
+  probeApiHealth,
+  setApiBase,
   setSession,
   startOIDCLogin,
+  type ApiHealthProbeResult,
 } from "../api";
 import { useAuth } from "../auth/AuthContext";
 
@@ -19,6 +25,9 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [form] = Form.useForm();
+  const [apiDraft, setApiDraft] = useState(() => getApiBase());
+  const [apiBusy, setApiBusy] = useState(false);
+  const [apiProbe, setApiProbe] = useState<ApiHealthProbeResult | null>(null);
 
   useEffect(() => {
     void fetchOIDCConfig()
@@ -83,6 +92,31 @@ export default function LoginPage() {
     }
   };
 
+  const onProbeApi = async () => {
+    setApiBusy(true);
+    setApiProbe(null);
+    try {
+      setApiProbe(await probeApiHealth(apiDraft));
+    } finally {
+      setApiBusy(false);
+    }
+  };
+
+  const onApplyApi = async () => {
+    setApiBusy(true);
+    setApiProbe(null);
+    try {
+      const next = apiDraft.trim() || DEFAULT_API_BASE;
+      const result = await probeApiHealth(next);
+      setApiProbe(result);
+      if (!result.ok) return;
+      const applied = setApiBase(next);
+      setApiDraft(applied);
+    } finally {
+      setApiBusy(false);
+    }
+  };
+
   return (
     <div
       style={{
@@ -136,7 +170,55 @@ export default function LoginPage() {
             </Paragraph>
           </>
         ) : null}
-        <Paragraph type="secondary" style={{ marginTop: 16, marginBottom: 0, fontSize: 13 }}>
+        <Divider plain style={{ marginTop: 20, marginBottom: 12 }}>
+          服务器
+        </Divider>
+        <Paragraph type="secondary" style={{ marginBottom: 8, fontSize: 13 }}>
+          切换管理端对接的 API。先检测连接，通过后再登录；局域网或 ngrok 地址与用户端保持一致以便配对。
+        </Paragraph>
+        <Form.Item label="服务器地址" style={{ marginBottom: 8 }}>
+          <Input
+            value={apiDraft}
+            placeholder={DEFAULT_API_BASE}
+            disabled={apiBusy || busy}
+            onChange={(e) => {
+              setApiDraft(e.target.value);
+              setApiProbe(null);
+            }}
+          />
+        </Form.Item>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <Button disabled={apiBusy || busy} onClick={() => void onProbeApi()}>
+            {apiBusy ? "检测中…" : "检测连接"}
+          </Button>
+          <Button type="primary" disabled={apiBusy || busy} onClick={() => void onApplyApi()}>
+            使用此服务器
+          </Button>
+          {apiDraft.trim().replace(/\/$/, "") !== DEFAULT_API_BASE ? (
+            <Button
+              disabled={apiBusy || busy}
+              onClick={() => {
+                setApiDraft(DEFAULT_API_BASE);
+                setApiProbe(null);
+              }}
+            >
+              恢复默认
+            </Button>
+          ) : null}
+        </div>
+        {apiProbe ? (
+          <Alert
+            type={apiProbe.ok ? "success" : "error"}
+            showIcon
+            message={formatApiHealthProbe(apiProbe)}
+            style={{ marginBottom: 12 }}
+          />
+        ) : (
+          <Paragraph type="secondary" style={{ marginBottom: 12, fontSize: 12 }}>
+            当前：{getApiBase()}
+          </Paragraph>
+        )}
+        <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 13 }}>
           <Link href={WEB_URL}>← 打开用户聊天端</Link>
         </Paragraph>
       </Card>

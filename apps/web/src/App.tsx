@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import { useConfirm, useDismissConfirm } from "./components/ConfirmProvider";
 import {
   Agent,
-  API_BASE,
   Channel,
   CompactConfig,
   Conversation,
@@ -161,6 +160,7 @@ import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ConvActionSheet } from "./components/ConvActionSheet";
 import { CreateActionSheet } from "./components/CreateActionSheet";
 import { MobileSettingsHub, type SettingsHubNav } from "./components/MobileSettingsHub";
+import { ApiServerField } from "./components/ApiServerField";
 import { LAYOUT_NARROW_MQ, useIsTouchUi, useSheetFormUi } from "./components/useIsTouchUi";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
@@ -4068,7 +4068,7 @@ export default function App() {
               </button>
             </>
           ) : null}
-          <p className="muted small">API：{API_BASE}</p>
+          <ApiServerField variant="login" />
         </form>
       </div>
     );
@@ -4938,6 +4938,18 @@ export default function App() {
                       <button type="button" className="settings-pill" onClick={onLogout}>
                         退出登录
                       </button>
+                    </SettingsCard>
+                  </SettingsSection>
+                )}
+                {(!sheetForm || settingsGeneralPane === "account") && (
+                  <SettingsSection title={sheetForm ? undefined : "服务器"}>
+                    <SettingsCard className="settings-card-padded">
+                      <ApiServerField
+                        variant="settings"
+                        onApplied={() => {
+                          setStatus("已切换服务器地址");
+                        }}
+                      />
                     </SettingsCard>
                   </SettingsSection>
                 )}

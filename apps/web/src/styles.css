@@ -1684,6 +1684,55 @@ button {
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
 }
 .auth-error { color: var(--danger); font-size: 13px; }
+
+/* P1-4: switch server / API health probe */
+.api-server-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.api-server-field-login {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.api-server-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.api-server-field input[type="url"] {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 44px;
+  font-size: 14px;
+}
+.api-server-help {
+  margin: 0;
+  line-height: 1.45;
+}
+.api-server-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.api-server-actions .primary,
+.api-server-actions .settings-btn {
+  min-height: 40px;
+}
+.api-server-status {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.api-server-status.is-ok { color: var(--success, #1a7f37); }
+.api-server-status.is-bad { color: var(--danger); }
+.api-server-current { margin: 0; }
+
 button.primary {
   border: none;
   border-radius: 12px;

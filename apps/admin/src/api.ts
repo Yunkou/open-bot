@@ -1,4 +1,5 @@
-const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
+/** Build-time default. Runtime override: localStorage openbot_admin_api_base. */
+export const DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
   /\/$/,
   "",
 );
@@ -8,8 +9,128 @@ export const WEB_URL = (import.meta.env.VITE_WEB_URL || "http://127.0.0.1:5173")
   "",
 );
 
+const API_BASE_KEY = "openbot_admin_api_base";
 const TOKEN_KEY = "openbot_admin_token";
 const USER_KEY = "openbot_admin_user";
+
+function normalizeApiBase(url: string): string {
+  return url.trim().replace(/\/$/, "");
+}
+
+function readStoredApiBase(): string | null {
+  try {
+    const v = localStorage.getItem(API_BASE_KEY);
+    if (!v) return null;
+    const n = normalizeApiBase(v);
+    return n || null;
+  } catch {
+    return null;
+  }
+}
+
+export let API_BASE = readStoredApiBase() || DEFAULT_API_BASE;
+
+export function getApiBase(): string {
+  return API_BASE;
+}
+
+export function getDefaultApiBase(): string {
+  return DEFAULT_API_BASE;
+}
+
+export function setApiBase(url: string): string {
+  const cleaned = normalizeApiBase(url);
+  const next = cleaned || DEFAULT_API_BASE;
+  API_BASE = next;
+  try {
+    if (cleaned && cleaned !== DEFAULT_API_BASE) {
+      localStorage.setItem(API_BASE_KEY, cleaned);
+    } else {
+      localStorage.removeItem(API_BASE_KEY);
+    }
+  } catch {
+    /* private mode */
+  }
+  return API_BASE;
+}
+
+export function clearApiBaseOverride(): string {
+  try {
+    localStorage.removeItem(API_BASE_KEY);
+  } catch {
+    /* ignore */
+  }
+  API_BASE = DEFAULT_API_BASE;
+  return API_BASE;
+}
+
+export type ApiHealthProbeResult = {
+  ok: boolean;
+  detail: string;
+  service?: string;
+  latency_ms?: number;
+  error?: string;
+  http_status?: number;
+};
+
+export async function probeApiHealth(baseUrl?: string): Promise<ApiHealthProbeResult> {
+  const base = normalizeApiBase(baseUrl ?? API_BASE) || DEFAULT_API_BASE;
+  if (!/^https?:\/\//i.test(base)) {
+    return { ok: false, detail: "地址需以 http:// 或 https:// 开头", error: "invalid_url" };
+  }
+  const started = performance.now();
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const headers: HeadersInit = {};
+    if (/ngrok/i.test(base)) headers["ngrok-skip-browser-warning"] = "1";
+    const res = await fetch(`${base}/healthz`, { method: "GET", headers, signal: ctrl.signal });
+    const latency = Math.round(performance.now() - started);
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      return { ok: false, detail: `HTTP ${res.status}`, http_status: res.status, latency_ms: latency, error: "http_error" };
+    }
+    const service = typeof body?.service === "string" ? body.service : undefined;
+    const markedOk = body?.ok === true || body?.ok === "true" || body == null;
+    if (!markedOk && body) {
+      return {
+        ok: false,
+        detail: `健康检查未通过${service ? `（${service}）` : ""}`,
+        service,
+        latency_ms: latency,
+        http_status: res.status,
+        error: "not_ok",
+      };
+    }
+    return {
+      ok: true,
+      detail: service ? `连接正常（${service} · ${latency}ms）` : `连接正常（${latency}ms）`,
+      service,
+      latency_ms: latency,
+      http_status: res.status,
+    };
+  } catch (err) {
+    const latency = Math.round(performance.now() - started);
+    const aborted = err instanceof DOMException && err.name === "AbortError";
+    const msg = aborted
+      ? "超时（8s）——检查地址、局域网或 ngrok 是否可达"
+      : err instanceof Error
+        ? err.message
+        : String(err);
+    return { ok: false, detail: `连不上：${msg}`, latency_ms: latency, error: aborted ? "timeout" : "network" };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export function formatApiHealthProbe(result: ApiHealthProbeResult): string {
+  return result.detail;
+}
 
 export type User = {
   id: string;
