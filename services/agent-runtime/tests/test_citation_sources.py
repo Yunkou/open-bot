@@ -6,9 +6,12 @@ import json
 
 from app.citation_sources import (
     extract_from_tool,
+    filter_sources_cited,
     merge_sources,
     normalize_url,
     sources_from_messages,
+    structured_citation_urls,
+    urls_from_answer_text,
 )
 
 
@@ -92,6 +95,69 @@ def test_sources_from_messages() -> None:
     assert "news.example" in got[0]["url"]
 
 
+
+def test_filter_sources_cited_keeps_only_urls_in_answer() -> None:
+    sources = [
+        {"url": "https://docs.example.com/guide", "title": "Docs"},
+        {"url": "https://blog.example.com/post", "title": "Blog"},
+        {"url": "https://noise.example.com/x"},
+    ]
+    answer = (
+        "See the [Docs](https://docs.example.com/guide) for setup. "
+        "Also https://blog.example.com/post has notes."
+    )
+    got = filter_sources_cited(sources, answer)
+    urls = [s["url"] for s in got]
+    assert urls == [
+        "https://docs.example.com/guide",
+        "https://blog.example.com/post",
+    ]
+
+
+def test_filter_sources_cited_empty_when_answer_has_no_urls() -> None:
+    sources = [
+        {"url": "https://docs.example.com/guide", "title": "Docs"},
+        {"url": "https://blog.example.com/post"},
+    ]
+    assert filter_sources_cited(sources, "I summarized the docs without links.") == []
+    assert filter_sources_cited(sources, "") == []
+    assert filter_sources_cited(sources, None) == []
+
+
+def test_filter_sources_cited_query_param_tolerance() -> None:
+    sources = [{"url": "https://news.example.com/a?utm=1", "title": "News"}]
+    answer = "Source: https://news.example.com/a"
+    got = filter_sources_cited(sources, answer)
+    assert len(got) == 1
+    assert "news.example.com/a" in got[0]["url"]
+
+
+def test_filter_sources_cited_structured_citations() -> None:
+    sources = [
+        {"url": "https://a.example/1"},
+        {"url": "https://b.example/2"},
+        {"url": "https://c.example/3"},
+    ]
+    # Answer cites none inline; structured citations name one.
+    got = filter_sources_cited(
+        sources,
+        "Based on retrieval.",
+        structured_citations=[{"url": "https://b.example/2", "title": "B"}],
+    )
+    assert [s["url"] for s in got] == ["https://b.example/2"]
+    assert structured_citation_urls(["https://x.example/y"]) == ["https://x.example/y"]
+    assert "docs.example.com" in urls_from_answer_text("see https://docs.example.com/a")[0]
+
+
+def test_filter_preserves_order_of_sources_not_answer() -> None:
+    sources = [
+        {"url": "https://z.example/z"},
+        {"url": "https://a.example/a"},
+    ]
+    answer = "first https://a.example/a then https://z.example/z"
+    got = filter_sources_cited(sources, answer)
+    assert [s["url"] for s in got] == ["https://z.example/z", "https://a.example/a"]
+
 if __name__ == "__main__":
     test_http_fetch_extracts_final_url()
     test_dedupe_and_ignore_non_http()
@@ -99,4 +165,9 @@ if __name__ == "__main__":
     test_mcp_search_extracts_links()
     test_blocked_ssrf_skips()
     test_sources_from_messages()
+    test_filter_sources_cited_keeps_only_urls_in_answer()
+    test_filter_sources_cited_empty_when_answer_has_no_urls()
+    test_filter_sources_cited_query_param_tolerance()
+    test_filter_sources_cited_structured_citations()
+    test_filter_preserves_order_of_sources_not_answer()
     print("ok")

@@ -45,6 +45,7 @@ from .memory import (
 from . import mem0_store
 from . import thread_context
 from . import dream
+from .citation_sources import filter_sources_cited
 from . import mcp_client
 from . import builtin_tools
 from .decision import DecisionSettings, bind_decision, build_client, reset_decision
@@ -1479,13 +1480,8 @@ async def openai_path(
                 with contextlib.suppress(Exception):
                     yield sse("done", {"ok": False, "mode": "openai", "cancelled": True})
                 raise
-            if used_tools or sources_acc:
-                meta_tools: dict[str, Any] = {}
-                if used_tools:
-                    meta_tools["tools_used"] = used_tools
-                if sources_acc:
-                    meta_tools["sources"] = list(sources_acc)
-                yield sse("meta", meta_tools)
+            if used_tools:
+                yield sse("meta", {"tools_used": used_tools})
             assistant_parts: list[str] = []
             if final == REASONING_ONLY:
                 # Reasoning tags only — do not start a second completion, do not emit them.
@@ -1558,13 +1554,19 @@ async def openai_path(
                 mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
             if user_id and assistant_reply.strip():
                 dream.maybe_consolidate_user_bg(str(user_id).strip())
+            cited_sources = filter_sources_cited(
+                sources_acc,
+                assistant_reply,
+            )
+            if cited_sources:
+                yield sse("meta", {"sources": cited_sources})
             done_payload: dict[str, Any] = {
                 "ok": True,
                 "mode": "openai",
                 "tools_used": used_tools,
             }
-            if sources_acc:
-                done_payload["sources"] = list(sources_acc)
+            if cited_sources:
+                done_payload["sources"] = cited_sources
             if usage_details:
                 done_payload["usage"] = usage_details
             yield sse("done", done_payload)

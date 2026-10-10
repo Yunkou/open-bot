@@ -1954,7 +1954,8 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 	reader := bufio.NewReader(resp.Body)
 	for {
 		if err := ctx.Err(); err != nil {
-			return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, err
+			text := stripThinkTags(assistant.String())
+			return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, err
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -2033,14 +2034,17 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 		if err != nil {
 			if err != io.EOF {
 				if ctx.Err() != nil {
-					return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, ctx.Err()
+					text := stripThinkTags(assistant.String())
+					return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, ctx.Err()
 				}
-				return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, err
+				text := stripThinkTags(assistant.String())
+				return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, err
 			}
 			break
 		}
 	}
-	return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, streamErr
+	text := stripThinkTags(assistant.String())
+	return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, streamErr
 }
 
 // runIDFromRuntimeMeta pulls the runtime run id from a meta/done payload

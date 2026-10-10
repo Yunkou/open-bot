@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -88,6 +89,91 @@ func NormalizeMessageSources(in []MessageSource) []MessageSource {
 	}
 	return out
 }
+
+
+
+var messageSourceURLRe = regexp.MustCompile(`(?i)https?://[^\s<>"')\]]+`)
+
+func normalizeSourceURLKey(url string) string {
+	u := strings.TrimSpace(url)
+	u = strings.TrimRight(u, `/.,;:)]}>"'`)
+	return strings.TrimRight(strings.ToLower(u), "/")
+}
+
+
+func citeMatchKeys(url string) map[string]struct{} {
+	keys := make(map[string]struct{})
+	raw := strings.TrimSpace(url)
+	if raw == "" {
+		return keys
+	}
+	full := normalizeSourceURLKey(raw)
+	if full != "" {
+		keys[full] = struct{}{}
+	}
+	// Drop query for loose match (answers often omit tracking params).
+	if i := strings.Index(full, "?"); i >= 0 {
+		keys[strings.TrimRight(full[:i], "/")] = struct{}{}
+	}
+	return keys
+}
+
+func urlsCitedInAnswer(answer string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if strings.TrimSpace(answer) == "" {
+		return out
+	}
+	for _, m := range messageSourceURLRe.FindAllString(answer, -1) {
+		for k := range citeMatchKeys(m) {
+			out[k] = struct{}{}
+		}
+	}
+	return out
+}
+
+// FilterMessageSourcesCited keeps only sources whose URL appears in the assistant
+// answer text (or in structured citation URLs). Retrieval may return many links;
+// the footer should show only those the bot actually cited.
+func FilterMessageSourcesCited(sources []MessageSource, answer string, structured []MessageSource) []MessageSource {
+	if len(sources) == 0 {
+		return nil
+	}
+	cited := urlsCitedInAnswer(answer)
+	for _, s := range structured {
+		for k := range citeMatchKeys(s.URL) {
+			cited[k] = struct{}{}
+		}
+	}
+	if len(cited) == 0 {
+		return nil
+	}
+	var out []MessageSource
+	seen := make(map[string]struct{})
+	for _, s := range NormalizeMessageSources(sources) {
+		keys := citeMatchKeys(s.URL)
+		hit := false
+		for k := range keys {
+			if _, ok := cited[k]; ok {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			continue
+		}
+		key := normalizeSourceURLKey(s.URL)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 
 func EncodeMessageSources(in []MessageSource) string {
 	norm := NormalizeMessageSources(in)

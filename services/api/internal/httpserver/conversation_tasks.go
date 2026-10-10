@@ -210,7 +210,7 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	msg, err := s.db.AddMessageWithOpts(task.ConversationID, "assistant", text, db.AddMessageOpts{
 		AgentID:   task.AgentID,
 		RequestID: strings.TrimSpace(requestID),
-		Sources:   sources,
+		Sources:   db.FilterMessageSourcesCited(sources, text, nil),
 	})
 	if err != nil {
 		log.Printf("conversation task message %s: %v", task.ID, err)
@@ -388,7 +388,7 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 		return nil
 	}
 	rid := strings.TrimSpace(requestID)
-	normSources := db.NormalizeMessageSources(sources)
+	normSources := db.FilterMessageSourcesCited(sources, text, nil)
 	// Durable harness may already have projected this turn via journal
 	// commit_assistant(project=True). Reuse that row so one user turn cannot
 	// produce two identical assistant messages in DB/UI.

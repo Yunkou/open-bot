@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 
 from ... import dream
 from ... import mem0_store
+from ...citation_sources import filter_sources_cited
 from ..state import AgentState
 
 
@@ -49,7 +50,11 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
     meta = dict(state.get("meta") or {})
     meta["tools_used"] = list(state.get("tools_used") or [])
-    sources = list(state.get("sources") or [])
+    sources = filter_sources_cited(
+        list(state.get("sources") or []),
+        final,
+        structured_citations=(meta.get("citations") or meta.get("structured_citations")),
+    )
     if sources:
         meta["sources"] = sources
     meta["durable"] = True

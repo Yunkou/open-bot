@@ -39,6 +39,7 @@ from .sse import (
 )
 from .state import initial_state
 from . import tracing
+from ..citation_sources import filter_sources_cited
 
 logger = logging.getLogger("open-bot.harness.runner")
 
@@ -236,7 +237,14 @@ async def run_durable_events(
 
         final_text = str(values.get("final_text") or final_text or "")
         used = list(values.get("tools_used") or [])
-        sources = list(values.get("sources") or [])
+        meta_vals = values.get("meta") if isinstance(values.get("meta"), dict) else {}
+        sources = filter_sources_cited(
+            list(values.get("sources") or []),
+            final_text,
+            structured_citations=(
+                meta_vals.get("citations") or meta_vals.get("structured_citations")
+            ),
+        )
         if used or sources:
             payload: dict[str, Any] = {}
             if used:

@@ -2,6 +2,9 @@
 
 Used when the bot fetched web/KB/MCP/memory content that exposes real http(s)
 URLs. Deduplicated and ordered by first appearance. Never invents URLs.
+
+The sources footer only lists URLs actually cited in the final assistant answer
+(or in structured citations), not every URL seen in retrieval tool results.
 """
 
 from __future__ import annotations
@@ -285,3 +288,151 @@ def sources_from_messages(messages: list[dict[str, Any]] | None) -> list[dict[st
             content = msg.get("content")
             acc = merge_sources(acc, extract_from_tool(name, args, content))
     return acc
+
+
+
+def _cite_match_keys(url: str) -> set[str]:
+    """Normalized forms used to match a source URL against answer citations."""
+    keys: set[str] = set()
+    cleaned = _clean_url(url)
+    if not cleaned:
+        return keys
+    full = normalize_url(cleaned)
+    keys.add(full)
+    try:
+        p = urlparse(cleaned)
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        path = p.path or ""
+        if path != "/" and path.endswith("/"):
+            path = path.rstrip("/")
+        if netloc.endswith(":80") and scheme == "http":
+            netloc = netloc[:-3]
+        if netloc.endswith(":443") and scheme == "https":
+            netloc = netloc[:-4]
+        # Also match without query (answers often drop tracking params).
+        keys.add(urlunparse((scheme, netloc, path, "", "", "")))
+    except Exception:  # noqa: BLE001
+        pass
+    return {k for k in keys if k}
+
+
+def urls_from_answer_text(text: str | None) -> list[str]:
+    """Extract http(s) URLs from assistant answer text (bare URLs / markdown links)."""
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _URL_RE.findall(str(text)):
+        u = _clean_url(m)
+        if not u:
+            continue
+        key = normalize_url(u)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(u)
+    return found
+
+
+def structured_citation_urls(citations: Any) -> list[str]:
+    """URLs from structured citation payloads (strings or {url/link/href/...} objects)."""
+    if citations is None:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: str) -> None:
+        u = _clean_url(raw)
+        if not u:
+            return
+        key = normalize_url(u)
+        if key in seen:
+            return
+        seen.add(key)
+        found.append(u)
+
+    if isinstance(citations, str):
+        s = citations.strip()
+        if s.startswith("{") or s.startswith("["):
+            try:
+                citations = json.loads(s)
+            except json.JSONDecodeError:
+                for m in _URL_RE.findall(s):
+                    _add(m)
+                return found
+        else:
+            for m in _URL_RE.findall(s):
+                _add(m)
+            return found
+
+    if isinstance(citations, dict):
+        citations = [citations]
+
+    if not isinstance(citations, list):
+        return found
+
+    for item in citations:
+        if isinstance(item, str):
+            _add(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        for key in ("url", "link", "href", "source_url", "canonical_url", "page_url", "uri"):
+            v = item.get(key)
+            if isinstance(v, str):
+                _add(v)
+                break
+        else:
+            # Nested / free-text fields
+            for m in _URL_RE.findall(json.dumps(item, ensure_ascii=False)):
+                _add(m)
+    return found
+
+
+def filter_sources_cited(
+    sources: list[dict[str, str]] | None,
+    answer_text: str | None,
+    *,
+    structured_citations: Any = None,
+    limit: int = 20,
+) -> list[dict[str, str]]:
+    """Keep only retrieval sources whose URL was cited in the final answer.
+
+    Matching uses normalized URL equality (with and without query). Sources that
+    never appear in answer text / structured citations are dropped so the footer
+    does not list every URL from search/fetch tool results.
+    """
+    if not sources:
+        return []
+    cited_keys: set[str] = set()
+    for u in urls_from_answer_text(answer_text):
+        cited_keys |= _cite_match_keys(u)
+    for u in structured_citation_urls(structured_citations):
+        cited_keys |= _cite_match_keys(u)
+    if not cited_keys:
+        return []
+
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        url = _clean_url(str(src.get("url") or ""))
+        if not url:
+            continue
+        keys = _cite_match_keys(url)
+        if not keys.intersection(cited_keys):
+            continue
+        nkey = normalize_url(url)
+        if nkey in seen:
+            continue
+        seen.add(nkey)
+        item: dict[str, str] = {"url": url}
+        title = str(src.get("title") or "").strip()[:200]
+        if title:
+            item["title"] = title
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
