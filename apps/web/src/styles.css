@@ -1868,14 +1868,58 @@ button.ghost {
   border-radius: 6px;
 }
 
+.conv-clone {
+  flex-shrink: 0;
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+
 .conv-item:hover .conv-del,
-.conv-item:focus-within .conv-del {
+.conv-item:focus-within .conv-del,
+.conv-item:hover .conv-clone,
+.conv-item:focus-within .conv-clone {
   opacity: 1;
 }
 
 .conv-del:hover {
   color: var(--danger);
   background: rgba(220, 38, 38, 0.1);
+}
+
+.conv-clone:hover {
+  color: var(--text);
+  background: var(--bg-soft);
+}
+
+.clone-agent-modal { width: min(460px, 100%); }
+.clone-agent-modal .clone-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 14px;
+}
+.clone-agent-modal .clone-section { margin-top: 12px; }
+.clone-agent-modal .clone-section-title {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.clone-agent-modal .clone-section ul { margin: 4px 0 6px; font-size: 13px; }
+.clone-agent-modal label.check {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-top: 6px;
 }
 
 .settings-dialog {
@@ -4884,11 +4928,14 @@ html.touch-ui .composer-quote-bar {
 /* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets (layout-narrow 860) ---- */
 
 .touch-ui .conv-item:hover .conv-del,
-.touch-ui .conv-item:focus-within .conv-del {
-  /* Desktop hover delete stays; touch uses long-press ConvActionSheet instead. */
+.touch-ui .conv-item:focus-within .conv-del,
+.touch-ui .conv-item:hover .conv-clone,
+.touch-ui .conv-item:focus-within .conv-clone {
+  /* Desktop hover delete/clone stays; touch uses long-press ConvActionSheet instead. */
   opacity: 0;
 }
-.touch-ui .conv-item:focus-within .conv-del:focus-visible {
+.touch-ui .conv-item:focus-within .conv-del:focus-visible,
+.touch-ui .conv-item:focus-within .conv-clone:focus-visible {
   opacity: 1;
 }
 

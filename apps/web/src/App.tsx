@@ -184,6 +184,7 @@ import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
+import { CloneAgentModal } from "./components/CloneAgentModal";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
@@ -576,6 +577,7 @@ export default function App() {
   const llmCacheReqSeq = useRef(0);
 
   const [agentBusy, setAgentBusy] = useState(false);
+  const [cloneTarget, setCloneTarget] = useState<Agent | null>(null);
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
@@ -4380,6 +4382,22 @@ export default function App() {
                   </div>
                   <button
                     type="button"
+                    className="conv-clone"
+                    title="复制助手"
+                    aria-label="复制助手"
+                    disabled={agentBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCloneTarget(a);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                      <rect x="9" y="9" width="13" height="13" rx="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
                     className="conv-del"
                     title="删除助手"
                     disabled={agentBusy}
@@ -5168,6 +5186,7 @@ export default function App() {
             {settingsTab === "bot" && (
               <BotSettingsPanel
                 agent={activeAgent ?? null}
+                onClone={(a) => setCloneTarget(a)}
                 onSaved={(a) => {
                   void refreshAgents().then(() => {
                     toast.success(`已更新「${a.name}」`);
@@ -6603,6 +6622,23 @@ export default function App() {
           </div>
         </div>
       )}
+      <CloneAgentModal
+        agent={cloneTarget}
+        onClose={() => setCloneTarget(null)}
+        onCloned={(res) => {
+          const created = res.agent;
+          void refreshAgents()
+            .then(() => {
+              setShowSettings(false);
+              void onSelectAgentRef.current(created.id);
+            })
+            .catch(() => {});
+          const extras: string[] = [];
+          if (res.memories_copied) extras.push(`${res.memories_copied} 条记忆`);
+          if (res.routines_copied) extras.push(`${res.routines_copied} 个例行任务（已暂停）`);
+          toast.success(`已复制为「${created.name}」${extras.length ? `，含 ${extras.join("、")}` : ""}`);
+        }}
+      />
       <SecretPromptModal
         request={secretPrompt}
         onClose={() => setSecretPrompt(null)}
