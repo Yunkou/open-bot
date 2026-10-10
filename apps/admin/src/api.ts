@@ -480,6 +480,38 @@ export function formatLLMPromptCacheProbe(result: LLMPromptCacheProbeResult): st
   return bits.filter(Boolean).join(" ");
 }
 
+export type LLMModelProbeResult = {
+  ok: boolean;
+  detail: string;
+  hint?: string;
+  error?: string;
+  http_status?: number;
+  latency_ms?: number;
+  model?: string;
+  reply?: string;
+};
+
+export async function adminProbeOrgLLMModel(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+}): Promise<LLMModelProbeResult> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/llm/probe-model`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function formatLLMModelProbe(result: LLMModelProbeResult): string {
+  const bits = [result.detail];
+  if (!result.ok && result.error) bits.push(result.error);
+  if (result.hint) bits.push(result.hint);
+  return bits.filter(Boolean).join(" ");
+}
+
 export type DecisionSettings = {
   provider: string;
   base_url: string;

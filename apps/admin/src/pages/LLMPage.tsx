@@ -10,9 +10,11 @@ import {
 import {
   adminGetOrgLLM,
   adminListOrgLLMModels,
+  adminProbeOrgLLMModel,
   adminProbeOrgLLMPromptCache,
   adminProbeOrgLLMTools,
   adminPutOrgLLM,
+  formatLLMModelProbe,
   formatLLMPromptCacheProbe,
   formatLLMToolsProbe,
   type OrgLLMSettings,
@@ -29,6 +31,8 @@ export default function LLMPage() {
   const [probeMsg, setProbeMsg] = useState("");
   const [cacheProbing, setCacheProbing] = useState(false);
   const [cacheProbeMsg, setCacheProbeMsg] = useState("");
+  const [modelProbing, setModelProbing] = useState(false);
+  const [modelProbeMsg, setModelProbeMsg] = useState("");
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState("");
@@ -168,6 +172,32 @@ export default function LLMPage() {
     }
   };
 
+  const runModelProbe = async () => {
+    setModelProbing(true);
+    setModelProbeMsg("");
+    try {
+      const values = await form.validateFields(["base_url", "model"]);
+      const probe = await adminProbeOrgLLMModel({
+        base_url: values.base_url || "",
+        model: values.model || "",
+        api_key: form.getFieldValue("api_key") || "",
+      });
+      const text = formatLLMModelProbe(probe);
+      setModelProbeMsg(text);
+      if (probe.ok) {
+        message.success(text);
+      } else {
+        message.error(text);
+      }
+    } catch (err) {
+      const text = err instanceof Error ? err.message : String(err);
+      setModelProbeMsg(text);
+      message.error(text);
+    } finally {
+      setModelProbing(false);
+    }
+  };
+
   return (
     <PageContainer title="默认模型">
       <Card loading={loading}>
@@ -177,6 +207,7 @@ export default function LLMPage() {
           优先级：个人默认/首个连接 &gt; 组织默认 &gt; 无。
           勾选「启用 tools」前请先检测上游是否支持 function calling；不支持时无法保存开启状态。
           填写 Base URL 与 API Key 后会自动拉取可用模型列表（仍可手动输入）。选定模型后会检测该端点是否支持 prompt cache。
+          可用「检测模型」对选定模型发一次最小聊天请求，确认其可响应。
         </Paragraph>
         <ProForm
           form={form}
@@ -185,8 +216,11 @@ export default function LLMPage() {
           submitter={{
             searchConfig: { submitText: "保存" },
             render: (_, dom) => (
-              <Space>
+              <Space wrap>
                 {dom}
+                <Button loading={modelProbing} onClick={() => void runModelProbe()}>
+                  检测模型
+                </Button>
                 <Button loading={probing} onClick={() => void runProbe()}>
                   检测 tools 能力
                 </Button>
@@ -303,6 +337,15 @@ export default function LLMPage() {
         ) : cacheProbeMsg ? (
           <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
             {cacheProbeMsg}
+          </Text>
+        ) : null}
+        {modelProbing ? (
+          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+            正在检测模型可用性…
+          </Text>
+        ) : modelProbeMsg ? (
+          <Text type="secondary" style={{ display: "block", marginTop: 12 }}>
+            {modelProbeMsg}
           </Text>
         ) : null}
         {probeMsg ? (
