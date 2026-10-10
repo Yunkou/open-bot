@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -158,12 +159,24 @@ func isNoisyCitationURL(url string) bool {
 		return true
 	}
 	switch host {
-	case "duckduckgo.com", "lite.duckduckgo.com", "google.com", "bing.com",
-		"purl.org", "w3.org", "xmlns.com":
+	case "duckduckgo.com", "lite.duckduckgo.com", "html.duckduckgo.com",
+		"google.com", "bing.com", "cn.bing.com",
+		"so.com", "sogou.com", "baidu.com", "mojeek.com",
+		"purl.org", "w3.org", "xmlns.com", "schemas.live.com", "microsoft.com":
 		return true
 	}
-	if strings.HasPrefix(host, "api.") || strings.HasPrefix(host, "search.") || strings.HasSuffix(host, ".w3.org") {
+	if strings.HasPrefix(host, "api.") || strings.HasPrefix(host, "search.") {
 		return true
+	}
+	for _, suf := range []string{
+		".bing.com", ".duckduckgo.com", ".google.com", ".baidu.com",
+		".sogou.com", ".microsoft.com", ".live.com", ".w3.org",
+		".360tres.com", ".bdstatic.com", ".googleusercontent.com",
+		".gstatic.com", ".ytimg.com", ".ggpht.com",
+	} {
+		if strings.HasSuffix(host, suf) {
+			return true
+		}
 	}
 	path := raw
 	if i := strings.Index(raw, "://"); i >= 0 {
@@ -174,11 +187,34 @@ func isNoisyCitationURL(url string) bool {
 	} else {
 		path = "/"
 	}
+	if q := strings.Index(path, "?"); q >= 0 {
+		path = path[:q]
+	}
 	if strings.Contains(path, "/api/") || strings.HasPrefix(path, "/api") {
 		return true
 	}
 	if strings.Contains(path, "/rss") || strings.Contains(path, "/feed") || strings.Contains(path, "/atom") ||
 		strings.HasSuffix(path, ".xml") || strings.Contains(path, "outboundfeeds") {
+		return true
+	}
+	base := strings.TrimRight(path, "/")
+	if base == "/robots.txt" || base == "/favicon.ico" || strings.HasSuffix(base, "/robots.txt") {
+		return true
+	}
+	if strings.Contains(base, "sitemap") && (strings.HasSuffix(base, ".xml") || strings.HasSuffix(base, ".txt") || strings.HasSuffix(base, "/sitemap")) {
+		return true
+	}
+	q := ""
+	if i := strings.Index(raw, "?"); i >= 0 {
+		q = raw[i+1:]
+	}
+	pathTrim := strings.TrimRight(path, "/")
+	if pathTrim == "/search" || pathTrim == "/web" || pathTrim == "/s" || pathTrim == "/html" || pathTrim == "/lite" || strings.HasPrefix(path, "/search") {
+		if strings.Contains(q, "q=") || strings.Contains(q, "query=") || strings.Contains(q, "wd=") || strings.Contains(q, "p=") {
+			return true
+		}
+	}
+	if strings.Contains(q, "format=rss") {
 		return true
 	}
 	return false
@@ -214,12 +250,51 @@ func hostSoftMatch(sourceHost string, mentioned map[string]struct{}) bool {
 	return false
 }
 
+func answerMentionsHostLabel(answerL, sourceHostName string) bool {
+	label := sourceHostName
+	if i := strings.Index(label, "."); i >= 0 {
+		label = label[:i]
+	}
+	label = strings.ToLower(strings.TrimSpace(label))
+	if len(label) < 5 {
+		return false
+	}
+	for _, r := range label {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	// Case-insensitive whole-label match (ThingJS ← thingjs.com).
+	al := answerL
+	ll := label
+	for i := 0; i+len(ll) <= len(al); i++ {
+		if !strings.EqualFold(al[i:i+len(ll)], ll) {
+			continue
+		}
+		leftOK := i == 0 || !isASCIIAlphaNum(al[i-1])
+		rightOK := i+len(ll) == len(al) || !isASCIIAlphaNum(al[i+len(ll)])
+		if leftOK && rightOK {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIAlphaNum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
 func answerMentionsTitle(answerL, title string) bool {
 	t := strings.ToLower(strings.TrimSpace(title))
 	if len(t) < 6 {
 		return false
 	}
 	return strings.Contains(answerL, t)
+}
+
+func sourceSoftHit(url, title, answerL string, mentioned map[string]struct{}) bool {
+	host := sourceHost(url)
+	return hostSoftMatch(host, mentioned) || answerMentionsHostLabel(answerL, host) || answerMentionsTitle(answerL, title)
 }
 
 func fallbackRetrievalSources(sources []MessageSource, limit int) []MessageSource {
@@ -304,8 +379,7 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 			if isNoisyCitationURL(s.URL) {
 				continue
 			}
-			host := sourceHost(s.URL)
-			if hostSoftMatch(host, mentioned) || answerMentionsTitle(answerL, s.Title) {
+			if sourceSoftHit(s.URL, s.Title, answerL, mentioned) {
 				appendSrc(s)
 			}
 		}
@@ -320,19 +394,28 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 	if strings.TrimSpace(answer) != "" && len(cited) == 0 {
 		var soft []MessageSource
 		softSeen := make(map[string]struct{})
+		softHosts := make(map[string]struct{})
 		for _, s := range norm {
 			if isNoisyCitationURL(s.URL) {
 				continue
 			}
-			host := sourceHost(s.URL)
-			if !hostSoftMatch(host, mentioned) && !answerMentionsTitle(answerL, s.Title) {
+			if !sourceSoftHit(s.URL, s.Title, answerL, mentioned) {
 				continue
+			}
+			host := sourceHost(s.URL)
+			if host != "" {
+				if _, ok := softHosts[host]; ok {
+					continue
+				}
 			}
 			key := normalizeSourceURLKey(s.URL)
 			if _, ok := softSeen[key]; ok {
 				continue
 			}
 			softSeen[key] = struct{}{}
+			if host != "" {
+				softHosts[host] = struct{}{}
+			}
 			soft = append(soft, s)
 		}
 		fbLimit := 8
@@ -345,6 +428,101 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 		return fallbackRetrievalSources(sources, fbLimit)
 	}
 	return nil
+}
+
+
+// InjectCitationMarkers inserts [1][2]… after the first host/title mention for each source.
+// Idempotent when markers already exist. Skips code fences / inline code spans.
+func InjectCitationMarkers(answer string, sources []MessageSource) string {
+	sources = NormalizeMessageSources(sources)
+	if strings.TrimSpace(answer) == "" || len(sources) == 0 {
+		return answer
+	}
+	existing := map[int]struct{}{}
+	for _, m := range regexp.MustCompile(`\[(\d+)\]`).FindAllStringSubmatch(answer, -1) {
+		var n int
+		if _, err := fmt.Sscanf(m[1], "%d", &n); err == nil && n > 0 {
+			existing[n] = struct{}{}
+		}
+	}
+	text := answer
+	for i, s := range sources {
+		n := i + 1
+		if _, ok := existing[n]; ok {
+			continue
+		}
+		marker := fmt.Sprintf("[%d]", n)
+		if strings.Contains(text, marker) {
+			continue
+		}
+		masked := maskCodeSpans(text)
+		insertAt := -1
+		host := sourceHost(s.URL)
+		if host != "" {
+			hostCandidates := []string{host}
+			if parts := strings.Split(host, "."); len(parts) >= 2 {
+				parent := strings.Join(parts[len(parts)-2:], ".")
+				if parent != host {
+					hostCandidates = append(hostCandidates, parent)
+				}
+			}
+			for _, hc := range hostCandidates {
+				pat := regexp.MustCompile(`(?i)(?:https?://)?(?:www\.)?` + regexp.QuoteMeta(hc) + `\b`)
+				if loc := pat.FindStringIndex(masked); loc != nil {
+					insertAt = loc[1]
+					break
+				}
+			}
+			if insertAt < 0 {
+				label := host
+				if dot := strings.Index(label, "."); dot >= 0 {
+					label = label[:dot]
+				}
+				if answerMentionsHostLabel(strings.ToLower(masked), host) {
+					ll := strings.ToLower(label)
+					ml := strings.ToLower(masked)
+					for j := 0; j+len(ll) <= len(ml); j++ {
+						if ml[j:j+len(ll)] != ll {
+							continue
+						}
+						leftOK := j == 0 || !isASCIIAlphaNum(masked[j-1])
+						rightOK := j+len(ll) == len(masked) || !isASCIIAlphaNum(masked[j+len(ll)])
+						if leftOK && rightOK {
+							insertAt = j + len(label)
+							break
+						}
+					}
+				}
+			}
+		}
+		if insertAt < 0 {
+			t := strings.TrimSpace(s.Title)
+			if len(t) >= 6 {
+				idx := strings.Index(strings.ToLower(masked), strings.ToLower(t))
+				if idx >= 0 {
+					insertAt = idx + len(t)
+				}
+			}
+		}
+		if insertAt < 0 || insertAt > len(text) {
+			continue
+		}
+		after := strings.TrimLeft(text[insertAt:], " \t")
+		if strings.HasPrefix(after, "[") {
+			continue
+		}
+		text = text[:insertAt] + marker + text[insertAt:]
+		existing[n] = struct{}{}
+	}
+	return text
+}
+
+func maskCodeSpans(text string) string {
+	blank := func(s string) string { return strings.Repeat(" ", len(s)) }
+	fenced := regexp.MustCompile("(?s)```.*?```")
+	out := fenced.ReplaceAllStringFunc(text, blank)
+	inline := regexp.MustCompile("`[^`]+`")
+	return inline.ReplaceAllStringFunc(out, blank)
 }
 
 func EncodeMessageSources(in []MessageSource) string {

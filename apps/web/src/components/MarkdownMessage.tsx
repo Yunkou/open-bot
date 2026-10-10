@@ -54,6 +54,8 @@ function urlTransform(url: string): string {
   const trimmed = (url || "").trim();
   if (/^sandbox:/i.test(trimmed)) return trimmed;
   if (isAttachmentAuthUrl(trimmed)) return trimmed;
+  // In-message citation jumps ([1] → footer anchor).
+  if (/^#cite-[\w-]+$/i.test(trimmed)) return trimmed;
   return defaultUrlTransform(url);
 }
 
@@ -271,6 +273,28 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
               }}
             >
               {friendly}
+            </a>
+          );
+        }
+        const citeHref = (href || "").trim();
+        if (citeHref.startsWith("#cite-")) {
+          return (
+            <a
+              href={citeHref}
+              className="md-cite"
+              title="查看来源"
+              onClick={(e) => {
+                e.preventDefault();
+                const id = citeHref.slice(1);
+                const el = document.getElementById(id);
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                  el.classList.add("msg-sources-flash");
+                  window.setTimeout(() => el.classList.remove("msg-sources-flash"), 1200);
+                }
+              }}
+            >
+              {children}
             </a>
           );
         }

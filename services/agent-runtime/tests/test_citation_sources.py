@@ -7,6 +7,7 @@ import json
 from app.citation_sources import (
     extract_from_tool,
     filter_sources_cited,
+    inject_citation_markers,
     merge_sources,
     normalize_url,
     sources_from_messages,
@@ -170,7 +171,65 @@ def test_filter_preserves_order_of_sources_not_answer() -> None:
     got = filter_sources_cited(sources, answer)
     assert [s["url"] for s in got] == ["https://z.example/z", "https://a.example/a"]
 
+
+def test_html_fetch_does_not_scrape_body_hrefs() -> None:
+    body = "<!DOCTYPE html><html><body>" + "".join(
+        f'<a href="https://cdn{i}.microsoft.com/x">x</a>' for i in range(25)
+    ) + "</body></html>"
+    got = extract_from_tool(
+        "http_fetch",
+        {"url": "https://www.uino.com/about"},
+        {
+            "status": 200,
+            "url": "https://www.uino.com/about",
+            "content_type": "text/html",
+            "body": body,
+        },
+    )
+    assert len(got) == 1
+    assert "uino.com" in got[0]["url"]
+
+
+def test_merge_evicts_noisy_for_later_page() -> None:
+    acc: list[dict[str, str]] = []
+    # Fill with noisy SERP primary URLs
+    for i in range(20):
+        acc = merge_sources(
+            acc,
+            [{"url": f"https://cn.bing.com/search?q=x{i}"}],
+        )
+    assert len(acc) == 20
+    acc = merge_sources(acc, [{"url": "https://www.uino.com/"}])
+    urls = [s["url"] for s in acc]
+    assert "https://www.uino.com/" in urls
+
+
+def test_inject_citation_markers_soft_host() -> None:
+    sources = [
+        {"url": "https://www.uino.com/", "title": "UINO"},
+        {"url": "https://www.thingjs.com/"},
+    ]
+    answer = "官网 uino.com 与 ThingJS 站。"
+    got = inject_citation_markers(answer, sources)
+    assert "[1]" in got and "[2]" in got
+    assert inject_citation_markers(got, sources) == got
+
+
+def test_filter_soft_host_label_thingjs() -> None:
+    sources = [
+        {"url": "https://cn.bing.com/search?q=x"},
+        {"url": "https://www.thingjs.com/"},
+        {"url": "https://www.uino.com/"},
+    ]
+    got = filter_sources_cited(sources, "优锘官网与 ThingJS 站已核对，见 uino.com")
+    urls = [s["url"] for s in got]
+    assert "https://www.uino.com/" in urls
+    assert "https://www.thingjs.com/" in urls
+    assert not any("bing.com" in u for u in urls)
+
+
 if __name__ == "__main__":
+
     test_http_fetch_extracts_final_url()
     test_dedupe_and_ignore_non_http()
     test_calculator_ignored()
@@ -182,4 +241,8 @@ if __name__ == "__main__":
     test_filter_sources_cited_query_param_tolerance()
     test_filter_sources_cited_structured_citations()
     test_filter_preserves_order_of_sources_not_answer()
+    test_html_fetch_does_not_scrape_body_hrefs()
+    test_merge_evicts_noisy_for_later_page()
+    test_inject_citation_markers_soft_host()
+    test_filter_soft_host_label_thingjs()
     print("ok")

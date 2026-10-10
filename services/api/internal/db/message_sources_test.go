@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeMessageSources(t *testing.T) {
 	got := NormalizeMessageSources([]MessageSource{
@@ -72,5 +75,48 @@ func TestFilterMessageSourcesCited(t *testing.T) {
 	got2 := FilterMessageSourcesCited(sources, "summary only", []MessageSource{{URL: "https://noise.example.com/x"}})
 	if len(got2) != 1 || got2[0].URL != "https://noise.example.com/x" {
 		t.Fatalf("structured=%+v", got2)
+	}
+}
+
+func TestInjectCitationMarkers(t *testing.T) {
+	sources := []MessageSource{
+		{URL: "https://www.uino.com/", Title: "UINO"},
+		{URL: "https://www.thingjs.com/"},
+	}
+	answer := "官网 uino.com 与 ThingJS 站已核对。"
+	got := InjectCitationMarkers(answer, sources)
+	if got == answer {
+		t.Fatalf("expected markers, got unchanged %q", got)
+	}
+	if !strings.Contains(got, "[1]") || !strings.Contains(got, "[2]") {
+		t.Fatalf("missing markers: %q", got)
+	}
+	// Idempotent
+	again := InjectCitationMarkers(got, sources)
+	if again != got {
+		t.Fatalf("not idempotent: %q vs %q", again, got)
+	}
+}
+
+func TestIsNoisySearchHosts(t *testing.T) {
+	if !isNoisyCitationURL("https://cn.bing.com/search?q=x") {
+		t.Fatal("cn.bing search should be noisy")
+	}
+	if !isNoisyCitationURL("https://r.bing.com/rb/x.css") {
+		t.Fatal("r.bing.com should be noisy")
+	}
+	if isNoisyCitationURL("https://www.uino.com/") {
+		t.Fatal("uino should not be noisy")
+	}
+}
+
+func TestInjectCitationMarkersParentHost(t *testing.T) {
+	sources := []MessageSource{
+		{URL: "https://dt.uino.com/docs"},
+	}
+	answer := "详见 uino.com 文档说明。"
+	got := InjectCitationMarkers(answer, sources)
+	if !strings.Contains(got, "[1]") {
+		t.Fatalf("expected [1] after parent host mention, got %q", got)
 	}
 }

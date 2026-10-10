@@ -207,10 +207,12 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	if err != nil || !ok {
 		return
 	}
+	normSources := db.FilterMessageSourcesCited(sources, text, nil)
+	text = db.InjectCitationMarkers(text, normSources)
 	msg, err := s.db.AddMessageWithOpts(task.ConversationID, "assistant", text, db.AddMessageOpts{
 		AgentID:   task.AgentID,
 		RequestID: strings.TrimSpace(requestID),
-		Sources:   db.FilterMessageSourcesCited(sources, text, nil),
+		Sources:   normSources,
 	})
 	if err != nil {
 		log.Printf("conversation task message %s: %v", task.ID, err)
@@ -389,6 +391,7 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 	}
 	rid := strings.TrimSpace(requestID)
 	normSources := db.FilterMessageSourcesCited(sources, text, nil)
+	text = db.InjectCitationMarkers(text, normSources)
 	// Durable harness may already have projected this turn via journal
 	// commit_assistant(project=True). Reuse that row so one user turn cannot
 	// produce two identical assistant messages in DB/UI.
@@ -399,6 +402,17 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 					existing.Sources = normSources
 				} else {
 					log.Printf("save assistant sources conv=%s msg=%s: %v", conversationID, existing.ID, serr)
+				}
+			}
+			annotated := db.InjectCitationMarkers(existing.Content, normSources)
+			if annotated != existing.Content {
+				if um, uerr := s.db.UpdateMessageContent(conversationID, existing.ID, annotated); uerr == nil && um != nil {
+					existing = um
+					existing.Sources = normSources
+				} else if uerr != nil {
+					log.Printf("save assistant cite markers conv=%s msg=%s: %v", conversationID, existing.ID, uerr)
+				} else {
+					existing.Content = annotated
 				}
 			}
 			s.emitAssistantSaved(emit, conversationID, existing)

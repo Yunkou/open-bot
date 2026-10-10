@@ -167,17 +167,77 @@ def _is_retrieval_tool(name: str) -> bool:
     return any(s in n for s in _RETRIEVAL_SUBSTR)
 
 
+def _looks_like_html(content_type: str, body: str) -> bool:
+    ct = (content_type or "").lower()
+    if "html" in ct:
+        return True
+    b = (body or "").lstrip()[:200].lower()
+    return b.startswith("<!doctype html") or b.startswith("<html")
+
+
+def _looks_like_feed(content_type: str, body: str) -> bool:
+    ct = (content_type or "").lower()
+    if any(x in ct for x in ("xml", "rss", "atom", "rdf")):
+        return True
+    b = (body or "").lstrip()[:300].lower()
+    return (
+        b.startswith("<?xml")
+        or b.startswith("<rss")
+        or b.startswith("<feed")
+        or "<channel>" in b[:500]
+    )
+
+
+_RSS_LINK_RE = re.compile(
+    r"<link(?:\s[^>]*)?>(\s*https?://[^\s<]+)\s*</link>"
+    r'|<link\b[^>]*\bhref=["\']?(https?://[^\s"\'>]+)',
+    re.IGNORECASE,
+)
+_RSS_GUID_RE = re.compile(
+    r'<guid[^>]*ispermalink=["\']?true["\']?[^>]*>(\s*https?://[^\s<]+)\s*</guid>',
+    re.IGNORECASE,
+)
+
+
+def _urls_from_feed(body: str) -> list[tuple[str, str]]:
+    """Item permalinks from RSS/Atom — skip xmlns / chrome URLs."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    if not body:
+        return out
+    for rx in (_RSS_LINK_RE, _RSS_GUID_RE):
+        for m in rx.finditer(body):
+            raw = (m.group(1) or m.group(2) or "").strip()
+            u = _clean_url(raw)
+            if not u or _is_noisy_citation_url(u):
+                continue
+            key = normalize_url(u)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((u, ""))
+            if len(out) >= 12:
+                return out
+    return out
+
+
 def extract_from_tool(
     name: str,
     args: dict[str, Any] | None,
     result: str | dict[str, Any] | None,
 ) -> list[dict[str, str]]:
-    """Return [{url, title?}] from one tool invocation when it looks like retrieval."""
+    """Return [{url, title?}] from one tool invocation when it looks like retrieval.
+
+    Page-fetch tools (http_fetch etc.) keep the request/final URL only — never scrape
+    every href out of an HTML body (that floods the 20-slot list with CDN/xmlns junk and
+    drops the real pages the model later cites by host).
+    """
     if not _is_retrieval_tool(name):
         return []
 
     found: list[tuple[str, str]] = []
     args = args if isinstance(args, dict) else {}
+    arg_title = str(args.get("title") or "").strip()[:200]
 
     # Prefer explicit arg URLs (fetch/browse).
     for key in ("url", "link", "href", "source_url", "page_url"):
@@ -185,7 +245,7 @@ def extract_from_tool(
         if isinstance(v, str):
             u = _clean_url(v)
             if u:
-                found.append((u, str(args.get("title") or "").strip()[:200]))
+                found.append((u, arg_title))
 
     # Query-only search tools rarely put the destination URL in args; rely on result.
     parsed_result: Any = result
@@ -195,19 +255,59 @@ def extract_from_tool(
             try:
                 parsed_result = json.loads(text)
             except json.JSONDecodeError:
-                parsed_result = text
+                try:
+                    # HTML bodies often embed raw control chars; strict JSON rejects them
+                    # and we must not fall back to scraping the whole blob for hrefs.
+                    parsed_result = json.loads(text, strict=False)
+                except json.JSONDecodeError:
+                    # Unparseable: keep arg/primary URLs only (do not regex the blob).
+                    return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
         else:
             parsed_result = text
 
     if parsed_result is not None:
-        # Successful http_fetch prefers final url from body.
         if isinstance(parsed_result, dict) and parsed_result.get("error"):
-            # Still allow URL from error payloads only if it's the requested page
-            # (user may want to open it); skip if clearly a blocked SSRF/etc.
             err = str(parsed_result.get("error") or "").lower()
             if "blocked" in err or "not allowed" in err or "ssrf" in err:
                 return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
-        found.extend(_urls_from_obj(parsed_result))
+            # Timed-out / soft errors: still keep the requested URL.
+            return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
+
+        if isinstance(parsed_result, dict):
+            final_u = parsed_result.get("url")
+            if isinstance(final_u, str):
+                u = _clean_url(final_u)
+                if u:
+                    found.append((u, arg_title or _title_from_obj(parsed_result)))
+            ct = str(parsed_result.get("content_type") or "")
+            body = parsed_result.get("body")
+            body_s = body if isinstance(body, str) else ""
+            # HTML pages: primary URL only (arg + final). Scraping hrefs floods the cap.
+            if _looks_like_html(ct, body_s):
+                return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
+            # RSS/Atom: item links, not every URL in the XML prologue.
+            # SERP feeds (Bing/Google search RSS) are full of unrelated junk — keep
+            # primary only so they don't fill the 20-slot list before real pages.
+            if _looks_like_feed(ct, body_s):
+                primary_noisy = any(_is_noisy_citation_url(u) for u, _ in found)
+                if not primary_noisy:
+                    found.extend(_urls_from_feed(body_s))
+                return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
+            # Structured JSON result (search APIs): walk url/link fields; skip raw HTML body.
+            meta = {k: v for k, v in parsed_result.items() if k != "body"}
+            found.extend(_urls_from_obj(meta))
+            if body_s and (body_s.lstrip().startswith("{") or body_s.lstrip().startswith("[")):
+                try:
+                    found.extend(_urls_from_obj(json.loads(body_s)))
+                except json.JSONDecodeError:
+                    pass
+        elif isinstance(parsed_result, (list, dict)):
+            found.extend(_urls_from_obj(parsed_result))
+        elif isinstance(parsed_result, str) and not _looks_like_html("", parsed_result):
+            if _looks_like_feed("", parsed_result):
+                found.extend(_urls_from_feed(parsed_result))
+            else:
+                found.extend(_urls_from_obj(parsed_result))
 
     return merge_sources([], [{"url": u, "title": t} for u, t in found if u])
 
@@ -218,7 +318,11 @@ def merge_sources(
     *,
     limit: int = 20,
 ) -> list[dict[str, str]]:
-    """Deduplicate by normalized URL; keep first title; cap length."""
+    """Deduplicate by normalized URL; keep first title; cap length.
+
+    When at capacity, a non-noisy URL may replace an earlier noisy slot so HTML/SERP
+    chrome does not permanently block real pages fetched later in the run.
+    """
     out: list[dict[str, str]] = []
     seen: set[str] = set()
     for src in list(existing or []) + list(new or []):
@@ -229,9 +333,6 @@ def merge_sources(
             continue
         key = normalize_url(url)
         if key in seen:
-            # Fill missing title on earlier entry.
-            if not out:
-                continue
             for prev in out:
                 if normalize_url(prev["url"]) == key and not prev.get("title"):
                     title = str(src.get("title") or "").strip()[:200]
@@ -239,14 +340,26 @@ def merge_sources(
                         prev["title"] = title
                     break
             continue
-        seen.add(key)
         item: dict[str, str] = {"url": url}
         title = str(src.get("title") or "").strip()[:200]
         if title:
             item["title"] = title
-        out.append(item)
         if len(out) >= limit:
-            break
+            if _is_noisy_citation_url(url):
+                continue
+            replaced = False
+            for i, prev in enumerate(out):
+                if _is_noisy_citation_url(prev["url"]):
+                    seen.discard(normalize_url(prev["url"]))
+                    out[i] = item
+                    seen.add(key)
+                    replaced = True
+                    break
+            if not replaced:
+                continue
+            continue
+        seen.add(key)
+        out.append(item)
     return out
 
 
@@ -407,16 +520,47 @@ _FALLBACK_HOST_BLOCK = frozenset(
     {
         "duckduckgo.com",
         "lite.duckduckgo.com",
+        "html.duckduckgo.com",
         "google.com",
-        "www.google.com",
         "bing.com",
-        "www.bing.com",
+        "cn.bing.com",
+        "so.com",
+        "sogou.com",
+        "baidu.com",
+        "mojeek.com",
+        "purl.org",
+        "w3.org",
+        "xmlns.com",
+        "schemas.live.com",
+        "microsoft.com",
+        "googletagmanager.com",
+        "google-analytics.com",
+        "doubleclick.net",
+        "wpa.qq.com",
+        "beian.miit.gov.cn",
     }
+)
+
+_FALLBACK_HOST_SUFFIXES = (
+    ".bing.com",
+    ".duckduckgo.com",
+    ".google.com",
+    ".baidu.com",
+    ".sogou.com",
+    ".microsoft.com",
+    ".live.com",
+    ".w3.org",
+    ".360tres.com",
+    ".bdstatic.com",
+    ".googleusercontent.com",
+    ".gstatic.com",
+    ".ytimg.com",
+    ".ggpht.com",
 )
 
 
 def _is_noisy_citation_url(url: str) -> bool:
-    """API / RSS / search / xmlns junk — exclude from paraphrase fallback footer."""
+    """API / RSS / search / xmlns / SERP chrome — exclude from paraphrase fallback footer."""
     try:
         p = urlparse(url)
     except Exception:  # noqa: BLE001
@@ -428,7 +572,7 @@ def _is_noisy_citation_url(url: str) -> bool:
         return True
     if host.startswith("api.") or host.startswith("search."):
         return True
-    if host in ("purl.org", "w3.org", "xmlns.com") or host.endswith(".w3.org"):
+    if any(host.endswith(suf) for suf in _FALLBACK_HOST_SUFFIXES):
         return True
     path = (p.path or "").lower()
     if "/api/" in path or path.startswith("/api"):
@@ -437,7 +581,20 @@ def _is_noisy_citation_url(url: str) -> bool:
         return True
     if "outboundfeeds" in path:
         return True
+    # Fetch plumbing — fine as tool targets, poor as user-facing cites.
+    base = path.rstrip("/")
+    if base in ("/robots.txt", "/favicon.ico") or base.endswith("/robots.txt"):
+        return True
+    if "sitemap" in base and (base.endswith(".xml") or base.endswith(".txt") or base.endswith("/sitemap")):
+        return True
+    # Search engine result pages (even on hosts not in the block list).
+    if path.rstrip("/") in ("/search", "/web", "/s", "/html", "/lite") or path.startswith("/search"):
+        q = (p.query or "").lower()
+        if any(k in q for k in ("q=", "query=", "wd=", "p=")):
+            return True
     q = (p.query or "").lower()
+    if "format=rss" in q:
+        return True
     if "format=json" in q and ("/q/" in path or "/charts/" in path):
         return True
     return False
@@ -469,11 +626,28 @@ def _host_soft_match(source_host: str, mentioned: set[str]) -> bool:
     return False
 
 
+def _answer_mentions_host_label(answer_l: str, source_host: str) -> bool:
+    """Match brand-like first label (thingjs.com ← "ThingJS 站") without requiring a bare domain."""
+    label = (source_host or "").split(".", 1)[0].strip().lower()
+    if len(label) < 5 or not label.isalnum():
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])", answer_l) is not None
+
+
 def _answer_mentions_title(answer_l: str, title: str) -> bool:
     t = (title or "").strip().lower()
     if len(t) < 6:
         return False
     return t in answer_l
+
+
+def _source_soft_hit(url: str, title: str, answer_l: str, mentioned_hosts: set[str]) -> bool:
+    host = _source_host(url)
+    return (
+        _host_soft_match(host, mentioned_hosts)
+        or _answer_mentions_host_label(answer_l, host)
+        or _answer_mentions_title(answer_l, title)
+    )
 
 
 def _fallback_retrieval_sources(
@@ -574,7 +748,7 @@ def filter_sources_cited(
             title = str(src.get("title") or "")
             if _is_noisy_citation_url(url):
                 continue
-            if _host_soft_match(host, mentioned_hosts) or _answer_mentions_title(answer_l, title):
+            if _source_soft_hit(url, title, answer_l, mentioned_hosts):
                 _append(src, url)
                 if len(out) >= limit:
                     return out
@@ -587,23 +761,25 @@ def filter_sources_cited(
     if (answer_text or "").strip() and not cited_keys:
         soft: list[dict[str, str]] = []
         soft_seen: set[str] = set()
+        soft_hosts: set[str] = set()
         for src in sources:
             if not isinstance(src, dict):
                 continue
             url = _clean_url(str(src.get("url") or ""))
             if not url or _is_noisy_citation_url(url):
                 continue
-            host = _source_host(url)
             title = str(src.get("title") or "")
-            if not (
-                _host_soft_match(host, mentioned_hosts)
-                or _answer_mentions_title(answer_l, title)
-            ):
+            if not _source_soft_hit(url, title, answer_l, mentioned_hosts):
+                continue
+            host = _source_host(url)
+            if host in soft_hosts:
                 continue
             nkey = normalize_url(url)
             if nkey in soft_seen:
                 continue
             soft_seen.add(nkey)
+            if host:
+                soft_hosts.add(host)
             item: dict[str, str] = {"url": url}
             if title.strip():
                 item["title"] = title.strip()[:200]
@@ -614,3 +790,91 @@ def filter_sources_cited(
             return soft[:fb_limit]
         return _fallback_retrieval_sources(sources, limit=fb_limit)
     return []
+
+
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`]+`")
+_EXISTING_CITE_RE = re.compile(r"\[(\d+)\]")
+
+
+def _mask_code_spans(text: str) -> str:
+    """Replace fenced/inline code with spaces so host/title search skips them."""
+    masked = text
+
+    def _blank(m: re.Match[str]) -> str:
+        return " " * len(m.group(0))
+
+    masked = _CODE_FENCE_RE.sub(_blank, masked)
+    masked = _INLINE_CODE_RE.sub(_blank, masked)
+    return masked
+
+
+def inject_citation_markers(
+    answer: str | None,
+    sources: list[dict[str, str]] | None,
+) -> str:
+    """Insert [1][2]… after the first host/title mention for each footer source.
+
+    Idempotent when markers already exist. Does not invent markers when the answer
+    never names the source (footer alone still lists them).
+    """
+    text = str(answer or "")
+    if not text.strip() or not sources:
+        return text
+    existing = {int(m.group(1)) for m in _EXISTING_CITE_RE.finditer(text) if m.group(1).isdigit()}
+    for i, src in enumerate(sources):
+        if not isinstance(src, dict):
+            continue
+        n = i + 1
+        if n in existing:
+            continue
+        marker = f"[{n}]"
+        if marker in text:
+            continue
+        url = _clean_url(str(src.get("url") or ""))
+        if not url:
+            continue
+        host = _source_host(url)
+        title = str(src.get("title") or "").strip()
+        masked = _mask_code_spans(text)
+        insert_at: int | None = None
+        if host:
+            # Match bare host, www.host, or a parent domain the answer named
+            # (dt.uino.com ← "uino.com" / "www.uino.com").
+            host_candidates = [host]
+            parts = host.split(".")
+            if len(parts) >= 2:
+                parent = ".".join(parts[-2:])
+                if parent != host:
+                    host_candidates.append(parent)
+            for hc in host_candidates:
+                pat = re.compile(
+                    rf"(?i)(?:https?://)?(?:www\.)?{re.escape(hc)}\b"
+                )
+                m = pat.search(masked)
+                if m:
+                    insert_at = m.end()
+                    break
+            if insert_at is None:
+                label = host.split(".", 1)[0]
+                if len(label) >= 5 and label.isalnum():
+                    lm = re.search(
+                        rf"(?i)(?<![a-z0-9]){re.escape(label)}(?![a-z0-9])",
+                        masked,
+                    )
+                    if lm:
+                        insert_at = lm.end()
+        if insert_at is None and len(title) >= 6:
+            idx = masked.lower().find(title.lower())
+            if idx >= 0:
+                insert_at = idx + len(title)
+        if insert_at is None:
+            continue
+        # If a citation marker already sits right after the match, skip.
+        after = text[insert_at : insert_at + 8].lstrip()
+        if after.startswith("["):
+            continue
+        text = text[:insert_at] + marker + text[insert_at:]
+        existing.add(n)
+        # Remask after mutation for subsequent searches.
+    return text

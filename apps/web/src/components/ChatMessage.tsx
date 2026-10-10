@@ -429,8 +429,12 @@ export function ChatMessage({
             content={visible}
             streaming={message.streaming}
             agentId={speakerId}
+            messageId={message.id}
+            sources={message.sources}
           />
-          {!message.streaming ? <MessageSourcesFooter sources={message.sources} /> : null}
+          {!message.streaming ? (
+            <MessageSourcesFooter sources={message.sources} messageId={message.id} />
+          ) : null}
         </div>
         {desktopBar}
       </div>

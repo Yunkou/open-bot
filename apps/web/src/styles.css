@@ -957,27 +957,39 @@ button {
   padding-top: 8px;
   border-top: 1px solid var(--border);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.5;
   color: var(--muted);
 }
 .msg-sources-label {
   font-weight: 500;
-  margin-right: 6px;
+  margin-bottom: 4px;
   color: var(--muted);
 }
 .msg-sources-list {
-  display: inline;
   list-style: none;
   margin: 0;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .msg-sources-item {
-  display: inline;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  scroll-margin-top: 80px;
 }
-.msg-sources-item + .msg-sources-item::before {
-  content: " · ";
-  color: var(--muted);
-  margin: 0 2px;
+.msg-sources-item.msg-sources-flash,
+.msg-sources-item:target {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 14%, transparent);
+  border-radius: 4px;
+  outline: 1px solid color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent);
+}
+.msg-sources-num {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent, #3b82f6);
+  font-weight: 500;
 }
 .msg-sources-link {
   color: var(--accent, #3b82f6);
@@ -985,6 +997,19 @@ button {
   word-break: break-all;
 }
 .msg-sources-link:hover {
+  text-decoration: underline;
+}
+.md-cite {
+  color: var(--accent, #3b82f6);
+  font-size: 0.85em;
+  font-weight: 600;
+  text-decoration: none;
+  vertical-align: super;
+  line-height: 0;
+  margin-left: 1px;
+  cursor: pointer;
+}
+.md-cite:hover {
   text-decoration: underline;
 }
 

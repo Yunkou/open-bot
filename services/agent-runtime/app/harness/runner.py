@@ -39,7 +39,7 @@ from .sse import (
 )
 from .state import initial_state
 from . import tracing
-from ..citation_sources import filter_sources_cited
+from ..citation_sources import filter_sources_cited, inject_citation_markers
 
 logger = logging.getLogger("open-bot.harness.runner")
 
@@ -245,6 +245,8 @@ async def run_durable_events(
                 meta_vals.get("citations") or meta_vals.get("structured_citations")
             ),
         )
+        if sources:
+            final_text = inject_citation_markers(final_text, sources)
         if used or sources:
             payload: dict[str, Any] = {}
             if used:
