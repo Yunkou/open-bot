@@ -2012,6 +2012,10 @@ export default function App() {
       if (!opts?.localOnly) {
         runsRef.current.delete(convId);
         bumpRunBusy();
+      } else {
+        // Refresh busy tick so viewingRunActive/chatProcessing re-render while
+        // the map entry is retained (pairs with d6c4fcf processing indicator).
+        bumpRunBusy();
       }
     }
     sealStreamingMessagesForConv(convId);
@@ -2085,17 +2089,17 @@ export default function App() {
 
     const isRunCurrent = () => {
       const run = runsRef.current.get(conv.id);
-      return Boolean(run && run.generation === gen);
+      return Boolean(run && run.generation === gen && run.abort === ac);
     };
     const isViewingStream = () => conversationRef.current?.id === conv.id;
     const setRunLabelForStream = (label: string) => {
       const run = runsRef.current.get(conv.id);
-      if (run && run.generation === gen) run.runLabel = label;
+      if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
       if (isViewingStream()) setRunLabel(label);
     };
     const ensureStreamingBubble = (agentId?: string, agentName?: string) => {
       const run = runsRef.current.get(conv.id);
-      if (!run || run.generation !== gen) return;
+      if (!run || run.generation !== gen || run.abort !== ac) return;
       if (!run.assistantIdsByAgent) run.assistantIdsByAgent = {};
       if (agentId && run.assistantIdsByAgent[agentId]) {
         const id = run.assistantIdsByAgent[agentId];
@@ -2462,6 +2466,15 @@ export default function App() {
         localOnly: true,
         conversationId: viewedId,
       });
+    } else if (
+      sending ||
+      taskBusy ||
+      (viewedId ? taskConvIdsRef.current.has(viewedId) : false)
+    ) {
+      // Durable still busy but client map empty (SSE drop / finally raced): force
+      // when_busy=replace so the API aborts the old harness instead of inbox-queue
+      // (inbox → done with no tokens → empty bubble → looks like never replied).
+      supersededBusy = true;
     }
 
     // DM: @其他 Bot → 切到对方主线程再发；原会话留下转交记录，并把近期上下文带给对方。
@@ -2688,12 +2701,14 @@ export default function App() {
       bumpRunBusy();
       const isRunCurrent = () => {
         const run = runsRef.current.get(streamConvId!);
-        return Boolean(run && run.generation === gen);
+        // Match abort too (same as finally) so a superseded slot that somehow
+        // kept the same generation cannot steal tokens from the replacement.
+        return Boolean(run && run.generation === gen && run.abort === ac);
       };
       const isViewingStream = () => conversationRef.current?.id === streamConvId;
       const setRunLabelForStream = (label: string) => {
         const run = runsRef.current.get(streamConvId!);
-        if (run && run.generation === gen) run.runLabel = label;
+        if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
         if (isViewingStream()) setRunLabel(label);
       };
       await sendMessageStream(
@@ -2891,11 +2906,16 @@ export default function App() {
               doneFailed && typeof data?.error === "string"
                 ? `（失败）${(data.error as string).trim()}`
                 : "";
+            const inboxQueued = Boolean(data?.inbox);
             // Parallel group: seal every streaming bubble; drop PASS silence
             // (keep empty streaming bubble when doneFailed so failure text can show).
+            // Inbox queue: drop empty placeholders — no tokens will arrive on this SSE.
             patchConvMessages(streamConvId!, (prev) =>
               prev
                 .filter((m) => {
+                  if (inboxQueued && m.role === "assistant" && !(m.content || "").trim() && (m.streaming || m.id === assistantId)) {
+                    return false;
+                  }
                   if (!(m.streaming && isGroupPassContent(m.content || ""))) return true;
                   return Boolean(doneFailed);
                 })

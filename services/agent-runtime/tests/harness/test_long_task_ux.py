@@ -571,3 +571,42 @@ def test_apply_after_interrupt_hint_appends_soft_copy() -> None:
     assert AFTER_INTERRUPT_HINT in s
     assert AFTER_INTERRUPT_HINT in d
     assert "禁止套话" in s
+
+
+def test_continue_nudge_after_interrupt_brief_plan() -> None:
+    from app.harness.long_task import CONTINUE_AFTER_INTERRUPT, continue_nudge
+
+    nudge = continue_nudge(
+        [],
+        [{"role": "user", "content": "主要是协议，概念等"}],
+        already_continued=False,
+        after_interrupt=True,
+        final_text="我按「先建概念，再读规范，再落到实现」的顺序，把资料分成几块给你。",
+    )
+    assert nudge == CONTINUE_AFTER_INTERRUPT
+
+
+def test_continue_nudge_after_interrupt_skips_when_tools_used() -> None:
+    from app.harness.long_task import continue_nudge
+
+    nudge = continue_nudge(
+        ["http_fetch"],
+        [{"role": "user", "content": "主要是协议"}],
+        already_continued=False,
+        after_interrupt=True,
+        final_text="先读 RFC。",
+    )
+    assert nudge is None
+
+
+def test_continue_nudge_after_interrupt_skips_when_already_continued() -> None:
+    from app.harness.long_task import continue_nudge
+
+    nudge = continue_nudge(
+        [],
+        [{"role": "user", "content": "主要是协议"}],
+        already_continued=True,
+        after_interrupt=True,
+        final_text="先建概念。",
+    )
+    assert nudge is None

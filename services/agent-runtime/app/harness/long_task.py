@@ -62,18 +62,38 @@ def looks_like_delivery_work(tools_used: list[str] | None) -> bool:
     return False
 
 
+# Internal nudge when after_interrupt turn stopped after the plan sentence only.
+CONTINUE_AFTER_INTERRUPT = (
+    "上一轮已被新消息打断：刚才那句只是计划。"
+    "立刻动手完成本轮新问题（该查就查、该总结就总结），"
+    "不要再只复述计划或空安抚。"
+)
+
+
 def continue_nudge(
     tools_used: list[str] | None,
     messages: list[dict[str, Any]] | None,
     *,
     already_continued: bool,
+    after_interrupt: bool = False,
+    final_text: str = "",
 ) -> str | None:
     """One-shot internal nudge when the model stopped too early."""
     if already_continued:
         return None
     if turn_unfinished(tools_used, messages):
         return CONTINUE_WORK
-    return host_followup_prompt(tools_used, messages)
+    host = host_followup_prompt(tools_used, messages)
+    if host:
+        return host
+    # Replace interrupt: model often emits only the soft plan sentence then
+    # finishes (seen in prod: one-liner + tools_used=[]). Nudge once to actually
+    # continue the NEW ask so the user gets a real reply, not a silent/idle UI.
+    if after_interrupt:
+        brief = (final_text or "").strip()
+        if brief and len(brief) <= 240 and not (tools_used or []):
+            return CONTINUE_AFTER_INTERRUPT
+    return None
 
 
 # Soft cap for projected first bubble when the model preamble is long.

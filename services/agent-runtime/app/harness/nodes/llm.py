@@ -303,7 +303,15 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         already = bool(state.get("work_continued"))
         # Build provisional history including this assistant text for unfinished checks.
         probe_msgs = list(msgs) + [{"role": "assistant", "content": final or content or ""}]
-        nudge = continue_nudge(used, probe_msgs, already_continued=already)
+        body = cfg.get("body")
+        after_interrupt = bool(body is not None and getattr(body, "after_interrupt", False))
+        nudge = continue_nudge(
+            used,
+            probe_msgs,
+            already_continued=already,
+            after_interrupt=after_interrupt,
+            final_text=final or "",
+        )
         if nudge:
             if on_status is not None:
                 label = (
