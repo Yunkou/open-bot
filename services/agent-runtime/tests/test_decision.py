@@ -1,4 +1,4 @@
-"""Decision adapter: disabled by default; Jev and Laya share one result shape."""
+"""Decision adapter: disabled by default; Jev / Laya / Unsloth share one result shape."""
 
 from __future__ import annotations
 
@@ -121,3 +121,65 @@ def test_jev_requires_api_key() -> None:
         assert "API key" in str(exc)
     else:
         raise AssertionError("expected DecisionError")
+
+def test_unsloth_defaults_to_local_decision_api() -> None:
+    client = build_client(DecisionSettings(provider="unsloth", api_key="", model=""))
+    assert isinstance(client, SystemOneHTTPClient)
+    assert client.provider == "unsloth"
+    assert client.base_url == "http://localhost:8888"
+    assert client.model == "laya"
+
+
+def test_unsloth_posts_systemone_without_requiring_key() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(
+            200,
+            json={
+                "model": "laya-multilingual",
+                "answers": {"ok": {"type": "noul", "noul": 0.88}},
+                "usage": {"input_tokens": 12, "output_tokens": 0},
+            },
+        )
+
+    client = SystemOneHTTPClient(
+        "unsloth",
+        "http://localhost:8888",
+        "",
+        "laya",
+        transport=httpx.MockTransport(handler),
+    )
+    result = client.decide("hello", {"ok": {"type": "noul", "instructions": "Is this non-empty?"}})
+    assert result.provider == "unsloth"
+    assert result.model == "laya-multilingual"
+    assert result.answers["ok"]["noul"] == 0.88
+    assert captured["url"] == "http://localhost:8888/v1/systemone"
+    assert captured["auth"] is None
+
+
+def test_unsloth_sends_bearer_when_key_set() -> None:
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(
+            200,
+            json={"model": "laya", "answers": {"ok": {"type": "noul", "noul": 0.5}}},
+        )
+
+    client = build_client(
+        DecisionSettings(
+            provider="unsloth",
+            base_url="http://127.0.0.1:8888",
+            api_key="sk-unsloth-test",
+            model="jev-latest",
+        )
+    )
+    assert isinstance(client, SystemOneHTTPClient)
+    client._transport = httpx.MockTransport(handler)
+    client.decide("x", {"ok": {"type": "noul", "instructions": "yes?"}})
+    assert captured["auth"] == "Bearer sk-unsloth-test"
+

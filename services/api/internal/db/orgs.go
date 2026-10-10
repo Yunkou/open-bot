@@ -142,7 +142,7 @@ type OrgUsage struct {
 
 func NormalizeDecisionProvider(provider string) string {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "jev", "laya":
+	case "jev", "laya", "unsloth":
 		return strings.ToLower(strings.TrimSpace(provider))
 	default:
 		return "off"
@@ -151,6 +151,7 @@ func NormalizeDecisionProvider(provider string) string {
 
 // ApplyDecisionDefaults fills vendor defaults only for an enabled provider.
 // An empty base URL on Laya means in-process weights, so it stays empty.
+// Unsloth defaults to the local Decision API (localhost:8888) with model laya.
 func ApplyDecisionDefaults(provider, baseURL, model string) (string, string, string) {
 	provider = NormalizeDecisionProvider(provider)
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
@@ -161,6 +162,14 @@ func ApplyDecisionDefaults(provider, baseURL, model string) (string, string, str
 		}
 		if model == "" {
 			model = "jev-latest"
+		}
+	}
+	if provider == "unsloth" {
+		if baseURL == "" {
+			baseURL = "http://localhost:8888"
+		}
+		if model == "" {
+			model = "laya"
 		}
 	}
 	if provider == "laya" && model == "" {

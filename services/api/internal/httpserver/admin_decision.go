@@ -127,7 +127,7 @@ func (s *Server) handleAdminTestDecision(w http.ResponseWriter, r *http.Request)
 }
 
 // decisionRuntimePayload is nil when the org has the decision layer off.
-// The runtime then keeps the disabled client and does not call Jev or Laya.
+// The runtime then keeps the disabled client and does not call Jev, Laya, or Unsloth.
 func (s *Server) decisionRuntimePayload(userID string) map[string]any {
 	userID = strings.TrimSpace(userID)
 	if userID == "" || s.db == nil {

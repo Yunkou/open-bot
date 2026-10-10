@@ -6,7 +6,13 @@ import logging
 from contextvars import ContextVar, Token
 from typing import Any
 
-from .http_client import JEV_DEFAULT_BASE, JEV_DEFAULT_MODEL, SystemOneHTTPClient
+from .http_client import (
+    JEV_DEFAULT_BASE,
+    JEV_DEFAULT_MODEL,
+    UNSLOTH_DEFAULT_BASE,
+    UNSLOTH_DEFAULT_MODEL,
+    SystemOneHTTPClient,
+)
 from .laya_local import LAYA_DEFAULT_MODEL, LayaLocalClient
 from .protocol import DecisionDisabled, DecisionError, DecisionResult, DecisionSettings, normalize_provider
 
@@ -41,14 +47,23 @@ def build_client(settings: DecisionSettings | None):
             api_key,
             model or JEV_DEFAULT_MODEL,
         )
-    if base_url:
+    if provider == "unsloth":
         return SystemOneHTTPClient(
-            "laya",
-            base_url,
+            "unsloth",
+            base_url or UNSLOTH_DEFAULT_BASE,
             api_key,
-            model or LAYA_DEFAULT_MODEL,
+            model or UNSLOTH_DEFAULT_MODEL,
         )
-    return LayaLocalClient(model or LAYA_DEFAULT_MODEL)
+    if provider == "laya":
+        if base_url:
+            return SystemOneHTTPClient(
+                "laya",
+                base_url,
+                api_key,
+                model or LAYA_DEFAULT_MODEL,
+            )
+        return LayaLocalClient(model or LAYA_DEFAULT_MODEL)
+    return _disabled
 
 
 def bind_decision(settings: DecisionSettings | None) -> Token:

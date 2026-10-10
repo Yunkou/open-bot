@@ -1,4 +1,4 @@
-"""HTTP System One client shared by hosted Jev and a remote Laya adapter."""
+"""HTTP System One client shared by hosted Jev, remote Laya, and Unsloth."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from .protocol import DecisionError, DecisionResult, normalize_questions, parse_
 
 JEV_DEFAULT_BASE = "https://api.typesafe.ai"
 JEV_DEFAULT_MODEL = "jev-latest"
+UNSLOTH_DEFAULT_BASE = "http://localhost:8888"
+UNSLOTH_DEFAULT_MODEL = "laya"
 
 
 class SystemOneHTTPClient:
