@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sort"
@@ -428,12 +429,15 @@ func orgAutoPickEnabled(flagsJSON string) bool {
 }
 
 // runAutoPickByMode applies channel/org auto_pick mode for a no-@ turn.
-// decision (B-tier) is not implemented yet: fail-open to heuristic (not lead-only) + log note.
-func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) groupAutoPickResult {
+// decision (B-tier): org SystemOne choice → agent_ids; on parse/timeout/empty/low-conf/off
+// fail-open to heuristic (product lock — not lead-only), then heuristic's own lead/all rules.
+func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {
 	mode = db.NormalizeAutoPickMode(mode)
 	switch mode {
 	case db.AutoPickDecision:
-		log.Printf("auto_pick=decision note=unimplemented_failopen_heuristic")
+		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {
+			return pick
+		}
 		pick := autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
 		if pick.Method == "heuristic" {
 			pick.Method = "decision->heuristic"

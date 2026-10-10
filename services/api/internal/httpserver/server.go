@@ -2082,7 +2082,11 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 		// Exclude the user message just saved if present as last; still useful as soft signal.
 		synopsis = recentMessagesSynopsis(msgs, 2)
 	}
-	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis)
+	var decisionDeps *autoPickDecisionDeps
+	if mode == db.AutoPickDecision {
+		decisionDeps = s.decisionDepsForUser(uid)
+	}
+	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis, decisionDeps)
 	plan.AutoPick = &pick
 	plan.Targets = pick.AgentIDs
 	if len(plan.Targets) == 0 {

@@ -266,20 +266,34 @@ class DecisionTestRequest(DecisionSettings):
     questions: dict[str, Any] | None = None
 
 
-@app.post("/v1/decision/test")
-def decision_test(body: DecisionTestRequest) -> dict:
-    """Probe the org's decision provider without touching the chat loop."""
+def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
+    """Shared path for admin probe and group Auto-pick (SystemOne factory)."""
     client = build_client(body)
     if not client.enabled:
         return {"enabled": False, "provider": "off", "answers": {}}
-    questions = body.questions or {
-        "ok": {"type": "noul", "instructions": "Is the state non-empty?"}
-    }
+    questions = body.questions
+    if not questions:
+        if default_probe:
+            questions = {"ok": {"type": "noul", "instructions": "Is the state non-empty?"}}
+        else:
+            raise HTTPException(status_code=400, detail="questions 不能为空")
     try:
         result = client.decide(body.state, questions)
     except DecisionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result.to_dict()
+
+
+@app.post("/v1/decision/test")
+def decision_test(body: DecisionTestRequest) -> dict:
+    """Probe the org's decision provider without touching the chat loop."""
+    return _run_decision(body, default_probe=True)
+
+
+@app.post("/v1/decision/decide")
+def decision_decide(body: DecisionTestRequest) -> dict:
+    """Run one SystemOne decision (Jev / Laya / Unsloth) for callers like group Auto-pick."""
+    return _run_decision(body, default_probe=False)
 
 @app.get("/v1/mcp/example")
 async def mcp_example() -> dict:

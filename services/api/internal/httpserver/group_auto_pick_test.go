@@ -1,6 +1,8 @@
 package httpserver
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -120,9 +122,9 @@ func TestOrgAutoPickModeDefaultHeuristic(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickByModeDecisionFailOpenHeuristic(t *testing.T) {
+func TestRunAutoPickByModeDecisionNilDepsFailOpenHeuristic(t *testing.T) {
 	members, agents := testGroupAgents()
-	got := runAutoPickByMode(db.AutoPickDecision, "帮我写个函数", members, agents, "lead", 1, "")
+	got := runAutoPickByMode(db.AutoPickDecision, "帮我写个函数", members, agents, "lead", 1, "", nil)
 	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
 		t.Fatalf("decision should fail-open to heuristic pick, got %#v", got.AgentIDs)
 	}
@@ -211,3 +213,146 @@ func TestParseAutoPickModeMigration(t *testing.T) {
 	}
 }
 
+func TestAutoPickDecisionChoiceMapsToCoder(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick, _ := questions["pick"].(map[string]any)
+			crit, _ := pick["criteria"].(map[string]string)
+			if crit == nil {
+				// JSON round-trip may use map[string]any
+				if raw, ok := pick["criteria"].(map[string]any); ok {
+					crit = map[string]string{}
+					for k, v := range raw {
+						crit[k] = fmt.Sprint(v)
+					}
+				}
+			}
+			if len(crit) != 3 {
+				t.Fatalf("want 3 criteria, got %#v", pick["criteria"])
+			}
+			// coder is members[1] → m1
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m1",
+					"confidence": 0.82,
+					"probabilities": map[string]any{
+						"m0": 0.1, "m1": 0.82, "m2": 0.08,
+					},
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "帮我写个函数", members, agents, "lead", 1, "", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision", got.Method)
+	}
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+		t.Fatalf("want coder, got %#v", got.AgentIDs)
+	}
+	if got.Confidence < autoPickConfidenceFloor {
+		t.Fatalf("conf=%.2f", got.Confidence)
+	}
+	if got.Fallback != "" {
+		t.Fatalf("fallback=%s", got.Fallback)
+	}
+}
+
+func TestAutoPickDecisionKFromProbabilities(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "jev",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m1",
+					"probabilities": map[string]any{
+						"m0": 0.05, "m1": 0.7, "m2": 0.55,
+					},
+					"confidence": 0.7,
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "写代码顺便润色文案", members, agents, "lead", 2, "", deps)
+	if got.Method != "decision" || len(got.AgentIDs) != 2 {
+		t.Fatalf("got %#v", got)
+	}
+	if got.AgentIDs[0] != "coder" || got.AgentIDs[1] != "writer" {
+		t.Fatalf("order want coder,writer got %#v", got.AgentIDs)
+	}
+}
+
+func TestAutoPickDecisionErrorsFailOpenHeuristic(t *testing.T) {
+	members, agents := testGroupAgents()
+	cases := []struct {
+		name string
+		deps *autoPickDecisionDeps
+	}{
+		{"provider_off", &autoPickDecisionDeps{Provider: "off", Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			t.Fatal("should not call")
+			return nil, nil
+		}}},
+		{"timeout_err", &autoPickDecisionDeps{Provider: "unsloth", Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return nil, context.DeadlineExceeded
+		}}},
+		{"empty_answers", &autoPickDecisionDeps{Provider: "unsloth", Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{}, nil
+		}}},
+		{"bad_choice_key", &autoPickDecisionDeps{Provider: "unsloth", Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{"pick": map[string]any{"choice": "coder", "confidence": 0.9}}, nil
+		}}},
+		{"low_conf", &autoPickDecisionDeps{Provider: "unsloth", Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{"pick": map[string]any{"choice": "m1", "confidence": 0.2}}, nil
+		}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := runAutoPickByMode(db.AutoPickDecision, "帮我写个函数", members, agents, "lead", 1, "", c.deps)
+			if got.Method != "decision->heuristic" {
+				t.Fatalf("method=%s", got.Method)
+			}
+			if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+				t.Fatalf("should still heuristic-pick coder, got %#v", got.AgentIDs)
+			}
+		})
+	}
+}
+
+func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
+	members, agents := testGroupAgents()
+	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API")
+	if keyToID["m0"] != "lead" || keyToID["m1"] != "coder" || keyToID["m2"] != "writer" {
+		t.Fatalf("keyToID=%#v", keyToID)
+	}
+	pick := questions["pick"].(map[string]any)
+	if pick["type"] != "choice" {
+		t.Fatal("want choice")
+	}
+	crit := pick["criteria"].(map[string]string)
+	if !strings.Contains(crit["m1"], "码农") {
+		t.Fatalf("criteria=%#v", crit)
+	}
+	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
+		t.Fatalf("state=%q", state)
+	}
+	// Must not put raw agent ids as criteria keys
+	for k := range crit {
+		if k == "coder" || k == "lead" || k == "writer" {
+			t.Fatalf("leaked agent id as key: %s", k)
+		}
+	}
+}
+
+func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
+	keyToID := map[string]string{"m0": "lead", "m1": "coder"}
+	_, _, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{"choice": "coder", "confidence": 0.9},
+	}, keyToID, 1)
+	if ok {
+		t.Fatal("must reject raw agent id echo")
+	}
+}
