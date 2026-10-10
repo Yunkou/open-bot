@@ -45,6 +45,24 @@ _RETRIEVAL_SUBSTR = (
     "xurl",
 )
 
+# Shell tools often curl/wget pages; treat as retrieval when URLs appear in cmd/stdout.
+_SHELL_RETRIEVAL = frozenset(
+    {
+        "sandbox_shell",
+        "host_shell",
+        "shell",
+        "bash",
+        "run_shell",
+        "exec_shell",
+    }
+)
+_SHELL_URL_LINE_RE = re.compile(
+    r"(?im)^(?:URL|url|链接|地址)\s*[:=]\s*(https?://\S+)"
+)
+_CURL_URL_RE = re.compile(
+    r'(?i)(?:curl|wget)\b[^\n"\']*?(https?://[^\s"\'\\]+)'
+)
+
 
 def is_http_url(value: str) -> bool:
     """Public http(s) URL suitable for a user-facing citation link."""
@@ -151,7 +169,9 @@ def _is_retrieval_tool(name: str) -> bool:
     n = (name or "").strip().lower()
     if not n:
         return False
-    if n in _RETRIEVAL_EXACT:
+    if n in _RETRIEVAL_EXACT or n in _SHELL_RETRIEVAL:
+        return True
+    if n.endswith("_shell") and "shell" in n:
         return True
     if n.startswith("mcp__"):
         # MCP search / browse / fetch connectors often return URLs.
@@ -221,6 +241,76 @@ def _urls_from_feed(body: str) -> list[tuple[str, str]]:
     return out
 
 
+
+def _extract_shell_citation_urls(
+    args: dict[str, Any],
+    result: Any,
+) -> list[tuple[str, str]]:
+    """Primary page URLs from sandbox/host shell curl/wget (not every HTML href)."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(raw: str, title: str = "") -> None:
+        u = _clean_url(raw)
+        if not u or _is_noisy_citation_url(u):
+            return
+        key = normalize_url(u)
+        if key in seen:
+            return
+        seen.add(key)
+        found.append((u, title))
+
+    cmd = ""
+    for key in ("cmd", "command", "script", "code"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            cmd = v
+            break
+    if cmd:
+        for m in _URL_RE.findall(cmd):
+            # Prefer URLs that look like curl/wget targets; still accept bare https in cmd.
+            _add(m)
+        for m in _CURL_URL_RE.finditer(cmd):
+            _add(m.group(1))
+
+    body = ""
+    if isinstance(result, dict):
+        for key in ("stdout", "output", "body", "content"):
+            v = result.get(key)
+            if isinstance(v, str) and v.strip():
+                body = v
+                break
+        if not body and isinstance(result.get("content"), str):
+            body = str(result.get("content") or "")
+    elif isinstance(result, str):
+        text = result.strip()
+        if text.startswith("{"):
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError:
+                try:
+                    obj = json.loads(text, strict=False)
+                except json.JSONDecodeError:
+                    obj = None
+            if isinstance(obj, dict):
+                for key in ("stdout", "output", "body", "content"):
+                    v = obj.get(key)
+                    if isinstance(v, str) and v.strip():
+                        body = v
+                        break
+            else:
+                body = text
+        else:
+            body = text
+
+    if body:
+        for m in _SHELL_URL_LINE_RE.finditer(body):
+            _add(m.group(1))
+        # Do not scrape every href out of HTML dumped to stdout — that floods
+        # the 20-slot list. Cmd curl/wget targets + explicit "URL:" lines only.
+    return found[:12]
+
+
 def extract_from_tool(
     name: str,
     args: dict[str, Any] | None,
@@ -235,8 +325,13 @@ def extract_from_tool(
     if not _is_retrieval_tool(name):
         return []
 
-    found: list[tuple[str, str]] = []
     args = args if isinstance(args, dict) else {}
+    nlow = (name or "").strip().lower()
+    if nlow in _SHELL_RETRIEVAL or nlow.endswith("_shell"):
+        shell_found = _extract_shell_citation_urls(args, result)
+        return merge_sources([], [{"url": u, "title": t} for u, t in shell_found if u])
+
+    found: list[tuple[str, str]] = []
     arg_title = str(args.get("title") or "").strip()[:200]
 
     # Prefer explicit arg URLs (fetch/browse).

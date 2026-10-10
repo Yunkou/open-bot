@@ -992,12 +992,20 @@ button {
   font-weight: 500;
 }
 .msg-sources-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
   color: var(--accent, #3b82f6);
   text-decoration: none;
   word-break: break-all;
+  cursor: pointer;
 }
 .msg-sources-link:hover {
   text-decoration: underline;
+}
+.msg-sources-title {
+  min-width: 0;
 }
 .md-cite {
   color: var(--accent, #3b82f6);

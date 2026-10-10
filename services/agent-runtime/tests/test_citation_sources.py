@@ -204,6 +204,34 @@ def test_merge_evicts_noisy_for_later_page() -> None:
     assert "https://www.uino.com/" in urls
 
 
+
+
+def test_sandbox_shell_extracts_curl_and_url_lines() -> None:
+    args = {
+        "cmd": (
+            'curl -s -A "Mozilla/5.0" "https://www.uino.com/about" | head -c 200; '
+            'curl -s "https://cn.bing.com/search?q=uino"'
+        )
+    }
+    result = json.dumps(
+        {
+            "exit_code": 0,
+            "stdout": (
+                "URL: https://www.lindy.ai/\n"
+                "Lindy – The AI Teammate\n"
+                '<a href="https://cdn.example.com/x.js">x</a>\n'
+            ),
+        }
+    )
+    got = extract_from_tool("sandbox_shell", args, result)
+    urls = [s["url"] for s in got]
+    assert "https://www.uino.com/about" in urls
+    assert "https://www.lindy.ai/" in urls
+    # SERP / CDN noise dropped
+    assert not any("bing.com" in u for u in urls)
+    assert not any("cdn.example.com" in u for u in urls)
+
+
 def test_inject_citation_markers_soft_host() -> None:
     sources = [
         {"url": "https://www.uino.com/", "title": "UINO"},
@@ -243,6 +271,7 @@ if __name__ == "__main__":
     test_filter_preserves_order_of_sources_not_answer()
     test_html_fetch_does_not_scrape_body_hrefs()
     test_merge_evicts_noisy_for_later_page()
+    test_sandbox_shell_extracts_curl_and_url_lines()
     test_inject_citation_markers_soft_host()
     test_filter_soft_host_label_thingjs()
     print("ok")

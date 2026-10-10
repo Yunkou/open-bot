@@ -97,26 +97,32 @@ export function citationAnchorId(messageId: string, n: number): string {
 }
 
 /**
- * Turn bare [n] markers into markdown links that jump to the footer anchor.
+ * Turn bare [n] markers into markdown links that open the source URL.
  * Skips markers inside code fences / inline code.
+ * Href is the real http(s) URL so clicks open the page; footer still has
+ * matching #cite-{msg}-{n} anchors for optional scroll/highlight.
  */
 export function linkifyCitationMarkers(
   content: string,
-  messageId: string,
+  _messageId: string,
   sources: MessageSource[] | null | undefined,
 ): string {
+  void _messageId;
   const list = normalizeMessageSources(sources);
-  if (!content || list.length === 0 || !messageId) return content;
+  if (!content || list.length === 0) return content;
   const masked = maskCodeSpans(content);
   return content.replace(/\[(\d+)\]/g, (full, num, offset) => {
     if (masked.slice(offset, offset + full.length).trim() === "") return full;
-    // Already linkified: [[n]](#cite-...)
+    // Already linkified: [[n]](url) or [[n]](#cite-...)
     if (offset > 0 && content[offset - 1] === "[" && content.slice(offset + full.length).startsWith("](")) {
       return full;
     }
     const n = Number(num);
     if (!Number.isFinite(n) || n < 1 || n > list.length) return full;
-    const href = `#${citationAnchorId(messageId, n)}`;
+    const url = (list[n - 1]?.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) return full;
+    // Escape ')' in URL for markdown link destination.
+    const href = url.replace(/[()]/g, (ch) => encodeURIComponent(ch));
     return `[[${n}]](${href})`;
   });
 }

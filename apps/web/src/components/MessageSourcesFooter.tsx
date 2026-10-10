@@ -31,10 +31,12 @@ export function MessageSourcesFooter({ sources, messageId }: Props) {
           const n = i + 1;
           const id = mid ? citationAnchorId(mid, n) : undefined;
           return (
-            <li key={s.url} id={id} className="msg-sources-item">
-              <span className="msg-sources-num" aria-hidden>
-                [{n}]
-              </span>{" "}
+            <li
+              key={s.url}
+              id={id}
+              className="msg-sources-item"
+              data-source-url={s.url}
+            >
               <a
                 className="msg-sources-link"
                 href={s.url}
@@ -42,7 +44,10 @@ export function MessageSourcesFooter({ sources, messageId }: Props) {
                 rel="noopener noreferrer"
                 title={s.url}
               >
-                {displayLabel(s)}
+                <span className="msg-sources-num" aria-hidden>
+                  [{n}]
+                </span>{" "}
+                <span className="msg-sources-title">{displayLabel(s)}</span>
               </a>
             </li>
           );
