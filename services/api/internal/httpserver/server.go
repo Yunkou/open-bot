@@ -1266,7 +1266,8 @@ type sendBody struct {
 	PersistOnly bool `json:"persist_only"`
 	// HandoffContext is injected into runtime history (not stored) when @-handing off from another bot thread.
 	HandoffContext []runtimeMsg `json:"handoff_context"`
-	// WhenBusy: follow_up (default) | steer | reject — used when a durable run is already active.
+	// WhenBusy: follow_up (default) | steer | reject | replace — used when a durable run is already active.
+	// replace = new-message supersede: abort old durable thread and start a fresh after_interrupt turn.
 	WhenBusy string `json:"when_busy"`
 }
 
@@ -1517,16 +1518,18 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// the loop (other members still get a chance) instead of short-circuiting everyone.
 	// resumeRequestID is set when the thread is only a stale checkpoint pause: the
 	// text is queued, then this same request continues that thread so the bot replies.
-	// New-message supersede (replacedPrev): abort the old durable thread and start a
-	// fresh turn with after_interrupt so the model opens with one short natural
-	// next-step / plan for the NEW ask (not canned ack, not empty comfort).
+	// New-message supersede (register replace or when_busy=replace): abort the old
+	// durable thread and start a fresh turn with after_interrupt so the model opens
+	// with one short natural next-step / plan for the NEW ask (not canned ack).
 	resumeRequestID := ""
-	afterInterrupt := replacedPrev
+	// Supersede: in-process register replace, or client when_busy=replace (interrupt-and-send).
+	wantReplace := wantBusyReplace(replacedPrev, body.WhenBusy)
+	afterInterrupt := wantReplace
 	if runtimeDurableEnabled() && len(targetAgents) == 1 {
 		_, activeReq, activeStatus, activeAgentID, aerr := s.db.ActiveHarnessThreadForConversation(conv.ID)
 		if aerr == nil && strings.TrimSpace(activeReq) != "" && activeStatus != "" &&
 			shouldSteerBusyHarness(activeAgentID, targetAgents[0]) {
-			if replacedPrev {
+			if wantReplace {
 				// keep-partial-next-turn: do not steer into the superseded thread.
 				_, _, _ = s.postRuntimeJSON(runCtx, "/v1/runs/abort", map[string]any{
 					"conversation_id": conv.ID,

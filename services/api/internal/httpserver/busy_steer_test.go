@@ -39,3 +39,21 @@ func TestShouldSteerBusyHarness(t *testing.T) {
 		})
 	}
 }
+
+func TestWantBusyReplace(t *testing.T) {
+	if wantBusyReplace(false, "") {
+		t.Fatal("idle must not replace")
+	}
+	if !wantBusyReplace(true, "") {
+		t.Fatal("register replace must supersede")
+	}
+	if !wantBusyReplace(false, "replace") {
+		t.Fatal("when_busy=replace must supersede")
+	}
+	if !wantBusyReplace(false, "Replace") {
+		t.Fatal("when_busy case-insensitive")
+	}
+	if wantBusyReplace(false, "follow_up") {
+		t.Fatal("follow_up must not supersede")
+	}
+}

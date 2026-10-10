@@ -88,7 +88,7 @@ INSERT INTO harness_threads (
   langfuse_trace_id, owner_thread_id, background, created_at, updated_at
 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
 ON CONFLICT (thread_id) DO UPDATE SET
-  conversation_id = EXCLUDED.conversation_id,
+  conversation_id = CASE WHEN EXCLUDED.conversation_id = '' THEN harness_threads.conversation_id ELSE EXCLUDED.conversation_id END,
   user_id = COALESCE(NULLIF(EXCLUDED.user_id, ''), harness_threads.user_id),
   org_id = COALESCE(NULLIF(EXCLUDED.org_id, ''), harness_threads.org_id),
   agent_id = COALESCE(NULLIF(EXCLUDED.agent_id, ''), harness_threads.agent_id),

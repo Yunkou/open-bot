@@ -76,7 +76,15 @@ async def abort_thread(thread_id: str) -> dict[str, Any]:
             "interrupted_reason": "aborted",
         },
     )
-    journal = JournalSession(thread_id=thread_id, client=get_journal())
+    # thread_id is "{conversation_id}:{request_id}" — keep conversation_id so
+    # UpsertHarnessThread does not wipe the busy-thread index row.
+    cid = ""
+    tid = (thread_id or "").strip()
+    if ":" in tid:
+        cid = tid.split(":", 1)[0].strip()
+    journal = JournalSession(
+        thread_id=thread_id, conversation_id=cid, client=get_journal()
+    )
     await journal.set_status("aborted")
     await abort_owned_children(thread_id, include_background=False)
     return {"ok": True, "thread_id": thread_id, "status": "aborted"}

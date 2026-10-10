@@ -1996,8 +1996,13 @@ export default function App() {
     if (run) {
       run.generation += 1;
       run.abort.abort();
-      runsRef.current.delete(convId);
-      bumpRunBusy();
+      // localOnly (interrupt-and-send): keep the map entry so generation stays
+      // monotonic. Deleting reset gen→0 and let the stale send's finally match
+      // the superseding run (same gen) and drop it — bot appeared silent.
+      if (!opts?.localOnly) {
+        runsRef.current.delete(convId);
+        bumpRunBusy();
+      }
     }
     sealStreamingMessagesForConv(convId);
     if (conversationRef.current?.id === convId) {
@@ -2429,7 +2434,9 @@ export default function App() {
     // Supersede: seal partial locally, drop empty bubbles (no 「（已停止）」). Server
     // cancel + durable abort is left to the next send's register (cancelReason=replace).
     const viewedId = conversationRef.current?.id;
+    let supersededBusy = false;
     if (viewedId && runsRef.current.has(viewedId)) {
+      supersededBusy = true;
       await stopCurrentRun({
         localOnly: true,
         conversationId: viewedId,
@@ -2613,6 +2620,7 @@ export default function App() {
     let sendHadError = false;
     let streamConvId: string | null = null;
     let gen = 0;
+    let ac: AbortController | undefined;
     try {
       const conv = handoffConv ?? (await ensureConversation());
       streamConvId = conv.id;
@@ -2647,7 +2655,7 @@ export default function App() {
           }),
         );
       }
-      const ac = new AbortController();
+      ac = new AbortController();
       gen = (runsRef.current.get(streamConvId)?.generation ?? 0) + 1;
       runsRef.current.set(streamConvId, {
         abort: ac,
@@ -2909,6 +2917,7 @@ export default function App() {
         handoffContext,
         activeReply?.id,
         sendThreadRootId || undefined,
+        supersededBusy ? "replace" : undefined,
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -2942,7 +2951,9 @@ export default function App() {
     } finally {
       if (streamConvId) {
         const run = runsRef.current.get(streamConvId);
-        if (run && run.generation === gen) {
+        // Match generation AND abort controller so a superseded turn's late
+        // finally cannot delete the interrupt replacement run.
+        if (run && run.generation === gen && run.abort === ac) {
           runsRef.current.delete(streamConvId);
           bumpRunBusy();
           if (conversationRef.current?.id === streamConvId) {

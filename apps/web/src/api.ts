@@ -1090,6 +1090,8 @@ export async function sendMessageStream(
   replyToId?: string,
   /** Sidebar thread post only (thread panel open). Mainline 「回复」 must omit this. */
   threadRootId?: string,
+  /** follow_up | steer | reject | replace — replace = interrupt supersede. */
+  whenBusy?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (attachments && attachments.length > 0) {
@@ -1109,6 +1111,9 @@ export async function sendMessageStream(
   }
   if (threadRootId) {
     body.thread_root_id = threadRootId;
+  }
+  if (whenBusy) {
+    body.when_busy = whenBusy;
   }
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
     method: "POST",

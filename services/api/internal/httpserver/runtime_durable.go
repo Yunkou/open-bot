@@ -152,6 +152,13 @@ func (s *Server) handleConversationApprove(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, out)
 }
 
+
+// wantBusyReplace is true for new-message supersede: either the in-process
+// register replaced a prior run, or the client sent when_busy=replace.
+func wantBusyReplace(replacedPrev bool, whenBusy string) bool {
+	return replacedPrev || strings.EqualFold(strings.TrimSpace(whenBusy), "replace")
+}
+
 // shouldSteerBusyHarness reports whether a new user message should be injected
 // into an already-busy durable harness thread.
 //
