@@ -366,6 +366,16 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !strings.Contains(instr, `"all"`) && !strings.Contains(instr, "all") {
 		t.Fatalf("instructions should mention all, got %q", instr)
 	}
+	if !strings.Contains(instr, "several") {
+		t.Fatalf("instructions should allow several specialists, got %q", instr)
+	}
+	countQ, okCount := questions[autoPickDecisionCountKey].(map[string]any)
+	if !okCount || countQ["type"] != "noul" {
+		t.Fatalf("want count noul question, got %#v", questions[autoPickDecisionCountKey])
+	}
+	if !strings.Contains(fmt.Sprint(countQ["instructions"]), "How many") {
+		t.Fatalf("count instructions=%v", countQ["instructions"])
+	}
 	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
 		t.Fatalf("state=%q", state)
 	}
@@ -387,7 +397,7 @@ func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
 	keyToID := map[string]string{"m0": "lead", "m1": "coder"}
 	_, _, _, ok := mapDecisionChoiceToAgentIDs(map[string]any{
 		"pick": map[string]any{"choice": "coder", "confidence": 0.9},
-	}, keyToID, []string{"lead", "coder"}, 1)
+	}, keyToID, []string{"lead", "coder"}, 1, true)
 	if ok {
 		t.Fatal("must reject raw agent id echo")
 	}
@@ -397,7 +407,7 @@ func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
 	keyToID := map[string]string{"m0": "lead", "m1": "coder", "m2": "writer"}
 	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
 		"pick": map[string]any{"choice": "all", "confidence": 0.91},
-	}, keyToID, []string{"lead", "coder", "writer"}, 1)
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, true)
 	if !ok || !allSel {
 		t.Fatalf("ok=%v allSel=%v", ok, allSel)
 	}
@@ -410,17 +420,23 @@ func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
 }
 
 func TestDecisionEffectiveKAllHandsRaises(t *testing.T) {
-	if got := decisionEffectiveK(1, 5, false); got != 1 {
+	if got := decisionEffectiveK(1, 5, false, 0); got != 1 {
 		t.Fatalf("specialty k=1 → %d", got)
 	}
-	if got := decisionEffectiveK(2, 5, false); got != 2 {
+	if got := decisionEffectiveK(2, 5, false, 0); got != 2 {
 		t.Fatalf("specialty k=2 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 5, true); got != 5 {
+	if got := decisionEffectiveK(1, 5, true, 0); got != 5 {
 		t.Fatalf("all-hands 5 members → %d", got)
 	}
-	if got := decisionEffectiveK(1, 12, true); got != autoPickAllHandsMaxK {
+	if got := decisionEffectiveK(1, 12, true, 0); got != autoPickAllHandsMaxK {
 		t.Fatalf("all-hands 12 members capped → %d", got)
+	}
+	if got := decisionEffectiveK(1, 3, false, 2); got != 2 {
+		t.Fatalf("countHint=2 of 3 → %d", got)
+	}
+	if got := decisionEffectiveK(1, 3, false, 3); got != 3 {
+		t.Fatalf("countHint=3 of 3 → %d", got)
 	}
 }
 
@@ -578,5 +594,140 @@ func TestRunAutoPickAllHandsHeuristic(t *testing.T) {
 	got2 := runAutoPickByMode(db.AutoPickHeuristic, "帮我写个函数", members, agents, "lead", 1, "", nil)
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "coder" {
 		t.Fatalf("specialty should still pick coder, got %#v", got2.AgentIDs)
+	}
+}
+
+func TestCountHintFromAnswers(t *testing.T) {
+	if got := countHintFromAnswers(nil, 3); got != 0 {
+		t.Fatalf("nil → %d", got)
+	}
+	if got := countHintFromAnswers(map[string]any{}, 3); got != 0 {
+		t.Fatalf("empty → %d", got)
+	}
+	// noul 0 → 1; 0.5 → 2 of 3; 1 → 3
+	if got := countHintFromAnswers(map[string]any{
+		"count": map[string]any{"type": "noul", "noul": 0.0},
+	}, 3); got != 1 {
+		t.Fatalf("noul=0 → %d", got)
+	}
+	if got := countHintFromAnswers(map[string]any{
+		"count": map[string]any{"type": "noul", "noul": 0.5},
+	}, 3); got != 2 {
+		t.Fatalf("noul=0.5 → %d want 2", got)
+	}
+	if got := countHintFromAnswers(map[string]any{
+		"count": map[string]any{"type": "noul", "noul": 1.0},
+	}, 3); got != 3 {
+		t.Fatalf("noul=1 → %d", got)
+	}
+}
+
+func TestMapDecisionChoiceTwoOfThreeFromProbs(t *testing.T) {
+	keyToID := map[string]string{"m0": "lead", "m1": "coder", "m2": "writer"}
+	// Soft K=1 but two specialists clear threshold → multi subset (not all).
+	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{
+			"type":   "choice",
+			"choice": "m1",
+			"probabilities": map[string]any{
+				"m0": 0.05, "m1": 0.7, "m2": 0.55, "all": 0.1,
+			},
+			"confidence": 0.7,
+		},
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, true)
+	if !ok || allSel {
+		t.Fatalf("ok=%v allSel=%v", ok, allSel)
+	}
+	if len(ids) != 2 || ids[0] != "coder" || ids[1] != "writer" {
+		t.Fatalf("want coder,writer (2 of 3), got %#v", ids)
+	}
+	if conf < 0.6 {
+		t.Fatalf("conf=%.2f", conf)
+	}
+	// Explicit count=1 must not expand via probs.
+	ids1, _, allSel1, ok1 := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{
+			"choice": "m1",
+			"probabilities": map[string]any{
+				"m0": 0.05, "m1": 0.7, "m2": 0.55,
+			},
+			"confidence": 0.7,
+		},
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, false)
+	if !ok1 || allSel1 || len(ids1) != 1 || ids1[0] != "coder" {
+		t.Fatalf("count=1 must stay single, got %#v", ids1)
+	}
+}
+
+func TestAutoPickDecisionTwoOfThreeViaCount(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			if _, ok := questions[autoPickDecisionCountKey]; !ok {
+				t.Fatal("payload must ask count")
+			}
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m1",
+					"probabilities": map[string]any{
+						"m0": 0.08, "m1": 0.65, "m2": 0.5,
+					},
+					"confidence": 0.65,
+				},
+				"count": map[string]any{
+					"type": "noul",
+					"noul": 0.5, // → 2 of 3
+				},
+			}, nil
+		},
+	}
+	// Soft auto_pick_k=1; count raises to 2 — not all, not 1.
+	got := runAutoPickByMode(db.AutoPickDecision, "写代码顺便润色文案", members, agents, "lead", 1, "", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s", got.Method)
+	}
+	if got.Fallback == "all" {
+		t.Fatalf("must not be all-hands fallback, got %#v", got)
+	}
+	if len(got.AgentIDs) != 2 {
+		t.Fatalf("want exactly 2 of 3, got %#v", got.AgentIDs)
+	}
+	if got.AgentIDs[0] != "coder" || got.AgentIDs[1] != "writer" {
+		t.Fatalf("order want coder,writer got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen != true {
+		t.Fatal("multi subset (not all) should allow second fail-open")
+	}
+}
+
+func TestAutoPickDecisionTwoOfThreeViaProbsNoCount(t *testing.T) {
+	members, agents := testGroupAgents()
+	deps := &autoPickDecisionDeps{
+		Provider: "jev",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// No count answer — multi inferred from top probabilities above floor.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m1",
+					"probabilities": map[string]any{
+						"m0": 0.05, "m1": 0.72, "m2": 0.48,
+					},
+					"confidence": 0.72,
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "写代码并润色文案", members, agents, "lead", 1, "", deps)
+	if got.Method != "decision" || len(got.AgentIDs) != 2 {
+		t.Fatalf("want 2 of 3 from probs, got %#v method=%s", got.AgentIDs, got.Method)
+	}
+	if got.AgentIDs[0] != "coder" || got.AgentIDs[1] != "writer" {
+		t.Fatalf("got %#v", got.AgentIDs)
+	}
+	if got.Fallback != "" {
+		t.Fatalf("fallback=%s want empty (not all)", got.Fallback)
 	}
 }

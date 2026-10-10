@@ -1,6 +1,6 @@
 # 群 Auto 选人（轻量设计）
 
-日期：2026-10-11 · 状态：三策略已落地；decision **可返回多人**（opaque `all` + 抬高 K）；**生效模式仅跟 Admin 组织功能开关**（`feature_flags_json.auto_pick`）；客户端不配置群级 auto_pick  
+日期：2026-10-11 · 状态：三策略已落地；decision **可返回多人子集**（opaque `all` + `count` noul + top-N probabilities；不限 all-or-one）；**生效模式仅跟 Admin 组织功能开关**（`feature_flags_json.auto_pick`）；客户端不配置群级 auto_pick  
 对照现状：`resolveGroupSendTargets` — 有 `@` → 强制集合；无人 `@` → 按 org `auto_pick` 模式选人。
 
 ---
@@ -67,10 +67,10 @@ resolveGroupSendTargets / planSendTargets
 ### B 档细节
 
 - **State**：`User message:` + 可选 `Recent context:`（synopsis）
-- **Question**：单个 `pick` choice；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
-- **指令**：专长问题选单人；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `probabilities` 可补多人
-- **映射**：`choice=all` → 频道顺序展开全部 `agent_id`；否则仅接受 `mN`；`probabilities` 按降序补齐至有效 K（且 ≥ θ）
-- **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；全员意图短语命中时抬到 `min(成员数, 8)`，可超过软 K
+- **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
+- **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集
+- **映射**：`choice=all` → 频道顺序展开全部 `agent_id`；否则仅接受 `mN`；按 probability 降序、≥ θ 取 top-N；`count` noul→1..N 定人数；无 count 时也可由多路高概率推断多人（不必 `all`）
+- **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 全员意图 / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）
 - **置信度**：优先 `confidence`，否则所选 key 的 probability，再否则 0.55
 - **调用路径**：API `planSendTargets` → runtime `POST /v1/decision/decide` → factory（Jev / Laya / Unsloth SystemOne）
 - **超时**：约 8s

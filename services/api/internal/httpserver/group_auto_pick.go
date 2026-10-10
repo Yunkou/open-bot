@@ -551,8 +551,8 @@ func autoPickAllCandidates(method string, members []string) groupAutoPickResult 
 // runAutoPickByMode applies org auto_pick mode for a no-@ turn.
 // Heuristic all-hands phrasing (「都介绍下自己」…) short-circuits to all members as
 // candidates (non-forced, may PASS) — same candidacy as off.
-// Decision always calls SystemOne (no phrase skip): schema includes opaque "all" + mN;
-// all-hands raises effective K so the model can return multiple / all agent_ids.
+// Decision always calls SystemOne (no phrase skip): schema includes opaque "all" + mN + count;
+// multi/all-hands may raise effective K up to members so the model can return a subset / all.
 // On parse/timeout/empty/low-conf/off fail-open to heuristic (or all-hands if phrase).
 func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {
 	mode = db.NormalizeAutoPickMode(mode)
