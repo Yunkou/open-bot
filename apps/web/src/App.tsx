@@ -1963,7 +1963,12 @@ export default function App() {
   const sealStreamingMessagesForConv = (convId: string, markStopped: boolean) => {
     patchConvMessages(convId, (prev) =>
       prev
-        .filter((m) => !(m.streaming && isGroupPassContent(m.content || "")))
+        .filter((m) => {
+          if (m.streaming && isGroupPassContent(m.content || "")) return false;
+          // New-message supersede: drop empty streaming bubbles — no visible 「（已停止）」.
+          if (m.streaming && !(m.content && m.content.trim()) && !markStopped) return false;
+          return true;
+        })
         .map((m) => {
         if (!m.streaming) return m;
         const empty = !(m.content && m.content.trim());
@@ -1984,6 +1989,11 @@ export default function App() {
     markStopped?: boolean;
     waitForFlush?: boolean;
     conversationId?: string;
+    /**
+     * Abort the local stream only. Used when a newer send will supersede via
+     * server register (cancelReason=replace) so we do not stamp 「（已停止）」.
+     */
+    localOnly?: boolean;
   }) => {
     const convId = opts?.conversationId ?? conversationRef.current?.id;
     if (!convId) return;
@@ -1999,6 +2009,7 @@ export default function App() {
       setSending(false);
       setRunLabel("正在思考…");
     }
+    if (opts?.localOnly) return;
     const cancelPromise = cancelConversationRun(convId).catch(() => {});
     if (opts?.waitForFlush) {
       await cancelPromise;
@@ -2418,9 +2429,15 @@ export default function App() {
     const threadRootAtSend = (openThreadRootIdRef.current || "").trim();
     const threadConvAtSend = conversationRef.current?.id;
     // keep-partial-next-turn: only interrupt the *current* conversation's run.
+    // Supersede: seal partial locally, drop empty bubbles (no 「（已停止）」). Server
+    // cancel is left to the next send's register (cancelReason=replace).
     const viewedId = conversationRef.current?.id;
     if (viewedId && runsRef.current.has(viewedId)) {
-      await stopCurrentRun({ markStopped: true, waitForFlush: true, conversationId: viewedId });
+      await stopCurrentRun({
+        markStopped: false,
+        localOnly: true,
+        conversationId: viewedId,
+      });
     }
 
     // DM: @其他 Bot → 切到对方主线程再发；原会话留下转交记录，并把近期上下文带给对方。

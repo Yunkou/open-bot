@@ -190,3 +190,75 @@ func TestActiveRunsParallelAgentCatchup(t *testing.T) {
 		t.Fatalf("expected per-agent tokens, got %#v", tokens)
 	}
 }
+
+
+func TestActiveRunsCancelReason(t *testing.T) {
+	ar := newActiveRuns()
+
+	ctxStop, cancelStop := context.WithCancel(context.Background())
+	hStop := newRunHandle(cancelStop)
+	ar.register("c-stop", hStop)
+	go func() {
+		<-ctxStop.Done()
+		hStop.finish()
+	}()
+	if !ar.cancel("c-stop") {
+		t.Fatal("expected cancel")
+	}
+	if hStop.superseded() {
+		t.Fatal("explicit Stop must not be superseded")
+	}
+	if got := hStop.cancelReason; got != cancelReasonStop {
+		t.Fatalf("stop reason=%q", got)
+	}
+
+	ctxPrev, cancelPrev := context.WithCancel(context.Background())
+	hPrev := newRunHandle(cancelPrev)
+	ar.register("c-rep", hPrev)
+	go func() {
+		<-ctxPrev.Done()
+		hPrev.finish()
+	}()
+	ctxNext, cancelNext := context.WithCancel(context.Background())
+	defer cancelNext()
+	hNext := newRunHandle(cancelNext)
+	ar.register("c-rep", hNext) // replaces prev
+	if ctxNext.Err() != nil {
+		t.Fatal("new run ctx must stay active after register")
+	}
+	if !hPrev.superseded() {
+		t.Fatal("register replace must mark superseded")
+	}
+	if got := hPrev.cancelReason; got != cancelReasonReplace {
+		t.Fatalf("replace reason=%q", got)
+	}
+	if hNext.superseded() {
+		t.Fatal("new handle must not be superseded")
+	}
+}
+
+func TestShouldPersistStopMarker(t *testing.T) {
+	if !shouldPersistStopMarker(nil) {
+		t.Fatal("nil handle: persist (Stop-compatible default)")
+	}
+	h := newRunHandle(func() {})
+	if !shouldPersistStopMarker(h) {
+		t.Fatal("unset reason: persist")
+	}
+	h.markCancelReason(cancelReasonStop)
+	if !shouldPersistStopMarker(h) {
+		t.Fatal("stop: persist")
+	}
+	h2 := newRunHandle(func() {})
+	h2.markCancelReason(cancelReasonReplace)
+	if shouldPersistStopMarker(h2) {
+		t.Fatal("replace/supersede: must not persist （已停止）")
+	}
+	// First write wins: stop then replace still persists.
+	h3 := newRunHandle(func() {})
+	h3.markCancelReason(cancelReasonStop)
+	h3.markCancelReason(cancelReasonReplace)
+	if !shouldPersistStopMarker(h3) {
+		t.Fatal("stop then replace: still persist")
+	}
+}

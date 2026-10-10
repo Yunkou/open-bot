@@ -1687,8 +1687,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := runCtx.Err(); err != nil {
 		cancelled = true
-		if len(targetAgents) > 0 {
-			// Cancelled before any candidate ran — keep a stop marker in history.
+		if len(targetAgents) > 0 && shouldPersistStopMarker(handle) {
+			// Explicit Stop before any candidate ran — keep a stop marker in history.
+			// Supersede by a newer send: no visible 「（已停止）」.
 			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(targetAgents[0], threadRootID, ""))
 		}
 	} else {
@@ -1710,7 +1711,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					cancelledMu.Lock()
 					cancelled = true
 					cancelledMu.Unlock()
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, ""))
+					if shouldPersistStopMarker(handle) {
+						_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, ""))
+					}
 					return
 				}
 				agentEmit := stampEmitAgentID(emit, prep.agentID)
@@ -1752,7 +1755,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
 					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
 				} else if runCancelled {
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, runID))
+					if shouldPersistStopMarker(handle) {
+						_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, runID))
+					}
 				} else if runErr != nil {
 					// Persist a visible failure bubble (same family as 「（已停止）」) so refresh
 					// and other clients still see the turn instead of silent empty.
@@ -2107,6 +2112,12 @@ func runtimeDoneFailure(payload map[string]any) error {
 		errMsg = "runtime run failed"
 	}
 	return fmt.Errorf("%s", errMsg)
+}
+
+// shouldPersistStopMarker is true for explicit Stop (or unknown cancel).
+// New-message supersede must not leave a visible 「（已停止）」 bubble.
+func shouldPersistStopMarker(h *runHandle) bool {
+	return h == nil || !h.superseded()
 }
 
 // formatAssistantRunFailure builds the persisted / client-visible failure bubble text.

@@ -55,6 +55,8 @@ test.describe("web chat", () => {
     await sendChatMessage(page, "[short] second turn");
     await waitForUserText(page, "second turn");
     await waitForAssistantText(page, "E2E_MOCK_OK");
+    // Supersede by new message must not leave a visible 「（已停止）」 bubble.
+    await expect(page.getByText("已停止", { exact: false })).toHaveCount(0);
   });
 
   test("refresh while run_active resumes stream", async ({ page }) => {

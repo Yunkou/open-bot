@@ -30,6 +30,12 @@ type runSub struct {
 	ch chan sseEvent
 }
 
+// Cancel reasons distinguish Stop (keep 「（已停止）」) from new-message supersede (no marker).
+const (
+	cancelReasonStop    = "stop"
+	cancelReasonReplace = "replace"
+)
+
 type runHandle struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -42,6 +48,9 @@ type runHandle struct {
 	agentID        string
 	agentName      string
 	closed         bool
+	// cancelReason is set when cooperative cancel is requested: "stop" (POST .../cancel)
+	// or "replace" (next-turn register). First write wins.
+	cancelReason string
 }
 
 func newActiveRuns() *activeRuns {
@@ -54,6 +63,30 @@ func newRunHandle(cancel context.CancelFunc) *runHandle {
 		done:   make(chan struct{}),
 		subs:   make(map[*runSub]struct{}),
 	}
+}
+
+// markCancelReason records why this run was cancelled. First write wins so an
+// explicit Stop is not overwritten if register races afterward.
+func (h *runHandle) markCancelReason(reason string) {
+	if h == nil || reason == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cancelReason == "" {
+		h.cancelReason = reason
+	}
+}
+
+// superseded reports whether this run was cancelled because a newer send
+// replaced it (keep-partial-next-turn). Empty cancel must not persist 「（已停止）」.
+func (h *runHandle) superseded() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cancelReason == cancelReasonReplace
 }
 
 // finish signals waiters that this run has completed cleanup/persist,
@@ -270,6 +303,7 @@ func (a *activeRuns) register(convID string, h *runHandle) {
 	a.byID[convID] = h
 	a.mu.Unlock()
 	if prev != nil {
+		prev.markCancelReason(cancelReasonReplace)
 		prev.cancel()
 		waitHandleDone(prev, cancelFlushWait)
 	}
@@ -314,6 +348,7 @@ func (a *activeRuns) cancel(convID string) bool {
 	if !ok {
 		return false
 	}
+	h.markCancelReason(cancelReasonStop)
 	h.cancel()
 	waitHandleDone(h, cancelFlushWait)
 	return true
