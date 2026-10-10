@@ -1313,6 +1313,16 @@ export default function App() {
     return keys;
   }, [runBusyTick, agents, channels, taskConvIds]);
 
+  /** True while runsRef still owns this conversation — survives localOnly interrupt
+   *  where setSending(false) used to desync from the kept map entry (lost RunStatus). */
+  const viewingRunActive = useMemo(() => {
+    void runBusyTick;
+    const id = conversation?.id;
+    return Boolean(id && runsRef.current.has(id));
+  }, [runBusyTick, conversation?.id]);
+
+  const chatProcessing = sending || taskBusy || viewingRunActive;
+
   const messagesRef = useRef<HTMLDivElement | null>(null);
   /** When true, keep the message list pinned to the latest content. */
   const stickToBottomRef = useRef(true);
@@ -1352,7 +1362,7 @@ export default function App() {
       scrollToBottom(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [messages, sending, runLabel, scrollToBottom]);
+  }, [messages, sending, chatProcessing, runLabel, scrollToBottom]);
 
 
 
@@ -1383,7 +1393,7 @@ export default function App() {
       !conversation?.channel_id &&
       !hasChatMessages &&
       !onboardingDismissed &&
-      !sending &&
+      !chatProcessing &&
       !chatSwitchPending,
   );
 
@@ -2006,7 +2016,11 @@ export default function App() {
     }
     sealStreamingMessagesForConv(convId);
     if (conversationRef.current?.id === convId) {
-      setSending(false);
+      // localOnly (interrupt-and-send): keep sending/processing UI. Clearing it
+      // while runsRef is retained (e806a30) desynced RunStatus after replace interrupts.
+      if (!opts?.localOnly) {
+        setSending(false);
+      }
       setRunLabel("正在思考…");
     }
     if (opts?.localOnly) return;
@@ -2169,8 +2183,8 @@ export default function App() {
             }
             if (meta.phase === "cancelled") {
               sealStreamingMessagesForConv(conv.id);
+              // finally clears sending when this resume gen still owns the run.
               if (isViewingStream()) {
-                setSending(false);
                 setRunLabel("正在思考…");
               }
             }
@@ -2261,7 +2275,9 @@ export default function App() {
       console.warn("resume run failed", err);
     } finally {
       const run = runsRef.current.get(conv.id);
-      if (run && run.generation === gen) {
+      // Match generation AND abort controller (same as sendUserText) so a
+      // superseded resume cannot clear the interrupt replacement run's UI.
+      if (run && run.generation === gen && run.abort === ac) {
         runsRef.current.delete(conv.id);
         bumpRunBusy();
         if (conversationRef.current?.id === conv.id) {
@@ -2761,8 +2777,10 @@ export default function App() {
             }
             if (meta.phase === "cancelled") {
               sealStreamingMessagesForConv(streamConvId!);
+              // Do not setSending(false) here: localOnly supersede keeps runsRef and
+              // a newer turn may already own the processing indicator. finally clears
+              // sending only when this gen+abort still owns the map entry.
               if (isViewingStream()) {
-                setSending(false);
                 setRunLabel("正在思考…");
               }
             }
@@ -2965,7 +2983,11 @@ export default function App() {
             setSending(false);
           }
         }
-      } else if (conversationRef.current?.id === viewedId) {
+      } else if (
+        conversationRef.current?.id === viewedId &&
+        !(viewedId && runsRef.current.has(viewedId))
+      ) {
+        // No streamConvId yet (failed before register) and no superseding run.
         setSending(false);
       }
     }
@@ -4456,7 +4478,7 @@ export default function App() {
                 />
               ))}
               <BotOnboardingCard
-                disabled={sending}
+                disabled={chatProcessing}
                 onSelectOption={(opt: OnboardingOption) => {
                   void (async () => {
                     try {
@@ -4526,10 +4548,10 @@ export default function App() {
               onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
             />
           ))}
-          {sending || taskBusy ? (
+          {chatProcessing ? (
             !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
               <RunStatus
-                label={taskBusy && !sending ? runLabel || "正在做…" : runLabel || "正在思考…"}
+                label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
                 color={resolveAvatarColor(activeAgent?.id || activeAgent?.name || "open-bot", activeAgent?.avatar_color)}
               />
             ) : null
@@ -4640,7 +4662,7 @@ export default function App() {
             onChange={setInput}
             onSubmit={onSubmit}
             onStop={() => stopCurrentRun({ markStopped: true })}
-            sending={sending || taskBusy}
+            sending={chatProcessing}
             agentName={activeChannel ? activeChannel.name : activeAgent?.name}
             files={pendingFiles}
             onFilesChange={setPendingFiles}
