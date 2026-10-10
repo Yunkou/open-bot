@@ -1177,20 +1177,78 @@ export async function steerConversationRun(
   return res.json();
 }
 
-/** Resume a waiting_approval interrupt. */
+/** HITL 审批三态 — shared by /approve and host-confirms. */
+export type ApprovalDecision = "allow_once" | "always_allow" | "deny";
+
+export type ApproveScope = {
+  tool?: string;
+  tool_group?: string;
+};
+
+export type ToolAllowlistEntry = {
+  id?: string;
+  tool?: string;
+  tool_group: string;
+  label?: string;
+  granted_at?: string;
+};
+
+function approveBoolFromDecision(decision: ApprovalDecision): boolean {
+  return decision !== "deny";
+}
+
+/**
+ * POST /v1/conversations/{id}/approve — resume tool approval interrupt (三态).
+ * Sends both `decision` (new) and `approve` bool (legacy servers).
+ */
+export async function approveConversation(
+  conversationId: string,
+  body: {
+    request_id: string;
+    decision: ApprovalDecision;
+    approve?: boolean;
+    reason?: string;
+    scope?: ApproveScope;
+  },
+): Promise<unknown> {
+  const decision = body.decision;
+  const approve = body.approve ?? approveBoolFromDecision(decision);
+  const payload: Record<string, unknown> = {
+    request_id: body.request_id,
+    decision,
+    approve,
+    reason: body.reason || "",
+  };
+  if (body.scope) payload.scope = body.scope;
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/approve`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  return null;
+}
+
+/** Resume a waiting_approval interrupt (legacy signature + optional decision/scope). */
 export async function approveConversationRun(
   conversationId: string,
   requestId: string,
   approve: boolean,
   reason = "",
+  opts?: { decision?: ApprovalDecision; scope?: ApproveScope },
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/approve`, {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ request_id: requestId, approve, reason }),
+  const decision: ApprovalDecision =
+    opts?.decision ?? (approve ? "allow_once" : "deny");
+  const result = await approveConversation(conversationId, {
+    request_id: requestId,
+    decision,
+    approve,
+    reason,
+    scope: opts?.scope,
   });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
+  return (result ?? {}) as Record<string, unknown>;
 }
 
 async function readSSEStream(
@@ -1568,18 +1626,108 @@ export async function createHostConfirm(
   return (await res.json()) as Message;
 }
 
+/**
+ * Decide a host_confirm card. Sends `status` (legacy) plus `decision` / `approve`
+ * so backends that grow 三态 on host-confirms need no second client change.
+ */
 export async function decideHostConfirm(
   conversationId: string,
   messageId: string,
   status: "allowed" | "denied",
+  opts?: { decision?: ApprovalDecision; scope?: ApproveScope; reason?: string },
 ): Promise<Message> {
+  const decision: ApprovalDecision =
+    opts?.decision ?? (status === "allowed" ? "allow_once" : "deny");
+  const payload: Record<string, unknown> = {
+    status,
+    decision,
+    approve: approveBoolFromDecision(decision),
+  };
+  if (opts?.scope) payload.scope = opts.scope;
+  if (opts?.reason) payload.reason = opts.reason;
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/host-confirms/${messageId}`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Message;
+}
+
+const TOOL_ALLOWLIST_GET_CANDIDATES = [
+  "/v1/me/tool-allowlist",
+  "/v1/settings/tool-allowlist",
+  "/v1/user/tool-allowlist",
+];
+
+/**
+ * List Always-allow entries. Tries known paths; returns [] if none exist yet
+ * (backend may still be shipping). Callers may merge an optimistic local cache.
+ */
+export async function listToolAllowlist(): Promise<ToolAllowlistEntry[]> {
+  for (const path of TOOL_ALLOWLIST_GET_CANDIDATES) {
+    try {
+      const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
+      if (res.status === 404) continue;
+      if (!res.ok) continue;
+      const data = (await res.json()) as
+        | ToolAllowlistEntry[]
+        | { items?: ToolAllowlistEntry[]; entries?: ToolAllowlistEntry[] };
+      const items = Array.isArray(data)
+        ? data
+        : Array.isArray(data.items)
+          ? data.items
+          : Array.isArray(data.entries)
+            ? data.entries
+            : [];
+      return items.filter((e) => e && typeof (e.tool_group || e.tool) === "string");
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
+}
+
+/**
+ * Revoke one Always-allow entry. Tries DELETE by id, then by tool_group query/body.
+ * Returns true if a server accepted the revoke; false if no endpoint yet.
+ */
+export async function revokeToolAllowlistEntry(entry: {
+  id?: string;
+  tool_group: string;
+}): Promise<boolean> {
+  const group = encodeURIComponent(entry.tool_group);
+  const attempts: Array<() => Promise<Response>> = [];
+  if (entry.id) {
+    const id = encodeURIComponent(entry.id);
+    for (const base of ["/v1/me/tool-allowlist", "/v1/settings/tool-allowlist", "/v1/user/tool-allowlist"]) {
+      attempts.push(() =>
+        fetch(`${API_BASE}${base}/${id}`, { method: "DELETE", headers: authHeaders() }),
+      );
+    }
+  }
+  for (const base of ["/v1/me/tool-allowlist", "/v1/settings/tool-allowlist", "/v1/user/tool-allowlist"]) {
+    attempts.push(() =>
+      fetch(`${API_BASE}${base}?tool_group=${group}`, { method: "DELETE", headers: authHeaders() }),
+    );
+    attempts.push(() =>
+      fetch(`${API_BASE}${base}`, {
+        method: "DELETE",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ tool_group: entry.tool_group }),
+      }),
+    );
+  }
+  for (const run of attempts) {
+    try {
+      const res = await run();
+      if (res.status === 404) continue;
+      if (res.ok || res.status === 204) return true;
+    } catch {
+      /* try next */
+    }
+  }
+  return false;
 }
 
 /** Legacy stop-marker text; no longer persisted or stamped. Kept for history filtering. */

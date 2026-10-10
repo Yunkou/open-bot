@@ -60,6 +60,10 @@ import {
   subscribeConversationEvents,
   cancelConversationRun,
   approveConversationRun,
+  approveConversation,
+  listToolAllowlist,
+  revokeToolAllowlistEntry,
+  type ApprovalDecision,
   chatEventsWebSocketUrl,
   mergeIncomingMessage,
   isStopMarkerContent,
@@ -144,6 +148,19 @@ import {
 } from "./lib/userSettings";
 import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, classifyHostExecReview, setHostExecUserSettings, setHostExecMachinePolicy, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
+import {
+  ALWAYS_ALLOW_TOAST,
+  REVIEW_EMPTY_COPY,
+  grantToolFamilyAlwaysAllow,
+  isToolFamilyAlwaysAllowed,
+  listToolAllowEntries,
+  revokeToolFamilyAlwaysAllow,
+  toolFamilyForHostOp,
+  toolFamilyLabel,
+  toolLabelForHostOp,
+  type ToolAllowEntry,
+  type ToolFamilyId,
+} from "./lib/toolAllowlist";
 import { AccountMenu } from "./components/AccountMenu";
 import {
   SettingsPage,
@@ -189,7 +206,8 @@ type SettingsTab =
   | "routines"
   | "sandbox"
   | "machines"
-  | "secrets";
+  | "secrets"
+  | "review";
 
 const SETTINGS_TITLE: Record<SettingsTab, string> = {
   general: "通用",
@@ -202,6 +220,7 @@ const SETTINGS_TITLE: Record<SettingsTab, string> = {
   sandbox: "运行环境",
   machines: "电脑",
   secrets: "密钥",
+  review: "审核",
 };
 
 function accountInitials(name: string) {
@@ -288,6 +307,13 @@ function SettingsGlyph({ id }: { id: SettingsTab }) {
         <svg {...p}>
           <circle cx="8" cy="15" r="4" />
           <path d="M11 13l9-9 2 2-2 1-1-1-2 2 1 1-2 2" />
+        </svg>
+      );
+    case "review":
+      return (
+        <svg {...p}>
+          <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" />
+          <path d="M9.5 12l1.8 1.8L15 10" />
         </svg>
       );
   }
@@ -758,6 +784,10 @@ export default function App() {
   const [hostActivity, setHostActivity] = useState("");
   const hostConfirmResolvers = useRef(new Map<string, (ok: boolean) => void>());
   const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
+  /** Optimistic Always-allow cache + server list for 设置 · 审核. */
+  const [toolAllowEntries, setToolAllowEntries] = useState<ToolAllowEntry[]>([]);
+  const [toolAllowServerOk, setToolAllowServerOk] = useState(false);
+  const [toolAllowBusy, setToolAllowBusy] = useState(false);
   const applyRemoteHostDecisionRef = useRef<(msg: Message) => void>(() => {});
   const clientEnv = useMemo(() => detectClientContext(), []);
 
@@ -1793,6 +1823,17 @@ export default function App() {
   askHostConfirmRef.current = (req) => {
     const conversationId = req.conversation_id || conversationRef.current?.id || "";
     return new Promise<boolean>((resolve) => {
+      // Optimistic Always-allow skip (client cache / server list). exec_policy=ask forces a card.
+      const family = toolFamilyForHostOp(req.op, req.path || "");
+      const uid = user?.id || "";
+      if (
+        hostExecPolicy !== "ask" &&
+        (isToolFamilyAlwaysAllowed(uid, family) ||
+          toolAllowEntries.some((e) => e.family === family))
+      ) {
+        resolve(true);
+        return;
+      }
       hostConfirmResolvers.current.set(req.req_id, resolve);
       if (!conversationId) return;
       const raw = req.content || "";
@@ -1832,22 +1873,83 @@ export default function App() {
     });
   };
 
-  const settleHostConfirm = (message: Message, ok: boolean) => {
+  const refreshToolAllowlist = async () => {
+    const uid = user?.id || "";
+    const local = listToolAllowEntries(uid);
+    try {
+      const remote = await listToolAllowlist();
+      if (remote.length > 0 || toolAllowServerOk) {
+        setToolAllowServerOk(true);
+        const mapped: ToolAllowEntry[] = remote.map((e) => ({
+          family: (e.tool_group || "other") as ToolFamilyId,
+          tool: e.tool || e.tool_group,
+          label: e.label || toolFamilyLabel((e.tool_group || "other") as ToolFamilyId),
+          granted_at: e.granted_at || new Date().toISOString(),
+        }));
+        const remoteFamilies = new Set(mapped.map((m) => m.family));
+        const merged = [...mapped, ...local.filter((l) => !remoteFamilies.has(l.family))];
+        setToolAllowEntries(merged);
+        return merged;
+      }
+    } catch {
+      /* fall through to local */
+    }
+    setToolAllowEntries(local);
+    return local;
+  };
+
+  const settleHostConfirm = (message: Message, decision: ApprovalDecision) => {
     const parsed = parseHostConfirm(message.content);
     if (!parsed?.req_id || parsed.status === "allowed" || parsed.status === "denied") return;
+    const ok = decision !== "deny";
     const status = ok ? "allowed" : "denied";
-    const content = JSON.stringify({ ...parsed, status });
+    const family = toolFamilyForHostOp(parsed.op, parsed.path);
+    const tool = toolLabelForHostOp(parsed.op, parsed.path);
+    const scope = { tool, tool_group: family };
+    const content = JSON.stringify({ ...parsed, status, decision });
     const convId = message.conversation_id || conversationRef.current?.id || "";
+    const runRequestId = (message as Message & { request_id?: string }).request_id || "";
+
+    if (decision === "always_allow") {
+      const uid = user?.id || "";
+      setToolAllowEntries(grantToolFamilyAlwaysAllow(uid, family, tool));
+      toast.message(ALWAYS_ALLOW_TOAST, { duration: 4000 });
+    }
+
     if (convId) {
       patchConvMessages(convId, (prev) => prev.map((m) => (m.id === message.id ? { ...m, content } : m)));
       if (!message.id.startsWith("local-")) {
-        void decideHostConfirm(convId, message.id, status)
+        void decideHostConfirm(convId, message.id, status, {
+          decision,
+          scope,
+          reason: parsed.reason || "",
+        })
           .then((saved) => acceptServerMessage(saved))
           .catch(() => {});
+      }
+      if (runRequestId) {
+        void approveConversation(convId, {
+          request_id: runRequestId,
+          decision,
+          approve: ok,
+          reason: parsed.reason || "",
+          scope,
+        }).catch(() => {});
       }
     }
     releaseHostConfirm(parsed.req_id, ok);
   };
+
+  // Hydrate Always-allow cache (optimistic local + server if available).
+  useEffect(() => {
+    if (!user?.id) {
+      setToolAllowEntries([]);
+      return;
+    }
+    setToolAllowEntries(listToolAllowEntries(user.id));
+    void refreshToolAllowlist();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
 
 
   const attachSourcesToStreaming = (convId: string, raw: unknown, messageId?: string) => {
@@ -4590,7 +4692,8 @@ export default function App() {
               message={m}
               agentId={m.agent_id || agentId}
               speakerName={speakerNameFor(m)}
-              onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+              onHostDecide={m.role === "host_confirm" ? (d) => settleHostConfirm(m, d) : undefined}
+              alwaysAllowEnabled={hostExecPolicy !== "ask"}
               replyQuote={quoteFor(m)}
               replyCount={replyCountByRoot.get(m.id) || 0}
               onReply={beginReplyTo}
@@ -4644,7 +4747,8 @@ export default function App() {
                   replyQuote={quoteFor(m)}
                   onReply={beginReplyTo}
                   onJumpToParent={(pid) => jumpToMessage(pid)}
-                  onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+                  onHostDecide={m.role === "host_confirm" ? (d) => settleHostConfirm(m, d) : undefined}
+                  alwaysAllowEnabled={hostExecPolicy !== "ask"}
                   onToggleReaction={onToggleReaction}
                   onFeedback={(msg) => openFeedbackForMessage(msg, "feedback_menu")}
                   onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
@@ -4675,6 +4779,7 @@ export default function App() {
                       gate.requestId,
                       false,
                       "user_rejected",
+                      { decision: "deny" },
                     )
                       .then(() => setApprovalGate(null))
                       .catch((err) =>
@@ -4693,6 +4798,8 @@ export default function App() {
                       gate.conversationId,
                       gate.requestId,
                       true,
+                      "",
+                      { decision: "allow_once" },
                     )
                       .then(() => {
                         setApprovalGate(null);
@@ -4778,6 +4885,9 @@ export default function App() {
                   } else if (tab === "server") {
                     setSettingsGeneralPane("server");
                     setSettingsTab("general");
+                  } else if (tab === "review") {
+                    setSettingsTab("review");
+                    void refreshToolAllowlist();
                   } else if (tab === "general") {
                     setSettingsGeneralPane("review");
                     setSettingsTab("general");
@@ -4829,7 +4939,7 @@ export default function App() {
                       ? "账户"
                       : settingsGeneralPane === "server"
                         ? "服务器"
-                        : "审核与时区"
+                        : "时区与自动审核"
                     : SETTINGS_TITLE[settingsTab]}
                 </h2>
                 <button
@@ -4850,6 +4960,7 @@ export default function App() {
               {(
                 [
                   ["general", "通用"],
+                  ["review", "审核"],
                   ["bot", "当前 Bot"],
                   ["machines", "电脑"],
                   ["sandbox", "运行环境"],
@@ -4887,6 +4998,8 @@ export default function App() {
                       );
                     } else if (id === "secrets") {
                       void refreshSecrets();
+                    } else if (id === "review") {
+                      void refreshToolAllowlist();
                     }
                   }}
                 >
@@ -4986,13 +5099,69 @@ export default function App() {
                       </SettingsHint>
                     ) : null}
                     <GeneralBotSettings
-                      sectionTitle={sheetForm ? undefined : "审核与时区"}
+                      sectionTitle={sheetForm ? undefined : "时区与自动审核"}
                       onSettingsChange={(s) => {
                         setHostExecUserSettings(s);
                       }}
                     />
                   </>
                 )}
+              </SettingsPage>
+            )}
+
+            {settingsTab === "review" && (
+              <SettingsPage>
+                <SettingsSection title="始终允许">
+                  <SettingsHint>
+                    这里是你点过「始终允许」的操作。撤销后，同类操作会再次请求确认。
+                  </SettingsHint>
+                  <SettingsCard>
+                    {toolAllowEntries.length === 0 ? (
+                      <SettingsEmpty>{REVIEW_EMPTY_COPY}</SettingsEmpty>
+                    ) : (
+                      <ul className="review-allow-list" aria-label="始终允许的操作">
+                        {toolAllowEntries.map((entry) => (
+                          <li key={entry.family} className="review-allow-row">
+                            <div className="review-allow-main">
+                              <span className="review-allow-name">{entry.label}</span>
+                              {entry.tool ? (
+                                <span className="review-allow-sub">{entry.tool}</span>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              className="settings-pill review-allow-revoke"
+                              disabled={toolAllowBusy}
+                              onClick={() => {
+                                void (async () => {
+                                  setToolAllowBusy(true);
+                                  try {
+                                    const serverOk = await revokeToolAllowlistEntry({
+                                      tool_group: entry.family,
+                                    });
+                                    if (serverOk) setToolAllowServerOk(true);
+                                    const uid = user?.id || "";
+                                    setToolAllowEntries(revokeToolFamilyAlwaysAllow(uid, entry.family));
+                                    toast.message("已撤销，下次将再次询问");
+                                  } finally {
+                                    setToolAllowBusy(false);
+                                  }
+                                })();
+                              }}
+                            >
+                              撤销
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </SettingsCard>
+                  {!toolAllowServerOk ? (
+                    <SettingsHint>
+                      列表暂存在本机；服务端 allowlist API 就绪后将自动同步。
+                    </SettingsHint>
+                  ) : null}
+                </SettingsSection>
               </SettingsPage>
             )}
 

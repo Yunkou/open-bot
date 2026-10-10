@@ -10,7 +10,8 @@ export type SettingsHubNav =
   | "compact"
   | "routines"
   | "secrets"
-  | "general";
+  | "general"
+  | "review";
 
 type Props = {
   username: string;
@@ -35,6 +36,7 @@ function Chevron() {
 /**
  * Grok-style grouped settings hub for touch-ui / layout-narrow (C-2 → #7 v2).
  * Fullscreen gray+white cards; drill-downs use existing settings tabs / sheets.
+ * P1-4 keeps 「服务器」; approval-tri-state adds 「审核」.
  */
 export function MobileSettingsHub({
   username,
@@ -105,6 +107,13 @@ export function MobileSettingsHub({
             </span>
             <Chevron />
           </button>
+          <button type="button" className="settings-hub-row" onClick={() => onNavigate("review")}>
+            <span className="settings-hub-row-main">
+              <span className="settings-hub-row-title">审核</span>
+              <span className="settings-hub-row-sub">始终允许的操作</span>
+            </span>
+            <Chevron />
+          </button>
         </section>
 
         <div className="settings-hub-section-label">通用</div>
@@ -147,7 +156,7 @@ export function MobileSettingsHub({
           </button>
           <button type="button" className="settings-hub-row" onClick={() => onNavigate("general")}>
             <span className="settings-hub-row-main">
-              <span className="settings-hub-row-title">审核与时区</span>
+              <span className="settings-hub-row-title">时区与自动审核</span>
               <span className="settings-hub-row-sub">自动审核规则与报告时区</span>
             </span>
             <Chevron />

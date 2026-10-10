@@ -2995,7 +2995,8 @@ button.ghost {
 }
 .muted { color: #64748b; font-size: 13px; }
 
-.host-confirm-card {
+.host-confirm-card,
+.approval-gate-card.host-confirm-card {
   width: min(100%, 420px);
   border: 1px solid var(--border);
   background: var(--bg-elevated);
@@ -3012,12 +3013,17 @@ button.ghost {
   font-size: 15px;
   font-weight: 650;
   color: var(--text);
+  word-break: break-word;
 }
 .host-confirm-reason {
   margin-top: 6px;
   font-size: 12px;
   line-height: 1.4;
   color: var(--muted, #6b7280);
+}
+.host-confirm-risk-hint {
+  color: var(--danger, #dc2626);
+  font-weight: 500;
 }
 
 .host-confirm-path {
@@ -3042,9 +3048,13 @@ button.ghost {
   background: var(--bg-soft, #f4f5f7);
   color: var(--text);
 }
+
+/* 审批三态 actions — wide default: three buttons right-aligned; primary most prominent */
 .host-confirm-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   margin-top: 12px;
 }
@@ -3053,10 +3063,34 @@ button.ghost {
   padding: 7px 12px;
   font-size: 13px;
   cursor: pointer;
+  min-height: 40px;
 }
 .host-confirm-actions button.ghost {
   border: 1px solid var(--border) !important;
+  background: transparent;
   color: var(--text) !important;
+}
+.host-confirm-actions button.danger-outline,
+.host-confirm-deny.danger-outline {
+  border: 1px solid var(--danger, #dc2626) !important;
+  color: var(--danger, #dc2626) !important;
+  background: transparent !important;
+  font-weight: 600;
+}
+.host-confirm-actions .host-confirm-allow-once.primary {
+  order: 3;
+  border: none;
+  background: var(--accent, #2563eb);
+  color: #fff;
+  font-weight: 650;
+  min-height: 44px;
+  padding: 10px 16px;
+}
+.host-confirm-actions-tri .host-confirm-always {
+  order: 1;
+}
+.host-confirm-actions-tri .host-confirm-deny {
+  order: 2;
 }
 .host-confirm-allow.danger {
   border: none;
@@ -3072,6 +3106,95 @@ button.ghost {
 .host-confirm-settled.denied {
   color: var(--danger);
 }
+
+/* Narrow / touch: primary full-width ≥48; second row 始终允许 | 拒绝 */
+.shell-narrow .host-confirm-actions,
+.shell-narrow .host-confirm-actions-tri {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  justify-content: stretch;
+}
+.shell-narrow .host-confirm-actions .host-confirm-allow-once.primary {
+  grid-column: 1 / -1;
+  order: 0;
+  width: 100%;
+  min-height: 48px;
+  border-radius: 12px;
+  font-size: 15px;
+}
+.shell-narrow .host-confirm-actions-tri .host-confirm-always {
+  order: 0;
+  min-height: 48px;
+}
+.shell-narrow .host-confirm-actions-tri .host-confirm-deny,
+.shell-narrow .host-confirm-actions .host-confirm-deny {
+  order: 0;
+  min-height: 48px;
+}
+@media (max-width: 720px) {
+  .host-confirm-actions,
+  .host-confirm-actions-tri {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    justify-content: stretch;
+  }
+  .host-confirm-actions .host-confirm-allow-once.primary {
+    grid-column: 1 / -1;
+    order: 0;
+    width: 100%;
+    min-height: 48px;
+    border-radius: 12px;
+    font-size: 15px;
+  }
+  .host-confirm-actions-tri .host-confirm-always,
+  .host-confirm-actions-tri .host-confirm-deny,
+  .host-confirm-actions .host-confirm-deny {
+    order: 0;
+    min-height: 48px;
+  }
+}
+
+/* 设置 · 审核 list */
+.review-allow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.review-allow-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border, #e5e7eb);
+}
+.review-allow-row:last-child {
+  border-bottom: none;
+}
+.review-allow-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.review-allow-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.review-allow-sub {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.review-allow-revoke {
+  flex-shrink: 0;
+  min-height: 36px;
+}
+
 
 
 /* --- Assistant-level sidebar + @mentions --- */

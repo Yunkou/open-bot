@@ -9,7 +9,7 @@ import { ImageDiagramCard } from "./ImageDiagramCard";
 import { MessageReactions } from "./MessageReactions";
 import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
-import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
+import { HostConfirmCard, parseHostConfirm, type ApprovalDecision } from "./HostConfirmCard";
 import { HandoffCard } from "./HandoffCard";
 import { MessageActionSheet } from "./MessageActionSheet";
 import { MessageHoverBar } from "./MessageHoverBar";
@@ -45,7 +45,9 @@ type Props = {
    * Omit in DM / single-bot so chrome stays unchanged.
    */
   speakerName?: string;
-  onHostDecide?: (ok: boolean) => void;
+  onHostDecide?: (decision: ApprovalDecision) => void;
+  /** When false, hide Always allow (machine exec_policy=ask). Default true. */
+  alwaysAllowEnabled?: boolean;
   /** Quoted parent preview when rendering a reply. */
   replyQuote?: { who: string; text: string } | null;
   /** Number of replies in this message's thread (main timeline roots). */
@@ -114,6 +116,7 @@ export function ChatMessage({
   agentId,
   speakerName,
   onHostDecide,
+  alwaysAllowEnabled = true,
   replyQuote,
   replyCount = 0,
   onReply,
@@ -154,7 +157,11 @@ export function ChatMessage({
     if (!item) return null;
     return (
       <div className="chat-row chat-row-assistant" data-msg-id={message.id}>
-        <HostConfirmCard item={item} onDecide={item.status === "pending" ? onHostDecide : undefined} />
+        <HostConfirmCard
+          item={item}
+          onDecide={item.status === "pending" ? onHostDecide : undefined}
+          alwaysAllowEnabled={alwaysAllowEnabled}
+        />
         {timeEl}
       </div>
     );
