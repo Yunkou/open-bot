@@ -20,6 +20,32 @@ from ..deferral import (
 # Same user-facing confirm as legacy llm.DEFER_ON_EXHAUST_REPLY / Go statusWaitText.
 DEFER_CONFIRM = "还在做，好了发这里。"
 
+# Soft system hint when the previous turn was superseded by a new user message.
+# Model writes one short natural sentence about what it will do next for the NEW
+# ask (plan / next step) — not a canned ack and not empty reassurance.
+AFTER_INTERRUPT_HINT = (
+    "上一轮被用户新消息打断。"
+    "先用一句自然语言说明你接下来要为本轮新问题做什么"
+    "（简短计划或下一步；禁止空安抚、禁止套话如「已认领」「收到」「好的我来处理」），"
+    "然后再动手继续完成本轮请求。"
+)
+
+
+def apply_after_interrupt_hint(
+    system: str, dynamic_system: str, *, after_interrupt: bool
+) -> tuple[str, str]:
+    """Append soft after-interrupt UX hint. No-op when flag is false."""
+    if not after_interrupt:
+        return system, dynamic_system
+    hint = AFTER_INTERRUPT_HINT
+    system_out = (f"{system}\n\n{hint}").strip() if (system or "").strip() else hint
+    dynamic_out = (
+        (f"{dynamic_system}\n\n{hint}").strip() if (dynamic_system or "").strip() else hint
+    )
+    return system_out, dynamic_out
+
+
+
 ToolHandler = Callable[[str, dict[str, Any]], Awaitable[str]]
 StatusFn = Callable[[dict[str, Any]], Awaitable[None]]
 

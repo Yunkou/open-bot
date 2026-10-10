@@ -1383,7 +1383,7 @@ export async function decideHostConfirm(
   return (await res.json()) as Message;
 }
 
-/** Content the client / server uses to mark an interrupted Bot turn (「（已停止）」 and variants). */
+/** Legacy stop-marker text; no longer persisted or stamped. Kept for history filtering. */
 export const STOP_MARKER_TEXT = "（已停止）";
 export function isStopMarkerContent(content: string | undefined | null): boolean {
   const t = (content ?? "").trim();
@@ -1395,13 +1395,11 @@ type MergeableMessage = Message & { streaming?: boolean; stopped?: boolean };
 /**
  * Fold a server message into the local list.
  * - Same id updates in place.
- * - A server stop marker (「已停止」) adopts the earliest still-local sealed stop bubble
- *   (the one stopCurrentRun stamped), never the next turn's empty streaming placeholder.
+ * - Legacy server stop markers (「已停止」) are dropped (never shown).
  * - Otherwise a local bubble with the same / prefix text takes the server id.
  * - Empty *streaming* assistant placeholders never fuzzy-match incoming messages: they belong to
  *   the run that is streaming into them, and only that run's `message_saved` (stampSavedMessage)
- *   gives them a server id. Letting them absorb arbitrary messages made an interrupted turn's
- *   stop marker land on the next turn's placeholder → two 「已停止」 in the UI, one in the DB.
+ *   gives them a server id.
  * - New rows insert before trailing streaming assistants and by created_at among sealed rows so
  *   mid-turn projected acks/stage updates stay before the final reply (not appended after it).
  */
@@ -1451,17 +1449,9 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
     prev.map((item, j) =>
       j === i ? ({ ...item, ...msg, streaming: false } as T) : item,
     );
-  const incomingStop = msg.role === "assistant" && isStopMarkerContent(msg.content);
-  if (incomingStop) {
-    // Earliest first: with several interrupted turns, server stop rows arrive in order.
-    const i = prev.findIndex(
-      (m) =>
-        m.role === "assistant" &&
-        !m.streaming &&
-        m.id.startsWith("local-") &&
-        (m.stopped || isStopMarkerContent(m.content)),
-    );
-    if (i >= 0) return adopt(i);
+  // Legacy 「（已停止）」 rows: drop rather than adopt or insert.
+  if (msg.role === "assistant" && isStopMarkerContent(msg.content)) {
+    return prev;
   }
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];

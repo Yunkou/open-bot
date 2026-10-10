@@ -238,27 +238,43 @@ func TestActiveRunsCancelReason(t *testing.T) {
 }
 
 func TestShouldPersistStopMarker(t *testing.T) {
-	if !shouldPersistStopMarker(nil) {
-		t.Fatal("nil handle: persist (Stop-compatible default)")
+	// Never persist 「（已停止）」 — Stop and supersede alike.
+	if shouldPersistStopMarker(nil) {
+		t.Fatal("nil handle: must not persist")
 	}
 	h := newRunHandle(func() {})
-	if !shouldPersistStopMarker(h) {
-		t.Fatal("unset reason: persist")
+	if shouldPersistStopMarker(h) {
+		t.Fatal("unset reason: must not persist")
 	}
 	h.markCancelReason(cancelReasonStop)
-	if !shouldPersistStopMarker(h) {
-		t.Fatal("stop: persist")
+	if shouldPersistStopMarker(h) {
+		t.Fatal("stop: must not persist")
 	}
 	h2 := newRunHandle(func() {})
 	h2.markCancelReason(cancelReasonReplace)
 	if shouldPersistStopMarker(h2) {
-		t.Fatal("replace/supersede: must not persist （已停止）")
+		t.Fatal("replace/supersede: must not persist")
 	}
-	// First write wins: stop then replace still persists.
-	h3 := newRunHandle(func() {})
-	h3.markCancelReason(cancelReasonStop)
-	h3.markCancelReason(cancelReasonReplace)
-	if !shouldPersistStopMarker(h3) {
-		t.Fatal("stop then replace: still persist")
+}
+
+func TestActiveRunsRegisterReturnsReplaced(t *testing.T) {
+	ar := newActiveRuns()
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	h1 := newRunHandle(cancel1)
+	if ar.register("c1", h1) {
+		t.Fatal("first register must not report replaced")
+	}
+	go func() {
+		<-ctx1.Done()
+		h1.finish()
+	}()
+	_, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	h2 := newRunHandle(cancel2)
+	if !ar.register("c1", h2) {
+		t.Fatal("second register must report replaced")
+	}
+	if !h1.superseded() {
+		t.Fatal("prev must be superseded")
 	}
 }

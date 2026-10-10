@@ -33,6 +33,7 @@ from .llm import (
     strip_think,
     tools_enabled,
 )
+from .harness.long_task import apply_after_interrupt_hint
 from .tool_markup import strip_tool_markup
 from .memory import (
     MemoryStore,
@@ -118,6 +119,9 @@ class RunRequest(BaseModel):
     background: bool = False
     owner_task: str | None = None
     owner_thread_id: str | None = None
+    # True when this turn supersedes an in-flight run (interrupt-and-send).
+    # Soft system hint: one short natural next-step/plan for the NEW ask, then work.
+    after_interrupt: bool = False
 
 
 class MemoryCreate(BaseModel):
@@ -649,6 +653,11 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 lessons_block=lesson_block or None,
             )
             system = "\n\n".join(p for p in (static_system, dynamic_system) if p)
+            system, dynamic_system = apply_after_interrupt_hint(
+                system,
+                dynamic_system,
+                after_interrupt=bool(getattr(body, "after_interrupt", False)),
+            )
 
             dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
 

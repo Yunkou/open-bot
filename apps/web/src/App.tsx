@@ -61,7 +61,7 @@ import {
   approveConversationRun,
   chatEventsWebSocketUrl,
   mergeIncomingMessage,
-  STOP_MARKER_TEXT,
+  isStopMarkerContent,
   createHostConfirm,
   decideHostConfirm,
   uploadConversationAttachment,
@@ -175,7 +175,7 @@ import {
   type OnboardingOption,
 } from "./components/BotOnboardingCard";
 
-type UiMessage = Message & { streaming?: boolean; /** Local stop stamp set when an interrupted empty bubble is sealed as 「（已停止）」. */ stopped?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
+type UiMessage = Message & { streaming?: boolean; /** Legacy local stop stamp; unused — empty bubbles are dropped instead of 「（已停止）」. */ stopped?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
 type SettingsTab =
   | "general"
   | "bot"
@@ -1960,23 +1960,17 @@ export default function App() {
     messagesByConvRef.current.set(id, messagesLiveRef.current);
   };
 
-  const sealStreamingMessagesForConv = (convId: string, markStopped: boolean) => {
+  const sealStreamingMessagesForConv = (convId: string, _markStopped?: boolean) => {
     patchConvMessages(convId, (prev) =>
       prev
         .filter((m) => {
           if (m.streaming && isGroupPassContent(m.content || "")) return false;
-          // New-message supersede: drop empty streaming bubbles — no visible 「（已停止）」.
-          if (m.streaming && !(m.content && m.content.trim()) && !markStopped) return false;
+          // Stop and supersede: drop empty streaming bubbles — never stamp 「（已停止）」.
+          if (m.streaming && !(m.content && m.content.trim())) return false;
           return true;
         })
         .map((m) => {
         if (!m.streaming) return m;
-        const empty = !(m.content && m.content.trim());
-        if (empty && markStopped) {
-          // Local stop stamp: the server's single stop row adopts THIS bubble (mergeIncomingMessage),
-          // not the next turn's empty streaming placeholder.
-          return { ...m, streaming: false, content: STOP_MARKER_TEXT, stopped: true };
-        }
         return { ...m, streaming: false };
       }),
     );
@@ -1986,12 +1980,13 @@ export default function App() {
 
   /** Stop a specific conversation's run (default: currently viewed). Does not touch other bots. */
   const stopCurrentRun = async (opts?: {
+    /** @deprecated Ignored — empty bubbles are always dropped; no 「（已停止）」. */
     markStopped?: boolean;
     waitForFlush?: boolean;
     conversationId?: string;
     /**
      * Abort the local stream only. Used when a newer send will supersede via
-     * server register (cancelReason=replace) so we do not stamp 「（已停止）」.
+     * server register (cancelReason=replace).
      */
     localOnly?: boolean;
   }) => {
@@ -2004,7 +1999,7 @@ export default function App() {
       runsRef.current.delete(convId);
       bumpRunBusy();
     }
-    sealStreamingMessagesForConv(convId, opts?.markStopped !== false);
+    sealStreamingMessagesForConv(convId);
     if (conversationRef.current?.id === convId) {
       setSending(false);
       setRunLabel("正在思考…");
@@ -2027,6 +2022,8 @@ export default function App() {
       .filter((m) => m.role !== "summary")
       // Drop any silence tokens that leaked into storage (journal race / old rows).
       .filter((m) => !(m.role === "assistant" && isGroupPassContent(m.content || "")))
+      // Legacy 「（已停止）」 rows: never show (Stop and supersede both omit the marker).
+      .filter((m) => !(m.role === "assistant" && isStopMarkerContent(m.content)))
       .map((m) => ({
         ...m,
         agent_name: m.agent_id ? nameOf(m.agent_id) : undefined,
@@ -2161,7 +2158,7 @@ export default function App() {
               return;
             }
             if (meta.phase === "cancelled") {
-              sealStreamingMessagesForConv(conv.id, true);
+              sealStreamingMessagesForConv(conv.id);
               if (isViewingStream()) {
                 setSending(false);
                 setRunLabel("正在思考…");
@@ -2430,11 +2427,10 @@ export default function App() {
     const threadConvAtSend = conversationRef.current?.id;
     // keep-partial-next-turn: only interrupt the *current* conversation's run.
     // Supersede: seal partial locally, drop empty bubbles (no 「（已停止）」). Server
-    // cancel is left to the next send's register (cancelReason=replace).
+    // cancel + durable abort is left to the next send's register (cancelReason=replace).
     const viewedId = conversationRef.current?.id;
     if (viewedId && runsRef.current.has(viewedId)) {
       await stopCurrentRun({
-        markStopped: false,
         localOnly: true,
         conversationId: viewedId,
       });
@@ -2751,7 +2747,7 @@ export default function App() {
               });
             }
             if (meta.phase === "cancelled") {
-              sealStreamingMessagesForConv(streamConvId!, true);
+              sealStreamingMessagesForConv(streamConvId!);
               if (isViewingStream()) {
                 setSending(false);
                 setRunLabel("正在思考…");

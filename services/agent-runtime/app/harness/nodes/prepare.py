@@ -18,6 +18,7 @@ from ...llm import (
 )
 from ...model_compat import profile_for, resolve_prompt_cache_mode
 from ...memory import build_recall_payload, scene_kind
+from ..long_task import apply_after_interrupt_hint
 from ..state import AgentState
 
 
@@ -142,6 +143,11 @@ async def prepare_node(state: AgentState, config: RunnableConfig) -> dict[str, A
         lessons_block=lesson_block or None,
     )
     system = "\n\n".join(p for p in (static_system, dynamic_system) if p)
+    system, dynamic_system = apply_after_interrupt_hint(
+        system,
+        dynamic_system,
+        after_interrupt=bool(body is not None and getattr(body, "after_interrupt", False)),
+    )
 
     dialog = [m for m in history if m.get("role") in ("user", "assistant", "summary")]
     # After a reset entry, only keep messages tagged at/after reset (or trailing turns).

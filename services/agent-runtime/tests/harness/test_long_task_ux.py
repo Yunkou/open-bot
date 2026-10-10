@@ -544,3 +544,30 @@ def test_should_project_tool_partial_throttle() -> None:
     assert should_project_tool_partial(already_projected=True, tool_llm_rounds=4) is False
     assert should_project_tool_partial(already_projected=True, tool_llm_rounds=5) is True
     assert should_project_tool_partial(already_projected=True, tool_llm_rounds=9) is True
+
+
+def test_after_interrupt_hint_is_soft_not_canned() -> None:
+    from app.harness.long_task import AFTER_INTERRUPT_HINT
+
+    assert "打断" in AFTER_INTERRUPT_HINT
+    assert "一句" in AFTER_INTERRUPT_HINT
+    # Next-step / plan for the NEW ask — not empty comfort.
+    assert "接下来" in AFTER_INTERRUPT_HINT or "下一步" in AFTER_INTERRUPT_HINT
+    assert "安抚" in AFTER_INTERRUPT_HINT  # listed as forbidden
+    assert "禁止套话" in AFTER_INTERRUPT_HINT
+
+
+def test_apply_after_interrupt_hint_noop_when_false() -> None:
+    from app.harness.long_task import apply_after_interrupt_hint
+
+    s, d = apply_after_interrupt_hint("STATIC", "DYNAMIC", after_interrupt=False)
+    assert s == "STATIC" and d == "DYNAMIC"
+
+
+def test_apply_after_interrupt_hint_appends_soft_copy() -> None:
+    from app.harness.long_task import AFTER_INTERRUPT_HINT, apply_after_interrupt_hint
+
+    s, d = apply_after_interrupt_hint("STATIC", "DYNAMIC", after_interrupt=True)
+    assert AFTER_INTERRUPT_HINT in s
+    assert AFTER_INTERRUPT_HINT in d
+    assert "禁止套话" in s

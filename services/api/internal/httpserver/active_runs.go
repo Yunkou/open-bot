@@ -30,7 +30,8 @@ type runSub struct {
 	ch chan sseEvent
 }
 
-// Cancel reasons distinguish Stop (keep 「（已停止）」) from new-message supersede (no marker).
+// Cancel reasons distinguish explicit Stop from new-message supersede.
+// Neither reason persists a visible 「（已停止）」 marker anymore.
 const (
 	cancelReasonStop    = "stop"
 	cancelReasonReplace = "replace"
@@ -79,7 +80,7 @@ func (h *runHandle) markCancelReason(reason string) {
 }
 
 // superseded reports whether this run was cancelled because a newer send
-// replaced it (keep-partial-next-turn). Empty cancel must not persist 「（已停止）」.
+// replaced it (keep-partial-next-turn).
 func (h *runHandle) superseded() bool {
 	if h == nil {
 		return false
@@ -290,10 +291,10 @@ func (h *runHandle) Unsubscribe(sub *runSub) {
 
 // register stores cancel for convID. Any previous run for the same conversation
 // is cancelled first and waited on briefly so its partial can flush
-// (keep-partial-next-turn).
-func (a *activeRuns) register(convID string, h *runHandle) {
+// (keep-partial-next-turn). Returns true when a previous run was superseded.
+func (a *activeRuns) register(convID string, h *runHandle) bool {
 	if a == nil || convID == "" || h == nil {
-		return
+		return false
 	}
 	a.mu.Lock()
 	var prev *runHandle
@@ -306,7 +307,9 @@ func (a *activeRuns) register(convID string, h *runHandle) {
 		prev.markCancelReason(cancelReasonReplace)
 		prev.cancel()
 		waitHandleDone(prev, cancelFlushWait)
+		return true
 	}
+	return false
 }
 
 func (a *activeRuns) unregister(convID string, h *runHandle) {

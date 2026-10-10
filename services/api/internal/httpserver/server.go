@@ -1469,7 +1469,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// reconnect via GET .../events.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	handle := newRunHandle(runCancel)
-	s.runs.register(conv.ID, handle)
+	replacedPrev := s.runs.register(conv.ID, handle)
 	defer func() {
 		runCancel()
 		s.runs.unregister(conv.ID, handle)
@@ -1517,54 +1517,67 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// the loop (other members still get a chance) instead of short-circuiting everyone.
 	// resumeRequestID is set when the thread is only a stale checkpoint pause: the
 	// text is queued, then this same request continues that thread so the bot replies.
+	// New-message supersede (replacedPrev): abort the old durable thread and start a
+	// fresh turn with after_interrupt so the model opens with one short natural
+	// next-step / plan for the NEW ask (not canned ack, not empty comfort).
 	resumeRequestID := ""
+	afterInterrupt := replacedPrev
 	if runtimeDurableEnabled() && len(targetAgents) == 1 {
 		_, activeReq, activeStatus, activeAgentID, aerr := s.db.ActiveHarnessThreadForConversation(conv.ID)
 		if aerr == nil && strings.TrimSpace(activeReq) != "" && activeStatus != "" &&
 			shouldSteerBusyHarness(activeAgentID, targetAgents[0]) {
-			mode := strings.TrimSpace(body.WhenBusy)
-			if mode == "" {
-				mode = "follow_up"
-			}
-			if mode == "reject" {
-				emit("error", map[string]string{"message": "busy_rejected"})
-				emit("done", map[string]any{"ok": false, "error": "busy_rejected", "when_busy": "reject"})
-				return
-			}
-			out, code, serr := s.postRuntimeJSON(runCtx, "/v1/runs/steer", map[string]any{
-				"conversation_id": conv.ID,
-				"request_id":      activeReq,
-				"text":            storedContent,
-				"mode":            mode,
-				"when_busy":       mode,
-			})
-			if serr != nil {
-				emit("error", map[string]string{"message": serr.Error()})
-				emit("done", map[string]any{"ok": false})
-				return
-			}
-			if code < 200 || code >= 300 {
-				msg := "steer_failed"
-				if e, ok := out["error"].(string); ok && e != "" {
-					msg = e
-				}
-				emit("error", map[string]string{"message": msg})
-				emit("done", map[string]any{"ok": false, "when_busy": mode})
-				return
-			}
-			approval, _ := out["approval"].(bool)
-			live, _ := out["live"].(bool)
-			if !shouldResumeStaleHarness(approval, live) {
-				emit("meta", map[string]any{
-					"phase":      "inbox_queued",
-					"when_busy":  mode,
-					"request_id": activeReq,
+			if replacedPrev {
+				// keep-partial-next-turn: do not steer into the superseded thread.
+				_, _, _ = s.postRuntimeJSON(runCtx, "/v1/runs/abort", map[string]any{
+					"conversation_id": conv.ID,
+					"request_id":      activeReq,
 				})
-				emit("inbox_updated", map[string]any{"when_busy": mode, "request_id": activeReq})
-				emit("done", map[string]any{"ok": true, "inbox": true, "when_busy": mode, "request_id": activeReq})
-				return
+				afterInterrupt = true
+			} else {
+				mode := strings.TrimSpace(body.WhenBusy)
+				if mode == "" {
+					mode = "follow_up"
+				}
+				if mode == "reject" {
+					emit("error", map[string]string{"message": "busy_rejected"})
+					emit("done", map[string]any{"ok": false, "error": "busy_rejected", "when_busy": "reject"})
+					return
+				}
+				out, code, serr := s.postRuntimeJSON(runCtx, "/v1/runs/steer", map[string]any{
+					"conversation_id": conv.ID,
+					"request_id":      activeReq,
+					"text":            storedContent,
+					"mode":            mode,
+					"when_busy":       mode,
+				})
+				if serr != nil {
+					emit("error", map[string]string{"message": serr.Error()})
+					emit("done", map[string]any{"ok": false})
+					return
+				}
+				if code < 200 || code >= 300 {
+					msg := "steer_failed"
+					if e, ok := out["error"].(string); ok && e != "" {
+						msg = e
+					}
+					emit("error", map[string]string{"message": msg})
+					emit("done", map[string]any{"ok": false, "when_busy": mode})
+					return
+				}
+				approval, _ := out["approval"].(bool)
+				live, _ := out["live"].(bool)
+				if !shouldResumeStaleHarness(approval, live) {
+					emit("meta", map[string]any{
+						"phase":      "inbox_queued",
+						"when_busy":  mode,
+						"request_id": activeReq,
+					})
+					emit("inbox_updated", map[string]any{"when_busy": mode, "request_id": activeReq})
+					emit("done", map[string]any{"ok": true, "inbox": true, "when_busy": mode, "request_id": activeReq})
+					return
+				}
+				resumeRequestID = activeReq
 			}
-			resumeRequestID = activeReq
 		}
 	}
 
@@ -1648,6 +1661,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"request_id":       requestID,
 			"max_tool_rounds":  s.effectiveMaxToolRounds(uid),
 		}
+		if afterInterrupt {
+			payloadMap["after_interrupt"] = true
+		}
 		if replyToID != "" {
 			payloadMap["reply_to_id"] = replyToID
 		}
@@ -1687,11 +1703,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := runCtx.Err(); err != nil {
 		cancelled = true
-		if len(targetAgents) > 0 && shouldPersistStopMarker(handle) {
-			// Explicit Stop before any candidate ran — keep a stop marker in history.
-			// Supersede by a newer send: no visible 「（已停止）」.
-			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(targetAgents[0], threadRootID, ""))
-		}
+		// Empty cancel: never persist 「（已停止）」 (Stop or supersede).
 	} else {
 		// Multi-candidate group: run concurrently (goroutines). Single-candidate
 		// (DM / one @) still goes through the same path with wg size 1.
@@ -1711,9 +1723,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					cancelledMu.Lock()
 					cancelled = true
 					cancelledMu.Unlock()
-					if shouldPersistStopMarker(handle) {
-						_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, ""))
-					}
+					// Empty cancel before candidate ran: no 「（已停止）」 bubble.
 					return
 				}
 				agentEmit := stampEmitAgentID(emit, prep.agentID)
@@ -1738,8 +1748,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				// that is the "直接无返回" path (bubble dropped as PASS / never persisted).
 				passed := conv.ChannelID != "" && !runCancelled && runErr == nil && isGroupPassReply(assistantText)
 				// Persist partial assistant text even when cancelled mid-stream.
-				// Empty cancel → keep a light UI/history marker so the next turn still
-				// sees the interrupted turn (keep-partial-next-turn).
+				// Empty cancel: no 「（已停止）」 marker (Stop or supersede).
 				// Group PASS / empty optional silence: do not persist a bubble.
 				if passed {
 					// Durable journal may have already projected PASS via commit_assistant(project=True).
@@ -1754,12 +1763,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				} else if strings.TrimSpace(assistantText) != "" {
 					// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
 					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
-				} else if runCancelled {
-					if shouldPersistStopMarker(handle) {
-						_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, runID))
-					}
-				} else if runErr != nil {
-					// Persist a visible failure bubble (same family as 「（已停止）」) so refresh
+				} else if runErr != nil && !runCancelled {
+					// Persist a visible failure bubble so refresh
 					// and other clients still see the turn instead of silent empty.
 					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, nil, agentEmit)
 				}
@@ -2114,10 +2119,11 @@ func runtimeDoneFailure(payload map[string]any) error {
 	return fmt.Errorf("%s", errMsg)
 }
 
-// shouldPersistStopMarker is true for explicit Stop (or unknown cancel).
-// New-message supersede must not leave a visible 「（已停止）」 bubble.
+// shouldPersistStopMarker is always false: neither explicit Stop nor supersede
+// may leave a visible 「（已停止）」 bubble. Kept for tests / call-site clarity.
 func shouldPersistStopMarker(h *runHandle) bool {
-	return h == nil || !h.superseded()
+	_ = h
+	return false
 }
 
 // formatAssistantRunFailure builds the persisted / client-visible failure bubble text.
