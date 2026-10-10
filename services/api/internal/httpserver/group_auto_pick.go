@@ -98,9 +98,17 @@ func groupHasExplicitAddressing(content string, explicit []string, members []str
 // autoPickHeuristic picks ≤K members by keyword / role-description match; else fail-open to lead.
 // No extra LLM. leadID is conv.AgentID / group lead assistant.
 func autoPickHeuristic(userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) groupAutoPickResult {
+	return autoPickHeuristicAs("heuristic", userText, members, agents, leadID, k, synopsis)
+}
+
+// autoPickHeuristicAs is autoPickHeuristic with an explicit log/Method label
+// (e.g. "decision->heuristic" when B-tier fail-opens).
+func autoPickHeuristicAs(method, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) groupAutoPickResult {
 	k = clampAutoPickK(k)
 	leadID = strings.TrimSpace(leadID)
-	method := "heuristic"
+	if strings.TrimSpace(method) == "" {
+		method = "heuristic"
+	}
 
 	memberSet := map[string]struct{}{}
 	for _, m := range members {
@@ -470,11 +478,8 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {
 			return pick
 		}
-		pick := autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
-		if pick.Method == "heuristic" {
-			pick.Method = "decision->heuristic"
-		}
-		return pick
+		// Fail-open logs Method as decision->heuristic (docs §6), not bare heuristic.
+		return autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
 	default: // heuristic
 		return autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
 	}

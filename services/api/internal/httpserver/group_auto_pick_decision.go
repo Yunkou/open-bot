@@ -38,12 +38,17 @@ type autoPickDecisionDeps struct {
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	k = clampAutoPickK(k)
-	if deps == nil || deps.Decide == nil {
+	if deps == nil {
+		log.Printf("auto_pick=decision note=deps_nil_failopen_heuristic")
 		return groupAutoPickResult{}, false
 	}
 	provider := db.NormalizeDecisionProvider(deps.Provider)
 	if provider == "off" {
 		log.Printf("auto_pick=decision note=provider_off_failopen_heuristic")
+		return groupAutoPickResult{}, false
+	}
+	if deps.Decide == nil {
+		log.Printf("auto_pick=decision note=decide_nil_failopen_heuristic")
 		return groupAutoPickResult{}, false
 	}
 
