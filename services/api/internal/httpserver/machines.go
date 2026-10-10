@@ -377,6 +377,8 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 	// allow + Auto-review on: no confirm card (hard deny still deny; 先询问 still confirms).
 	// ask forces confirm. deny already returned above.
 	rev := classifyHostExecReviewForMachine(op, body.Path, body.Dest, settings, policy)
+	// Always-allow list: auto-skip confirm when matched (hard deny + exec_policy=ask still win).
+	rev = applyUserToolAllowlist(rev, s.toolAllowlistOrEmpty(uid), op, policy, "")
 	if rev.Tier == hostExecReviewDeny {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok": false, "denied": true, "auto_review": "deny",
@@ -825,15 +827,20 @@ func (s *Server) handleDecideHostConfirm(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		Status string `json:"status"`
+		Status   string       `json:"status"`   // legacy: allowed | denied
+		Decision string       `json:"decision"` // allow_once | always_allow | deny
+		Approve  *bool        `json:"approve"`  // legacy bool (maps like /approve)
+		Scope    ApproveScope `json:"scope"`
+		Reason   string       `json:"reason"`
+		AgentID  string       `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	status := strings.TrimSpace(body.Status)
-	if status != "allowed" && status != "denied" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be allowed or denied"})
+	decision, status, derr := ResolveHostConfirmDecision(body.Status, body.Decision, body.Approve)
+	if derr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": derr.Error()})
 		return
 	}
 	found, err := s.db.RecentHostConfirms(conversationID)
@@ -854,6 +861,25 @@ func (s *Server) handleDecideHostConfirm(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusOK, found[i])
 			return
 		}
+		var allowEntry any
+		if decision == DecisionAlwaysAllow {
+			scope := InferScopeFromHostConfirm(payload.Op, body.Scope)
+			if scope.ToolGroup == "" && scope.Tool == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "scope.tool or scope.tool_group required for always_allow (or host-confirm op to infer)",
+				})
+				return
+			}
+			entry, uerr := s.db.UpsertUserToolAllowlist(uid, scope.ToolGroup, scope.Tool, strings.TrimSpace(body.AgentID))
+			if uerr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": uerr.Error()})
+				return
+			}
+			allowEntry = entry
+		}
+		if strings.TrimSpace(body.Reason) != "" && strings.TrimSpace(payload.Reason) == "" {
+			payload.Reason = strings.TrimSpace(body.Reason)
+		}
 		payload.Status = status
 		raw, mErr := json.Marshal(payload)
 		if mErr != nil {
@@ -869,7 +895,16 @@ func (s *Server) handleDecideHostConfirm(w http.ResponseWriter, r *http.Request)
 		if s.confirms != nil {
 			s.confirms.resolve(conversationID, payload.ReqID, status == "allowed")
 		}
-		writeJSON(w, http.StatusOK, updated)
+		// Keep Message JSON shape; add decision / allowlist for three-state clients.
+		rawMsg, _ := json.Marshal(updated)
+		out := map[string]any{}
+		_ = json.Unmarshal(rawMsg, &out)
+		out["decision"] = decision
+		out["status"] = status
+		if allowEntry != nil {
+			out["allowlist_entry"] = allowEntry
+		}
+		writeJSON(w, http.StatusOK, out)
 		return
 	}
 	writeJSON(w, http.StatusNotFound, map[string]string{"error": "confirm not found"})

@@ -64,9 +64,12 @@ type durableSteerBody struct {
 }
 
 type durableApproveBody struct {
-	RequestID string `json:"request_id"`
-	Approve   *bool  `json:"approve"`
-	Reason    string `json:"reason"`
+	RequestID string       `json:"request_id"`
+	Approve   *bool        `json:"approve"`
+	Decision  string       `json:"decision"` // allow_once | always_allow | deny (wins over approve)
+	Scope     ApproveScope `json:"scope"`
+	Reason    string       `json:"reason"`
+	AgentID   string       `json:"agent_id"` // optional; stamped on allowlist when always_allow
 }
 
 // POST /v1/conversations/{id}/steer — queue follow-up/steer on a durable run.
@@ -113,7 +116,7 @@ func (s *Server) handleConversationSteer(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, out)
 }
 
-// POST /v1/conversations/{id}/approve — resume tool approval interrupt.
+// POST /v1/conversations/{id}/approve — resume tool approval interrupt (three-state).
 func (s *Server) handleConversationApprove(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
@@ -131,14 +134,33 @@ func (s *Server) handleConversationApprove(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "request_id required"})
 		return
 	}
-	approve := true
-	if body.Approve != nil {
-		approve = *body.Approve
+	decision, derr := ResolveApproveDecision(body.Decision, body.Approve)
+	if derr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": derr.Error()})
+		return
+	}
+	approve := DecisionApproves(decision)
+	var allowEntry any
+	if decision == DecisionAlwaysAllow {
+		scope := ResolveApproveScope(body.Scope, "")
+		if scope.ToolGroup == "" && scope.Tool == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "scope.tool or scope.tool_group required for always_allow",
+			})
+			return
+		}
+		entry, uerr := s.db.UpsertUserToolAllowlist(uid, scope.ToolGroup, scope.Tool, strings.TrimSpace(body.AgentID))
+		if uerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": uerr.Error()})
+			return
+		}
+		allowEntry = entry
 	}
 	out, code, err := s.postRuntimeJSON(r.Context(), "/v1/runs/approve", map[string]any{
 		"conversation_id": id,
 		"request_id":      body.RequestID,
 		"approve":         approve,
+		"decision":        decision,
 		"reason":          body.Reason,
 	})
 	if err != nil {
@@ -149,9 +171,15 @@ func (s *Server) handleConversationApprove(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, code, out)
 		return
 	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	out["decision"] = decision
+	if allowEntry != nil {
+		out["allowlist_entry"] = allowEntry
+	}
 	writeJSON(w, http.StatusOK, out)
 }
-
 
 // wantBusyReplace is true for new-message supersede: either the in-process
 // register replaced a prior run, or the client sent when_busy=replace.

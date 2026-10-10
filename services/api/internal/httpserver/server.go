@@ -88,6 +88,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("GET /v1/me/settings", s.requireAuth(s.handleGetUserSettings))
 	mux.HandleFunc("PUT /v1/me/settings", s.requireAuth(s.handlePutUserSettings))
+	mux.HandleFunc("GET /v1/me/tool-allowlist", s.requireAuth(s.handleListToolAllowlist))
+	mux.HandleFunc("DELETE /v1/me/tool-allowlist/{id}", s.requireAuth(s.handleDeleteToolAllowlist))
 
 	// Admin auth (dedicated; members get 403 — chat users use /v1/auth/login)
 	mux.HandleFunc("POST /v1/admin/auth/login", s.handleAdminLogin)
@@ -501,7 +503,6 @@ func (s *Server) handleListLLM(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connections": pub})
 }
-
 
 const (
 	defaultMaxToolRounds = 24
@@ -1685,16 +1686,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			requestID = resumeRequestID
 		}
 		payloadMap := map[string]any{
-			"conversation_id":  id,
-			"content":          runtimeContent,
-			"agent_id":         agentID,
-			"user_id":          uid,
-			"channel_id":       conv.ChannelID,
-			"system_prompt":    systemPrompt,
-			"messages":         history,
-			"enabled_skills":   enabledSkills,
-			"request_id":       requestID,
-			"max_tool_rounds":  s.effectiveMaxToolRounds(uid),
+			"conversation_id": id,
+			"content":         runtimeContent,
+			"agent_id":        agentID,
+			"user_id":         uid,
+			"channel_id":      conv.ChannelID,
+			"system_prompt":   systemPrompt,
+			"messages":        history,
+			"enabled_skills":  enabledSkills,
+			"request_id":      requestID,
+			"max_tool_rounds": s.effectiveMaxToolRounds(uid),
 		}
 		if afterInterrupt {
 			payloadMap["after_interrupt"] = true
@@ -1720,11 +1721,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			payloadMap["client"] = body.Client
 		}
 		attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+		attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
 		s.attachPreferredMachine(payloadMap, uid, agentID)
 		preps = append(preps, groupCandidatePrep{
-			index:     i,
-			agentID:   agentID,
-			agentName: agentName,
+			index:      i,
+			agentID:    agentID,
+			agentName:  agentName,
 			payloadMap: payloadMap,
 			recallCtx: &recallPersistContext{
 				UserID:         uid,
@@ -1938,6 +1940,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 						payloadMap["client"] = body.Client
 					}
 					attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+					attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
 					s.attachPreferredMachine(payloadMap, uid, agentID)
 					secondPreps = append(secondPreps, groupCandidatePrep{
 						index:      i,

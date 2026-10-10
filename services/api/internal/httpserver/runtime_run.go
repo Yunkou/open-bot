@@ -105,6 +105,7 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(userID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(userID))
+	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(userID))
 	s.attachPreferredMachine(payloadMap, userID, agentID)
 	payload, _ := json.Marshal(payloadMap)
 

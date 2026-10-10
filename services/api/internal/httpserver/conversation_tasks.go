@@ -283,6 +283,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(task.UserID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(task.UserID))
+	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(task.UserID))
 	s.attachPreferredMachine(payloadMap, task.UserID, task.AgentID)
 
 	emit := func(event string, data any) {
@@ -351,7 +352,6 @@ func botAssistantMessageOpts(agentID, threadRootID, requestID string) db.AddMess
 		RequestID:    strings.TrimSpace(requestID),
 	}
 }
-
 
 // dropProjectedGroupPass deletes an assistant row already projected for this
 // runtime request_id when the turn is classified as group PASS / silence.
