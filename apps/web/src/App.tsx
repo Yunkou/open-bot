@@ -2010,7 +2010,12 @@ export default function App() {
       setRunLabel("正在思考…");
     }
     if (opts?.localOnly) return;
-    const cancelPromise = cancelConversationRun(convId).catch(() => {});
+    const rid =
+      conversationRef.current?.id === convId ? lastRequestIdRef.current.trim() : "";
+    const cancelPromise = cancelConversationRun(
+      convId,
+      rid ? { requestId: rid } : undefined,
+    ).catch(() => {});
     if (opts?.waitForFlush) {
       await cancelPromise;
     }

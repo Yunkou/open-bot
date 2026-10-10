@@ -286,6 +286,18 @@ async def run_durable_events(
             meta=meta, rid=rid, tid=tid, detail=str(gi)
         ):
             yield frame
+    except asyncio.CancelledError:
+        # Explicit Stop cancels the Go→runtime HTTP request (ASGI). Mark the
+        # harness thread aborted so it does not stay "running" if /v1/runs/abort
+        # raced or the client omitted request_id.
+        logger.info("durable run cancelled thread=%s", tid)
+        try:
+            await journal.set_status("aborted")
+        except Exception:  # noqa: BLE001
+            logger.exception("durable cancel: set_status aborted failed thread=%s", tid)
+        if root_obs is not None:
+            lf.update_obs(root_obs, metadata={"cancelled": True})
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("durable run failed thread=%s", tid)
         await journal.set_status("failed")

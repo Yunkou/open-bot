@@ -1286,12 +1286,21 @@ func (s *Server) handleCancelConversationRun(w http.ResponseWriter, r *http.Requ
 	}
 	_ = s.runs.cancel(id)
 	_, _ = s.cancelTasksAndNotify(uid, conv, nil)
-	// Best-effort durable abort when client supplies request_id (LangGraph thread).
+	// Best-effort durable abort so harness_threads does not stay "running".
+	// Prefer client request_id; fall back to the newest busy harness row for
+	// this conversation (web/mobile historically omitted the body field).
 	var body struct {
 		RequestID string `json:"request_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if rid := strings.TrimSpace(body.RequestID); rid != "" && runtimeDurableEnabled() {
+	rid := strings.TrimSpace(body.RequestID)
+	if rid == "" && runtimeDurableEnabled() {
+		_, activeReq, _, _, aerr := s.db.ActiveHarnessThreadForConversation(id)
+		if aerr == nil {
+			rid = strings.TrimSpace(activeReq)
+		}
+	}
+	if rid != "" && runtimeDurableEnabled() {
 		_, _, _ = s.postRuntimeJSON(r.Context(), "/v1/runs/abort", map[string]any{
 			"conversation_id": id,
 			"request_id":      rid,

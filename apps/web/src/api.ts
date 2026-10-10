@@ -956,10 +956,18 @@ export async function uploadConversationAttachment(
   return res.json();
 }
 
-export async function cancelConversationRun(conversationId: string): Promise<void> {
+export async function cancelConversationRun(
+  conversationId: string,
+  opts?: { requestId?: string },
+): Promise<void> {
+  const rid = (opts?.requestId || "").trim();
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/cancel`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: {
+      ...authHeaders(),
+      ...(rid ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(rid ? { body: JSON.stringify({ request_id: rid }) } : {}),
   });
   // Idempotent: 204 even when no run is active; ignore 404 for older servers.
   if (!res.ok && res.status !== 204 && res.status !== 404) {

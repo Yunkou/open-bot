@@ -191,10 +191,22 @@ export async function getConversationRunStatus(
   return { active: Boolean(data.active) };
 }
 
-export async function cancelConversationRun(conversationId: string): Promise<void> {
+export async function cancelConversationRun(
+  conversationId: string,
+  opts?: { requestId?: string },
+): Promise<void> {
   // 幂等：无活跃 run 时后端也返回 204，旧版本服务器可能 404
+  const rid = (opts?.requestId || "").trim();
   try {
-    await request(`/v1/conversations/${conversationId}/cancel`, { method: "POST" });
+    await request(`/v1/conversations/${conversationId}/cancel`, {
+      method: "POST",
+      ...(rid
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ request_id: rid }),
+          }
+        : {}),
+    });
   } catch (err) {
     if (err instanceof ApiError && (err.status === 204 || err.status === 404)) return;
     throw err;
