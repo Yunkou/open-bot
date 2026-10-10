@@ -20,7 +20,7 @@ type Channel struct {
 	TaskActive     bool      `json:"task_active,omitempty"`
 	// MemberProfiles carries avatar shape/color for each member agent.
 	MemberProfiles []ChannelMemberProfile `json:"member_profiles,omitempty"`
-	// Settings: auto_pick / debug「本轮将由谁回答」(see ChannelSettings).
+	// Settings: auto_pick off|heuristic|decision / debug「本轮将由谁回答」(see ChannelSettings).
 	Settings ChannelSettings `json:"settings"`
 }
 

@@ -96,15 +96,42 @@ func TestSecondFailOpenTargets(t *testing.T) {
 	}
 }
 
-func TestOrgAutoPickEnabledDefaultOn(t *testing.T) {
-	if !orgAutoPickEnabled("") || !orgAutoPickEnabled("{}") {
-		t.Fatal("default on")
+func TestOrgAutoPickModeDefaultHeuristic(t *testing.T) {
+	if orgAutoPickMode("") != db.AutoPickHeuristic || orgAutoPickMode("{}") != db.AutoPickHeuristic {
+		t.Fatal("default heuristic")
 	}
-	if orgAutoPickEnabled(`{"auto_pick":false}`) {
-		t.Fatal("false should disable")
+	if orgAutoPickMode(`{"auto_pick":false}`) != db.AutoPickOff {
+		t.Fatal("false → off")
 	}
-	if !orgAutoPickEnabled(`{"auto_pick":true}`) {
-		t.Fatal("true should enable")
+	if orgAutoPickMode(`{"auto_pick":true}`) != db.AutoPickHeuristic {
+		t.Fatal("true → heuristic")
+	}
+	if orgAutoPickMode(`{"auto_pick":"off"}`) != db.AutoPickOff {
+		t.Fatal("string off")
+	}
+	if orgAutoPickMode(`{"auto_pick":"heuristic"}`) != db.AutoPickHeuristic {
+		t.Fatal("string heuristic")
+	}
+	if orgAutoPickMode(`{"auto_pick":"decision"}`) != db.AutoPickDecision {
+		t.Fatal("string decision")
+	}
+	if !orgAutoPickEnabled("") || orgAutoPickEnabled(`{"auto_pick":"off"}`) {
+		t.Fatal("orgAutoPickEnabled wrapper")
+	}
+}
+
+func TestRunAutoPickByModeDecisionFailOpenHeuristic(t *testing.T) {
+	members, agents := testGroupAgents()
+	got := runAutoPickByMode(db.AutoPickDecision, "帮我写个函数", members, agents, "lead", 1, "")
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+		t.Fatalf("decision should fail-open to heuristic pick, got %#v", got.AgentIDs)
+	}
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("method=%s want decision->heuristic", got.Method)
+	}
+	// Must NOT collapse to lead-only when heuristic has a match.
+	if got.Fallback == "lead" && got.AgentIDs[0] == "lead" {
+		t.Fatal("decision unimplemented must not force lead-only when heuristic matches")
 	}
 }
 
@@ -127,22 +154,60 @@ func TestDisplayNamesForAgentsNoIDs(t *testing.T) {
 	}
 }
 
-func TestChannelSettingsEffectiveAutoPick(t *testing.T) {
-	off := false
-	on := true
+func TestChannelSettingsEffectiveAutoPickMode(t *testing.T) {
 	s := db.ChannelSettings{}
-	if !s.EffectiveAutoPick(true) {
-		t.Fatal("inherit org on")
+	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickHeuristic {
+		t.Fatal("inherit org heuristic")
 	}
-	if s.EffectiveAutoPick(false) {
+	if s.EffectiveAutoPickMode(db.AutoPickOff) != db.AutoPickOff {
 		t.Fatal("inherit org off")
 	}
-	s.AutoPick = &off
-	if s.EffectiveAutoPick(true) {
+	if s.EffectiveAutoPickMode(db.AutoPickDecision) != db.AutoPickDecision {
+		t.Fatal("inherit org decision")
+	}
+	if s.EffectiveAutoPickMode("") != db.AutoPickHeuristic {
+		t.Fatal("empty org → heuristic default")
+	}
+	s.AutoPick = db.AutoPickOff
+	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickOff {
 		t.Fatal("channel off wins")
 	}
-	s.AutoPick = &on
-	if !s.EffectiveAutoPick(false) {
-		t.Fatal("channel on wins")
+	s.AutoPick = db.AutoPickHeuristic
+	if s.EffectiveAutoPickMode(db.AutoPickOff) != db.AutoPickHeuristic {
+		t.Fatal("channel heuristic wins")
+	}
+	s.AutoPick = db.AutoPickDecision
+	if s.EffectiveAutoPickMode(db.AutoPickHeuristic) != db.AutoPickDecision {
+		t.Fatal("channel decision wins")
+	}
+	// Legacy EffectiveAutoPick bool helper
+	s.AutoPick = ""
+	if !s.EffectiveAutoPick(true) || s.EffectiveAutoPick(false) {
+		t.Fatal("EffectiveAutoPick bool wrapper")
 	}
 }
+
+func TestParseAutoPickModeMigration(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{true, db.AutoPickHeuristic},
+		{false, db.AutoPickOff},
+		{"heuristic", db.AutoPickHeuristic},
+		{"decision", db.AutoPickDecision},
+		{"off", db.AutoPickOff},
+		{"", ""},
+		{nil, ""},
+	}
+	for _, c := range cases {
+		got, err := db.ParseAutoPickMode(c.in)
+		if err != nil || got != c.want {
+			t.Fatalf("ParseAutoPickMode(%v)=%q err=%v want %q", c.in, got, err, c.want)
+		}
+	}
+	if _, err := db.ParseAutoPickMode("nope"); err == nil {
+		t.Fatal("unknown should error")
+	}
+}
+

@@ -1867,7 +1867,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if allowSecond && replied == 0 && conv.ChannelID != "" && len(channelMembers) > 0 {
 			secondTargets, secondLeadFB, fb := secondFailOpenTargets(channelMembers, ranIDs, conv.AgentID)
 			if len(secondTargets) > 0 {
-				log.Printf("auto_pick=heuristic ids=%v conf=0.00 fallback=%s", secondTargets, fb)
+				method := "heuristic"
+				if sendPlan.AutoPick != nil && sendPlan.AutoPick.Method != "" {
+					method = sendPlan.AutoPick.Method
+				}
+				log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=%s", method, secondTargets, fb)
 				leadFallbackAgents = secondLeadFB
 				if sendPlan.ShowReplyCandidates {
 					emit("meta", map[string]any{
@@ -2029,7 +2033,7 @@ type groupSendPlan struct {
 
 // resolveSendTargets picks which agents should answer this turn.
 // DM: always the conversation's agent.
-// Group: @ / @everyone forced; no @ → AutoPick (A-tier) or all members when disabled.
+// Group: @ / @everyone forced; no @ → AutoPick mode (off|heuristic|decision) or all members when off.
 func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) ([]string, error) {
 	plan, err := s.planSendTargets(uid, conv, explicit, content, replyParent)
 	if err != nil {
@@ -2056,16 +2060,16 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	base := resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID)
 	plan.ShowReplyCandidates = ch.Settings.ShowReplyCandidates
 
-	orgEnabled := true
+	orgMode := db.AutoPickHeuristic
 	if u, uerr := s.db.GetUserByID(uid); uerr == nil && u != nil && u.OrgID != "" {
 		if settings, serr := s.db.GetOrgSettings(u.OrgID); serr == nil && settings != nil {
-			orgEnabled = orgAutoPickEnabled(settings.FeatureFlagsJSON)
+			orgMode = orgAutoPickMode(settings.FeatureFlagsJSON)
 		}
 	}
-	autoOn := ch.Settings.EffectiveAutoPick(orgEnabled)
+	mode := ch.Settings.EffectiveAutoPickMode(orgMode)
 
-	// Never replace @ / @everyone / explicit agent_ids.
-	if groupHasExplicitAddressing(content, explicit, members, agents) || !autoOn {
+	// Never replace @ / @everyone / explicit agent_ids. Mode off → all members (status quo).
+	if groupHasExplicitAddressing(content, explicit, members, agents) || mode == db.AutoPickOff {
 		plan.Targets = base
 		if plan.ShowReplyCandidates {
 			plan.DebugNames = displayNamesForAgents(plan.Targets, agents)
@@ -2078,7 +2082,7 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 		// Exclude the user message just saved if present as last; still useful as soft signal.
 		synopsis = recentMessagesSynopsis(msgs, 2)
 	}
-	pick := autoPickHeuristic(content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis)
+	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis)
 	plan.AutoPick = &pick
 	plan.Targets = pick.AgentIDs
 	if len(plan.Targets) == 0 {
@@ -2502,14 +2506,15 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePatchChannel updates channel settings (auto_pick / show_reply_candidates).
+// auto_pick: "off" | "heuristic" | "decision" (legacy bool true→heuristic, false→off still accepted).
 // show_reply_candidates powers client debug「本轮将由谁回答」(default off; names only, no agent_id).
 func (s *Server) handlePatchChannel(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
 	var body struct {
-		AutoPick            *bool `json:"auto_pick"`
-		AutoPickK           *int  `json:"auto_pick_k"`
-		ShowReplyCandidates *bool `json:"show_reply_candidates"`
+		AutoPick            json.RawMessage `json:"auto_pick"`
+		AutoPickK           *int            `json:"auto_pick_k"`
+		ShowReplyCandidates *bool           `json:"show_reply_candidates"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -2517,8 +2522,22 @@ func (s *Server) handlePatchChannel(w http.ResponseWriter, r *http.Request) {
 	}
 	patch := db.ChannelSettings{}
 	setAuto, setK, setShow := false, false, false
-	if body.AutoPick != nil {
-		patch.AutoPick = body.AutoPick
+	if len(body.AutoPick) > 0 && string(body.AutoPick) != "null" {
+		var anyVal any
+		if err := json.Unmarshal(body.AutoPick, &anyVal); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid auto_pick"})
+			return
+		}
+		mode, err := db.ParseAutoPickMode(anyVal)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if mode == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "auto_pick must be off|heuristic|decision"})
+			return
+		}
+		patch.AutoPick = mode
 		setAuto = true
 	}
 	if body.AutoPickK != nil {

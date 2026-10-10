@@ -400,30 +400,47 @@ func displayNamesForAgents(ids []string, agents []*db.Agent) []string {
 	return names
 }
 
-// orgAutoPickEnabled reads feature_flags_json.auto_pick; missing key → true (A-tier default ON).
-func orgAutoPickEnabled(flagsJSON string) bool {
+// orgAutoPickMode reads feature_flags_json.auto_pick as off|heuristic|decision.
+// Missing key → heuristic. Legacy bool true→heuristic, false→off.
+func orgAutoPickMode(flagsJSON string) string {
 	flagsJSON = strings.TrimSpace(flagsJSON)
 	if flagsJSON == "" || flagsJSON == "{}" {
-		return true
+		return db.AutoPickHeuristic
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(flagsJSON), &m); err != nil {
-		return true
+		return db.AutoPickHeuristic
 	}
 	v, ok := m["auto_pick"]
 	if !ok {
-		return true
+		return db.AutoPickHeuristic
 	}
-	switch t := v.(type) {
-	case bool:
-		return t
-	case string:
-		s := strings.ToLower(strings.TrimSpace(t))
-		return s != "0" && s != "false" && s != "off" && s != "no"
-	case float64:
-		return t != 0
-	default:
-		return true
+	mode, err := db.ParseAutoPickMode(v)
+	if err != nil || mode == "" {
+		return db.AutoPickHeuristic
+	}
+	return mode
+}
+
+// orgAutoPickEnabled is true when org mode is not off (legacy helper).
+func orgAutoPickEnabled(flagsJSON string) bool {
+	return orgAutoPickMode(flagsJSON) != db.AutoPickOff
+}
+
+// runAutoPickByMode applies channel/org auto_pick mode for a no-@ turn.
+// decision (B-tier) is not implemented yet: fail-open to heuristic (not lead-only) + log note.
+func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) groupAutoPickResult {
+	mode = db.NormalizeAutoPickMode(mode)
+	switch mode {
+	case db.AutoPickDecision:
+		log.Printf("auto_pick=decision note=unimplemented_failopen_heuristic")
+		pick := autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
+		if pick.Method == "heuristic" {
+			pick.Method = "decision->heuristic"
+		}
+		return pick
+	default: // heuristic
+		return autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
 	}
 }
 
