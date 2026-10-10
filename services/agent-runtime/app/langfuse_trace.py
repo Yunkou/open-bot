@@ -431,6 +431,73 @@ def observation_tool(name: str, args: dict[str, Any] | None = None) -> Iterator[
 
 
 
+@contextmanager
+def observation_decision(
+    *,
+    name: str = "open-bot.decision",
+    model: str | None = None,
+    provider: str | None = None,
+    state: Any = None,
+    questions: Any = None,
+    metadata: dict[str, Any] | None = None,
+) -> Iterator[Any]:
+    """Generation observation for SystemOne decide (Jev / Laya / Unsloth).
+
+    Used by /v1/decision/test, /v1/decision/decide, and try_decide. Soft-fails
+    to _Noop when Langfuse is off. Safe as a root observation (admin probe /
+    auto_pick) or nested under open-bot.run when decide runs in-process.
+    """
+    client = get_langfuse()
+    if client is None:
+        yield _Noop()
+        return
+
+    meta: dict[str, Any] = {"kind": "decision"}
+    if provider:
+        meta["provider"] = str(provider)
+    if metadata:
+        for k, v in metadata.items():
+            if k in ("api_key", "system_prompt", "OPENAI_API_KEY"):
+                continue
+            meta[k] = v
+
+    safe_in = truncate(
+        {
+            "state": state,
+            "questions": questions,
+            "provider": provider or "",
+            "model": model or "",
+        }
+    )
+    obs_cm: Any | None = None
+    gen: Any = _Noop()
+    entered = False
+    try:
+        try:
+            obs_cm = client.start_as_current_observation(
+                as_type="generation",
+                name=name,
+                model=model,
+                input=safe_in,
+                metadata=meta,
+            )
+            gen = obs_cm.__enter__()
+            entered = True
+        except Exception as e:  # noqa: BLE001
+            logger.debug("langfuse decision obs failed: %s", e)
+            obs_cm = None
+            gen = _Noop()
+            entered = False
+        yield gen  # exactly once
+    finally:
+        if entered and obs_cm is not None:
+            try:
+                obs_cm.__exit__(*sys.exc_info())
+            except Exception as e:  # noqa: BLE001
+                logger.debug("langfuse decision exit skipped: %s", e)
+
+
+
 def event_status(phase: str, label: str | None = None) -> None:
     """Optional light-weight event for SSE status phases."""
     client = get_langfuse()

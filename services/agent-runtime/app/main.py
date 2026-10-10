@@ -267,7 +267,12 @@ class DecisionTestRequest(DecisionSettings):
 
 
 def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
-    """Shared path for admin probe and group Auto-pick (SystemOne factory)."""
+    """Shared path for admin probe and group Auto-pick (SystemOne factory).
+
+    Emits a Langfuse generation ``open-bot.decision`` when tracing is enabled
+    (same soft-fail helpers as LLM). Covers admin 检测模型 (/v1/decision/test)
+    and auto_pick=decision (/v1/decision/decide).
+    """
     client = build_client(body)
     if not client.enabled:
         return {"enabled": False, "provider": "off", "answers": {}}
@@ -277,11 +282,45 @@ def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
             questions = {"ok": {"type": "noul", "instructions": "Is the state non-empty?"}}
         else:
             raise HTTPException(status_code=400, detail="questions 不能为空")
-    try:
-        result = client.decide(body.state, questions)
-    except DecisionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return result.to_dict()
+    provider = str(getattr(client, "provider", "") or body.provider or "")
+    model = str(getattr(client, "model", "") or body.model or "") or None
+    meta = {
+        "provider": provider,
+        "endpoint": "test" if default_probe else "decide",
+        "probe": bool(default_probe),
+    }
+    with lf.observation_decision(
+        model=model,
+        provider=provider,
+        state=body.state,
+        questions=questions,
+        metadata=meta,
+    ) as obs:
+        try:
+            result = client.decide(body.state, questions)
+        except DecisionError as exc:
+            lf.update_obs(
+                obs,
+                level="ERROR",
+                status_message=str(exc)[:500],
+                output=lf.truncate({"error": str(exc)[:500]}),
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        out = result.to_dict()
+        usage = lf.parse_usage_details(getattr(result, "usage", None))
+        update: dict[str, Any] = {
+            "output": lf.truncate(out.get("answers") or out),
+            "model": result.model or model,
+            "metadata": {
+                **meta,
+                "decision_model": result.model or model or "",
+            },
+        }
+        if usage:
+            update["usage_details"] = usage
+        lf.update_obs(obs, **update)
+    lf.flush()
+    return out
 
 
 @app.post("/v1/decision/test")

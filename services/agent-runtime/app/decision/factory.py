@@ -82,15 +82,49 @@ def try_decide(state: Any, questions: dict[str, Any], client: Any | None = None)
     """Return a decision dict, or None when the layer is off or the call fails.
 
     Failures are logged and swallowed so a decision outage does not stop the chat turn.
+    When Langfuse is enabled, emits ``open-bot.decision`` (nests under the run
+    trace if one is current).
     """
+    from .. import langfuse_trace as lf
+
     active = client if client is not None else current_decision()
     if not getattr(active, "enabled", False):
         return None
-    try:
-        result = active.decide(state, questions)
-    except DecisionError as exc:
-        logger.warning("decision skipped: %s", exc)
-        return None
-    if not isinstance(result, DecisionResult):
-        return None
-    return result.to_dict()
+    provider = str(getattr(active, "provider", "") or "")
+    model = str(getattr(active, "model", "") or "") or None
+    with lf.observation_decision(
+        model=model,
+        provider=provider,
+        state=state,
+        questions=questions,
+        metadata={"provider": provider, "endpoint": "try_decide"},
+    ) as obs:
+        try:
+            result = active.decide(state, questions)
+        except DecisionError as exc:
+            logger.warning("decision skipped: %s", exc)
+            lf.update_obs(
+                obs,
+                level="ERROR",
+                status_message=str(exc)[:500],
+                output=lf.truncate({"error": str(exc)[:500]}),
+            )
+            return None
+        if not isinstance(result, DecisionResult):
+            lf.update_obs(obs, level="ERROR", status_message="invalid DecisionResult")
+            return None
+        out = result.to_dict()
+        usage = lf.parse_usage_details(result.usage)
+        update: dict[str, Any] = {
+            "output": lf.truncate(out.get("answers") or out),
+            "model": result.model or model,
+            "metadata": {
+                "provider": provider,
+                "endpoint": "try_decide",
+                "decision_model": result.model or model or "",
+            },
+        }
+        if usage:
+            update["usage_details"] = usage
+        lf.update_obs(obs, **update)
+        return out

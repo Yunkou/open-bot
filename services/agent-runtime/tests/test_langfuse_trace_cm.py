@@ -12,6 +12,22 @@ sys.path.insert(0, str(ROOT))
 from app import langfuse_trace as lf  # noqa: E402
 
 
+import pytest
+
+
+@pytest.fixture
+def monkeypatch_client(monkeypatch):
+    """Install a fake Langfuse client for observation_* / trace_run helpers."""
+    client = _FakeClient()
+    monkeypatch.setattr(lf, "_client", client)
+    monkeypatch.setattr(lf, "_init_attempted", True)
+    monkeypatch.setattr(lf, "_disabled_reason", None)
+    monkeypatch.setattr(lf, "get_langfuse", lambda: client)
+    return client
+
+
+
+
 def _ok(cond: bool, msg: str) -> None:
     if not cond:
         raise AssertionError(msg)
@@ -138,6 +154,8 @@ def test_disabled_yields_noop_once() -> None:
         _ok(isinstance(span, lf._Noop), "noop trace when disabled")  # noqa: SLF001
     with lf.observation_tool("t") as t:
         _ok(isinstance(t, lf._Noop), "noop tool when disabled")  # noqa: SLF001
+    with lf.observation_decision(provider="off", state="x", questions={}) as d:
+        _ok(isinstance(d, lf._Noop), "noop decision when disabled")  # noqa: SLF001
 
 
 def test_async_gen_close_no_double_yield(monkeypatch_client: _FakeClient) -> None:
@@ -183,6 +201,8 @@ def main() -> None:
         client.exit_raises = False
         test_observation_tool_body_raise_no_double_yield(client)
         client.cms.clear()
+        test_observation_decision_body_raise_no_double_yield(client)
+        client.cms.clear()
         test_trace_run_body_raise_no_double_yield(client)
         client.cms.clear()
         test_async_gen_close_no_double_yield(client)
@@ -192,6 +212,26 @@ def main() -> None:
     test_disabled_yields_noop_once()
     print("all passed")
 
+
+
+def test_observation_decision_body_raise_no_double_yield(monkeypatch_client: _FakeClient) -> None:
+    try:
+        with lf.observation_decision(
+            model="laya",
+            provider="unsloth",
+            state="hello",
+            questions={"ok": {"type": "noul", "instructions": "non-empty?"}},
+            metadata={"endpoint": "decide"},
+        ) as obs:
+            _ok(isinstance(obs, _FakeObs), "decision obs entered")
+            raise ValueError("decision body")
+    except ValueError as e:
+        _ok(str(e) == "decision body", "decision body error preserved")
+    else:
+        raise AssertionError("expected ValueError")
+    cm = monkeypatch_client.cms[0]
+    _ok(cm.exited, "decision observation __exit__ called")
+    # Fake client records kwargs on start — verify via last call if available
 
 if __name__ == "__main__":
     main()
