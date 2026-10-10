@@ -1720,7 +1720,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					"total":      len(targetAgents),
 					"forced":     forcedAgents[prep.agentID],
 				})
-				assistantText, pendingSummary, runID, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
+				assistantText, pendingSummary, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
 				if pendingSummary != "" {
 					sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
 					_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
@@ -1748,13 +1748,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					})
 				} else if strings.TrimSpace(assistantText) != "" {
 					// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, agentEmit)
+					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
 				} else if runCancelled {
 					_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, runID))
 				} else if runErr != nil {
 					// Persist a visible failure bubble (same family as 「（已停止）」) so refresh
 					// and other clients still see the turn instead of silent empty.
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, agentEmit)
+					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, nil, agentEmit)
 				}
 				if runErr != nil {
 					if runCancelled {
@@ -1917,8 +1917,9 @@ func usageFromDonePayload(payload map[string]any) runtimeUsage {
 }
 
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text,
-// optional summary, and the runtime run_id (exposed to clients as message.request_id).
-func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (_ string, _ string, _ string, _ runtimeUsage, runErr error) {
+// optional summary, the runtime run_id (exposed to clients as message.request_id),
+// and citation sources collected from retrieval tools (may be empty).
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (_ string, _ string, _ string, _ []db.MessageSource, _ runtimeUsage, runErr error) {
 	presConv, _ := payloadMap["conversation_id"].(string)
 	presAgent, _ := payloadMap["agent_id"].(string)
 	presUser, _ := payloadMap["user_id"].(string)
@@ -1928,31 +1929,32 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 	payload, _ := json.Marshal(payloadMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
 	if err != nil {
-		return "", "", "", runtimeUsage{}, err
+		return "", "", "", nil, runtimeUsage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", "", "", runtimeUsage{}, fmt.Errorf("runtime unreachable: %v", err)
+		return "", "", "", nil, runtimeUsage{}, fmt.Errorf("runtime unreachable: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", "", "", runtimeUsage{}, fmt.Errorf("runtime error: %s", string(b))
+		return "", "", "", nil, runtimeUsage{}, fmt.Errorf("runtime error: %s", string(b))
 	}
 
 	var assistant strings.Builder
 	var eventName string
 	var pendingSummary string
 	var runID string
+	var sources []db.MessageSource
 	var usage runtimeUsage
 	var streamErr error
 	reader := bufio.NewReader(resp.Body)
 	for {
 		if err := ctx.Err(); err != nil {
-			return stripThinkTags(assistant.String()), pendingSummary, runID, usage, err
+			return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, err
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -1984,6 +1986,9 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 						if rid := runIDFromRuntimeMeta(payload); rid != "" {
 							runID = rid
 						}
+						if got := db.ParseMessageSourcesAny(payload["sources"]); len(got) > 0 {
+							sources = db.NormalizeMessageSources(append(sources, got...))
+						}
 						if recallCtx != nil {
 							s.persistMemoryRecallFromMeta(payload, *recallCtx)
 						}
@@ -2007,6 +2012,9 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 						if rid := runIDFromRuntimeMeta(payload); rid != "" {
 							runID = rid
 						}
+						if got := db.ParseMessageSourcesAny(payload["sources"]); len(got) > 0 {
+							sources = db.NormalizeMessageSources(append(sources, got...))
+						}
 						// Per-agent done is swallowed for the client, but ok=false must
 						// still become runErr or handleSendMessage thinks the turn succeeded.
 						if derr := runtimeDoneFailure(payload); derr != nil && streamErr == nil {
@@ -2025,14 +2033,14 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 		if err != nil {
 			if err != io.EOF {
 				if ctx.Err() != nil {
-					return stripThinkTags(assistant.String()), pendingSummary, runID, usage, ctx.Err()
+					return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, ctx.Err()
 				}
-				return stripThinkTags(assistant.String()), pendingSummary, runID, usage, err
+				return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, err
 			}
 			break
 		}
 	}
-	return stripThinkTags(assistant.String()), pendingSummary, runID, usage, streamErr
+	return stripThinkTags(assistant.String()), pendingSummary, runID, sources, usage, streamErr
 }
 
 // runIDFromRuntimeMeta pulls the runtime run id from a meta/done payload

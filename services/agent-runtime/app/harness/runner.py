@@ -236,12 +236,20 @@ async def run_durable_events(
 
         final_text = str(values.get("final_text") or final_text or "")
         used = list(values.get("tools_used") or [])
-        if used:
-            yield sse("meta", {"tools_used": used})
+        sources = list(values.get("sources") or [])
+        if used or sources:
+            payload: dict[str, Any] = {}
+            if used:
+                payload["tools_used"] = used
+            if sources:
+                payload["sources"] = sources
+            yield sse("meta", payload)
         if not meta_sent and values.get("meta"):
             meta = dict(values["meta"])
             meta["thread_id"] = tid
             meta["durable"] = True
+            if sources and "sources" not in meta:
+                meta["sources"] = sources
             yield sse("meta", meta)
         if final_text and not message_started:
             yield message_start()

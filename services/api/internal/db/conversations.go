@@ -27,6 +27,12 @@ type Conversation struct {
 	Participants []ChannelMemberProfile `json:"participants,omitempty"`
 }
 
+// MessageSource is a clickable citation URL shown under a Bot reply.
+type MessageSource struct {
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+}
+
 type Message struct {
 	ID             string               `json:"id"`
 	ConversationID string               `json:"conversation_id,omitempty"`
@@ -40,7 +46,101 @@ type Message struct {
 	Attachments    []MessageAttachment  `json:"attachments,omitempty"`
 	AgentMessageID string               `json:"agent_message_id,omitempty"`
 	RequestID      string               `json:"request_id,omitempty"`
+	Sources        []MessageSource      `json:"sources,omitempty"`
 	Handoff        *HandoffPayload      `json:"handoff,omitempty"`
+}
+
+
+func NormalizeMessageSources(in []MessageSource) []MessageSource {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]MessageSource, 0, len(in))
+	for _, s := range in {
+		url := strings.TrimSpace(s.URL)
+		if url == "" {
+			continue
+		}
+		lower := strings.ToLower(url)
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			continue
+		}
+		key := strings.TrimRight(lower, "/")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		item := MessageSource{URL: url}
+		if t := strings.TrimSpace(s.Title); t != "" {
+			if len(t) > 200 {
+				t = t[:200]
+			}
+			item.Title = t
+		}
+		out = append(out, item)
+		if len(out) >= 20 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func EncodeMessageSources(in []MessageSource) string {
+	norm := NormalizeMessageSources(in)
+	if len(norm) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(norm)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+func DecodeMessageSources(raw string) []MessageSource {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	var out []MessageSource
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return NormalizeMessageSources(out)
+}
+
+func ParseMessageSourcesAny(v any) []MessageSource {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []MessageSource:
+		return NormalizeMessageSources(t)
+	case []any:
+		out := make([]MessageSource, 0, len(t))
+		for _, el := range t {
+			m, ok := el.(map[string]any)
+			if !ok {
+				continue
+			}
+			url, _ := m["url"].(string)
+			title, _ := m["title"].(string)
+			out = append(out, MessageSource{URL: url, Title: title})
+		}
+		return NormalizeMessageSources(out)
+	case string:
+		return DecodeMessageSources(t)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		return DecodeMessageSources(string(b))
+	}
 }
 
 // HandoffPayload is the visible Bot↔Bot projection card (not sent to the model).
@@ -59,6 +159,7 @@ type AddMessageOpts struct {
 	ThreadRootID string
 	RequestID    string
 	At           time.Time
+	Sources      []MessageSource
 }
 
 // AgentThreadPreview is sidebar metadata for one bot's primary thread.
@@ -216,6 +317,7 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 		ReplyToID:      strings.TrimSpace(opts.ReplyToID),
 		ThreadRootID:   strings.TrimSpace(opts.ThreadRootID),
 		RequestID:      strings.TrimSpace(opts.RequestID),
+		Sources:        NormalizeMessageSources(opts.Sources),
 		CreatedAt:      at,
 	}
 	tx, err := d.SQL.Begin()
@@ -231,10 +333,11 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 	if m.ThreadRootID != "" {
 		rootAny = m.ThreadRootID
 	}
+	sourcesJSON := EncodeMessageSources(m.Sources)
 	if _, err := tx.Exec(
-		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, request_id, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.RequestID, m.CreatedAt,
+		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, request_id, sources_json, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.RequestID, sourcesJSON, m.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -257,17 +360,20 @@ func (d *DB) GetMessage(userID, conversationID, messageID string) (*Message, err
 	}
 	row := d.SQL.QueryRow(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
-		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
+		        COALESCE(sources_json, '[]')
 		 FROM messages WHERE id = $1 AND conversation_id = $2`,
 		messageID, conversationID,
 	)
 	var m Message
-	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt); err != nil {
+	var sourcesRaw string
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &sourcesRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	m.Sources = DecodeMessageSources(sourcesRaw)
 	return &m, nil
 }
 
@@ -284,7 +390,8 @@ func (d *DB) FindAssistantByRequestID(conversationID, requestID string) (*Messag
 	row := d.SQL.QueryRow(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
 		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
-		        COALESCE(agent_message_id, ''), COALESCE(request_id, '')
+		        COALESCE(agent_message_id, ''), COALESCE(request_id, ''),
+		        COALESCE(sources_json, '[]')
 		 FROM messages
 		 WHERE conversation_id = $1 AND request_id = $2 AND role = 'assistant'
 		 ORDER BY created_at DESC
@@ -292,15 +399,17 @@ func (d *DB) FindAssistantByRequestID(conversationID, requestID string) (*Messag
 		conversationID, requestID,
 	)
 	var m Message
+	var sourcesRaw string
 	if err := row.Scan(
 		&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID,
-		&m.CreatedAt, &m.AgentMessageID, &m.RequestID,
+		&m.CreatedAt, &m.AgentMessageID, &m.RequestID, &sourcesRaw,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	m.Sources = DecodeMessageSources(sourcesRaw)
 	return &m, nil
 }
 
@@ -327,7 +436,8 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
 		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
-		        COALESCE(agent_message_id, ''), COALESCE(request_id, '')
+		        COALESCE(agent_message_id, ''), COALESCE(request_id, ''),
+		        COALESCE(sources_json, '[]')
 		 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC, id ASC`,
 		conversationID,
 	)
@@ -338,9 +448,11 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID, &m.RequestID); err != nil {
+		var sourcesRaw string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID, &m.RequestID, &sourcesRaw); err != nil {
 			return nil, err
 		}
+		m.Sources = DecodeMessageSources(sourcesRaw)
 		if m.Role == "handoff" {
 			if hp, herr := ParseHandoffContent(m.Content); herr == nil {
 				m.Handoff = hp
@@ -414,6 +526,30 @@ func (d *DB) DeleteMessage(conversationID, messageID string) error {
 	res, err := d.SQL.Exec(
 		`DELETE FROM messages WHERE id = $1 AND conversation_id = $2`,
 		messageID, conversationID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+
+// SetMessageSources replaces citation sources on an existing message (e.g. after
+// harness projection, when the HTTP finish path learns retrieval URLs).
+func (d *DB) SetMessageSources(conversationID, messageID string, sources []MessageSource) error {
+	conversationID = strings.TrimSpace(conversationID)
+	messageID = strings.TrimSpace(messageID)
+	if conversationID == "" || messageID == "" {
+		return errors.New("conversation_id and message_id required")
+	}
+	raw := EncodeMessageSources(sources)
+	res, err := d.SQL.Exec(
+		`UPDATE messages SET sources_json = $1 WHERE id = $2 AND conversation_id = $3`,
+		raw, messageID, conversationID,
 	)
 	if err != nil {
 		return err

@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     messages: list[dict[str, Any]]
     pending_tool_calls: list[dict[str, Any]]
     tools_used: list[str]
+    sources: list[dict[str, str]]  # citation URLs from retrieval tools
     final_text: str
     status: RunStatus
     prepared: bool
@@ -60,6 +61,7 @@ def initial_state(
         "messages": list(messages or []),
         "pending_tool_calls": [],
         "tools_used": [],
+        "sources": [],
         "final_text": "",
         "status": "pending",
         "prepared": False,

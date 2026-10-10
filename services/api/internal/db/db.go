@@ -434,6 +434,9 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS request_id TEXT NOT NULL DEFAULT '
 CREATE INDEX IF NOT EXISTS idx_messages_request_id
   ON messages(request_id) WHERE request_id <> '';
 
+-- Citation/source links collected from retrieval tools (http_fetch, MCP search, etc.).
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS sources_json TEXT NOT NULL DEFAULT '[]';
+
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_shape TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_user_set BOOLEAN NOT NULL DEFAULT FALSE;

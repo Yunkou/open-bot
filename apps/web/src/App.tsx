@@ -10,6 +10,7 @@ import {
   LLMConnection,
   LLMInput,
   Message,
+  normalizeMessageSources,
   Skill,
   User,
   clearSession,
@@ -1827,6 +1828,40 @@ export default function App() {
     releaseHostConfirm(parsed.req_id, ok);
   };
 
+
+  const attachSourcesToStreaming = (convId: string, raw: unknown, messageId?: string) => {
+    const sources = normalizeMessageSources(raw);
+    if (!sources.length) return;
+    const run = runsRef.current.get(convId);
+    const targetId = (messageId || "").trim() || run?.assistantId || "";
+    patchConvMessages(convId, (prev) => {
+      // Prefer explicit message id, then current streaming assistant, then last assistant.
+      let idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
+      if (idx < 0 && run?.assistantId) {
+        idx = prev.findIndex((m) => m.id === run.assistantId);
+      }
+      if (idx < 0) {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i].role === "assistant") {
+            idx = i;
+            break;
+          }
+        }
+      }
+      if (idx < 0) return prev;
+      const cur = prev[idx];
+      const merged = normalizeMessageSources([...(cur.sources || []), ...sources]);
+      if (merged.length === (cur.sources || []).length) {
+        // Same set — skip churn
+        const same =
+          merged.length === (cur.sources || []).length &&
+          merged.every((s, i) => s.url === (cur.sources || [])[i]?.url);
+        if (same) return prev;
+      }
+      return prev.map((m, i) => (i === idx ? { ...m, sources: merged } : m));
+    });
+  };
+
   const stampSavedMessage = (convId: string, messageId: string, requestId?: string) => {
     if (!messageId) return;
     const run = runsRef.current.get(convId);
@@ -2128,6 +2163,11 @@ export default function App() {
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
               );
+              if (meta.sources != null) {
+                attachSourcesToStreaming(conv.id, meta.sources, meta.message_id);
+              }
+            } else if (meta.sources != null) {
+              attachSourcesToStreaming(conv.id, meta.sources);
             }
             if (meta.phase === "task_queued") {
               noteTask(conv.id, true, "正在做…");
@@ -2733,6 +2773,11 @@ export default function App() {
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
               );
+              if (meta.sources != null) {
+                attachSourcesToStreaming(streamConvId!, meta.sources, meta.message_id);
+              }
+            } else if (meta.sources != null) {
+              attachSourcesToStreaming(streamConvId!, meta.sources);
             }
             if (meta.phase === "task_queued") {
               noteTask(streamConvId!, true, "正在做…");

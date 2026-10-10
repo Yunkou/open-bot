@@ -49,6 +49,9 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
     meta = dict(state.get("meta") or {})
     meta["tools_used"] = list(state.get("tools_used") or [])
+    sources = list(state.get("sources") or [])
+    if sources:
+        meta["sources"] = sources
     meta["durable"] = True
     if journal is not None:
         await journal.set_status("done")
@@ -57,7 +60,11 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
         )
         await journal.append(
             "finish",
-            {"status": "done", "tools_used": meta["tools_used"]},
+            {
+                "status": "done",
+                "tools_used": meta["tools_used"],
+                "sources": sources,
+            },
             project=False,
         )
         # Drain follow-ups: signal inbox so next submit can start a new run.

@@ -40,7 +40,7 @@ func TestSaveAssistantThreadedSkipsPassContent(t *testing.T) {
 	emit := func(event string, data any) { emitted++ }
 
 	for _, text := range []string{"[PASS]", "PASS", "【PASS】", "`[PASS]`", "**[PASS]**"} {
-		got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", uuid.NewString(), emit)
+		got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", uuid.NewString(), nil, emit)
 		if got != nil {
 			t.Fatalf("saveAssistantThreaded(%q) must be nil, got id=%s", text, got.ID)
 		}
@@ -116,7 +116,7 @@ func TestDropProjectedGroupPassRemovesJournalRow(t *testing.T) {
 	}
 
 	// Forced / normal reply still persists.
-	ok := s.saveAssistantThreaded(userID, conv.ID, agent.ID, "你好，我在。", "", "", uuid.NewString(), nil)
+	ok := s.saveAssistantThreaded(userID, conv.ID, agent.ID, "你好，我在。", "", "", uuid.NewString(), nil, nil)
 	if ok == nil {
 		t.Fatal("normal assistant text must persist")
 	}

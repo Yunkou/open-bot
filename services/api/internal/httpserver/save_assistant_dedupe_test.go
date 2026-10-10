@@ -66,7 +66,7 @@ func TestSaveAssistantThreadedReusesProjectedByRequestID(t *testing.T) {
 		}
 	}
 
-	got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, emit)
+	got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, nil, emit)
 	if got == nil {
 		t.Fatal("expected reused message")
 	}
@@ -126,7 +126,7 @@ func TestSaveAssistantThreadedInsertsWhenNoProjection(t *testing.T) {
 	s := &Server{db: d, events: newChatHub()}
 	requestID := uuid.NewString()
 	text := "首次落库"
-	got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, nil)
+	got := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, nil, nil)
 	if got == nil {
 		t.Fatal("expected insert")
 	}
@@ -135,7 +135,7 @@ func TestSaveAssistantThreadedInsertsWhenNoProjection(t *testing.T) {
 	}
 
 	// Second call with same request_id must not insert again.
-	again := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, nil)
+	again := s.saveAssistantThreaded(userID, conv.ID, agent.ID, text, "", "", requestID, nil, nil)
 	if again == nil || again.ID != got.ID {
 		t.Fatalf("second save should reuse id=%s got=%v", got.ID, again)
 	}

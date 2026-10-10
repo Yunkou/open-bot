@@ -9,6 +9,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from ...client_env import tool_display_label
+from ...citation_sources import extract_from_tool, merge_sources
 from ...llm import guide_tool_result, truncate_tool_result_for_context
 from ..config import require_approval_tools
 from ..registry import get_registry
@@ -41,6 +42,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     tool_calls = list(state.get("pending_tool_calls") or [])
     msgs = list(state.get("messages") or [])
     used = list(state.get("tools_used") or [])
+    sources = list(state.get("sources") or [])
     replay_results = dict(state.get("replay_results") or {})
     approval_needed = require_approval_tools()
     registry = get_registry()
@@ -128,6 +130,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
             )
             if name:
                 used.append(name)
+                sources = merge_sources(sources, extract_from_tool(name, args, content))
             continue
 
         if journal is not None:
@@ -183,6 +186,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
         )
         if name:
             used.append(name)
+            sources = merge_sources(sources, extract_from_tool(name, args, content))
         if journal is not None:
             await journal.commit_tool_result(tc_id, name, content)
             await journal.put_live(
@@ -198,6 +202,7 @@ async def tools_node(state: AgentState, config: RunnableConfig) -> dict[str, Any
     return {
         "messages": msgs,
         "tools_used": used,
+        "sources": sources,
         "pending_tool_calls": [],
         "approval_pending": [],
         "replay_results": replay_results,

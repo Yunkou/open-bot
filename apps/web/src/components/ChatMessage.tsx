@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
-import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
+import type { AttachmentMeta, HandoffPayload, MessageSource, ReactionSummary } from "../api";
 import {
   NEGATIVE_REACTION_EMOJIS,
   attachmentDisplayUrl,
@@ -14,6 +14,7 @@ import { HandoffCard } from "./HandoffCard";
 import { MessageActionSheet } from "./MessageActionSheet";
 import { MessageHoverBar } from "./MessageHoverBar";
 import { useIsTouchUi } from "./useIsTouchUi";
+import { MessageSourcesFooter } from "./MessageSourcesFooter";
 
 export type ChatMessageData = {
   id: string;
@@ -29,6 +30,8 @@ export type ChatMessageData = {
   agent_message_id?: string;
   /** Runtime run id on Bot replies (More → 复制请求 ID); absent on historical messages. */
   request_id?: string;
+  /** Citation links when retrieval was used; omitted otherwise. */
+  sources?: MessageSource[];
   reactions?: ReactionSummary[];
   handoff?: HandoffPayload;
 };
@@ -427,6 +430,7 @@ export function ChatMessage({
             streaming={message.streaming}
             agentId={speakerId}
           />
+          {!message.streaming ? <MessageSourcesFooter sources={message.sources} /> : null}
         </div>
         {desktopBar}
       </div>

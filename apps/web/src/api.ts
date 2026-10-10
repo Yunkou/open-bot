@@ -164,6 +164,31 @@ export type ReactionUpdatedEvent = {
   action: "add" | "remove" | string;
 };
 
+/** Clickable citation from retrieval tools (http_fetch, MCP search, etc.). */
+export type MessageSource = {
+  url: string;
+  title?: string;
+};
+
+/** Keep only real http(s) URLs; dedupe by lowercase URL without trailing slash. */
+export function normalizeMessageSources(raw: unknown): MessageSource[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: MessageSource[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const url = String((item as MessageSource).url || "").trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const key = url.toLowerCase().replace(/\/+$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const title = String((item as MessageSource).title || "").trim().slice(0, 200);
+    out.push(title ? { url, title } : { url });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 export type Message = {
   id: string;
   role: "user" | "assistant" | "handoff" | string;
@@ -179,6 +204,8 @@ export type Message = {
   agent_message_id?: string;
   /** Runtime run id for Bot replies (omitted on historical / non-run messages). */
   request_id?: string;
+  /** Citation links when this reply used retrieval; omitted when none. */
+  sources?: MessageSource[];
   handoff?: HandoffPayload;
 };
 

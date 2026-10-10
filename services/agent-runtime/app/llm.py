@@ -31,6 +31,7 @@ from .model_compat import (
     resolve_prompt_cache_mode,
     strip_think_tags,
 )
+from .citation_sources import extract_from_tool, merge_sources
 from .tool_markup import (
     content_has_tool_markup,
     parse_tool_markup,
@@ -1962,6 +1963,12 @@ async def run_tool_loop(
                     )
                 result = guide_tool_result(name, result)
                 result = truncate_tool_result_for_context(result)
+                if sources_out is not None:
+                    merged = merge_sources(
+                        sources_out, extract_from_tool(name, args, result)
+                    )
+                    sources_out.clear()
+                    sources_out.extend(merged)
                 if on_status is not None:
                     await on_status(
                         {
@@ -2111,6 +2118,7 @@ async def stream_chat_tokens(
     *,
     api_key: str,
     override: LLMOverride | None = None,
+    sources_out: list[dict[str, str]] | None = None,
 ):
     """Yield text deltas from streaming completions (no tools)."""
     _, base, model = openai_config(override)

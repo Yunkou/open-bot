@@ -1438,6 +1438,7 @@ async def openai_path(
             input_messages=llm_messages,
             metadata={"tools_enabled": tools_on},
         ) as gen_obs:
+            sources_acc: list[dict[str, str]] = []
             loop_task = asyncio.create_task(
                 run_tool_loop(
                     llm_messages,
@@ -1447,6 +1448,7 @@ async def openai_path(
                     override=override,
                     extra_tools=mcp_extra_tools or None,
                     on_status=on_status,
+                    sources_out=sources_acc,
                 )
             )
             try:
@@ -1477,8 +1479,13 @@ async def openai_path(
                 with contextlib.suppress(Exception):
                     yield sse("done", {"ok": False, "mode": "openai", "cancelled": True})
                 raise
-            if used_tools:
-                yield sse("meta", {"tools_used": used_tools})
+            if used_tools or sources_acc:
+                meta_tools: dict[str, Any] = {}
+                if used_tools:
+                    meta_tools["tools_used"] = used_tools
+                if sources_acc:
+                    meta_tools["sources"] = list(sources_acc)
+                yield sse("meta", meta_tools)
             assistant_parts: list[str] = []
             if final == REASONING_ONLY:
                 # Reasoning tags only — do not start a second completion, do not emit them.
@@ -1556,6 +1563,8 @@ async def openai_path(
                 "mode": "openai",
                 "tools_used": used_tools,
             }
+            if sources_acc:
+                done_payload["sources"] = list(sources_acc)
             if usage_details:
                 done_payload["usage"] = usage_details
             yield sse("done", done_payload)

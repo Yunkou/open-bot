@@ -952,6 +952,43 @@ button {
   margin-bottom: 4px;
 }
 
+.msg-sources {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+.msg-sources-label {
+  font-weight: 500;
+  margin-right: 6px;
+  color: var(--muted);
+}
+.msg-sources-list {
+  display: inline;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.msg-sources-item {
+  display: inline;
+}
+.msg-sources-item + .msg-sources-item::before {
+  content: " · ";
+  color: var(--muted);
+  margin: 0 2px;
+}
+.msg-sources-link {
+  color: var(--accent, #3b82f6);
+  text-decoration: none;
+  word-break: break-all;
+}
+.msg-sources-link:hover {
+  text-decoration: underline;
+}
+
+
 /* Group chat: bot name above assistant bubble (DM omits this). */
 .msg-speaker-name {
   font-size: 12px;
