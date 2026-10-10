@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Button, Card, Chip, Typography } from "heroui-native";
 import type { JSX } from "react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 
 import * as api from "@/api";
@@ -52,6 +52,10 @@ export default function LlmSettingsScreen(): JSX.Element {
   const [probing, setProbing] = useState(false);
   /** 最近一次探测的中文结论，独立于 msg 显示，免得被下一次保存结果冲掉 */
   const [probeMsg, setProbeMsg] = useState("");
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+  const modelsReqSeq = useRef(0);
 
   // 列表与四个写操作都在查询层；页面只留表单这类真正的本地状态。
   const llm = useLlmConnections();
@@ -59,6 +63,50 @@ export default function LlmSettingsScreen(): JSX.Element {
   const { create, update, remove, setDefault } = useLlmMutations();
   const connections = llm.data ?? [];
   const busy = useBusy(create, update, remove, setDefault);
+
+  // 填写 Base URL + API Key（或编辑态复用已存密钥）后自动拉取模型列表。
+  useEffect(() => {
+    const base = form.base_url.trim();
+    const key = (form.api_key || "").trim();
+    const editing = connections.find((c: LLMConnection) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || (!key && !canReuseSaved)) {
+      setModelOptions([]);
+      setModelsError("");
+      setModelsLoading(false);
+      return;
+    }
+    const seq = ++modelsReqSeq.current;
+    const timer = setTimeout(() => {
+      setModelsLoading(true);
+      setModelsError("");
+      void api
+        .listLLMModels({
+          base_url: base,
+          ...(key ? { api_key: key } : {}),
+          ...(editingId ? { connection_id: editingId } : {}),
+        })
+        .then((res) => {
+          if (seq !== modelsReqSeq.current) return;
+          if (!res.ok) {
+            setModelOptions([]);
+            setModelsError(res.detail || res.error || "拉取模型列表失败");
+            return;
+          }
+          setModelOptions(res.models || []);
+          setModelsError("");
+        })
+        .catch((err) => {
+          if (seq !== modelsReqSeq.current) return;
+          setModelOptions([]);
+          setModelsError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === modelsReqSeq.current) setModelsLoading(false);
+        });
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [form.base_url, form.api_key, editingId, connections]);
 
   /**
    * 刚写完要按「刷新后的列表」决定表单状态。
@@ -78,6 +126,8 @@ export default function LlmSettingsScreen(): JSX.Element {
     setErrors({});
     setMsg("");
     setProbeMsg("");
+    setModelOptions([]);
+    setModelsError("");
   }
 
   function patch(next: Partial<LLMInput>): void {
@@ -312,8 +362,34 @@ export default function LlmSettingsScreen(): JSX.Element {
             label="Model"
             value={form.model}
             onChangeText={(t) => patch({ model: t })}
-            placeholder="gpt-4o-mini"
+            placeholder={modelsLoading ? "加载模型列表…" : "gpt-4o-mini"}
+            hint={
+              modelsLoading
+                ? "正在拉取模型列表…"
+                : modelsError
+                  ? `${modelsError}（仍可手动输入）`
+                  : modelOptions.length
+                    ? `已加载 ${modelOptions.length} 个模型，点选下方或手动输入`
+                    : "填写 Base URL 与密钥后自动拉取"
+            }
           />
+          {modelOptions.length > 0 ? (
+            <View className="flex-row flex-wrap gap-2">
+              {modelOptions.slice(0, 40).map((id) => (
+                <Chip
+                  key={id}
+                  size="sm"
+                  variant={form.model === id ? "soft" : "secondary"}
+                  color={form.model === id ? "accent" : "default"}
+                  onPress={() => patch({ model: id })}
+                  accessibilityRole="button"
+                  accessibilityLabel={id}
+                >
+                  <Chip.Label>{id}</Chip.Label>
+                </Chip>
+              ))}
+            </View>
+          ) : null}
           <FormField
             label="上下文窗口 (tokens)"
             value={form.context_window == null ? "" : String(form.context_window)}

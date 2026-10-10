@@ -26,6 +26,7 @@ import type {
   InboundHook,
   LLMConnection,
   LLMInput,
+  LLMListModelsResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,
@@ -805,6 +806,18 @@ export async function probeLLMTools(body: {
   });
 }
 
+export async function listLLMModels(body: {
+  base_url?: string;
+  api_key?: string;
+  connection_id?: string;
+}): Promise<LLMListModelsResult> {
+  return request("/v1/llm/list-models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   const modeLabel: Record<string, string> = {
     native: "原生 function calling",
@@ -1101,6 +1114,7 @@ export type {
   CreateFeedbackInput,
   HostConfirmPayload,
   InboundHook,
+  LLMListModelsResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,

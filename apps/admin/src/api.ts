@@ -282,6 +282,27 @@ export async function adminProbeOrgLLMTools(body: {
   return res.json();
 }
 
+export type LLMListModelsResult = {
+  ok: boolean;
+  models: string[];
+  detail?: string;
+  error?: string;
+  http_status?: number;
+};
+
+export async function adminListOrgLLMModels(body: {
+  base_url?: string;
+  api_key?: string;
+}): Promise<LLMListModelsResult> {
+  const res = await fetch(`${API_BASE}/v1/admin/org/llm/list-models`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   const modeLabel: Record<string, string> = {
     native: "原生 function calling",

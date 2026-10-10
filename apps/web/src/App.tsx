@@ -40,6 +40,7 @@ import {
   deleteSkill,
   applyAgentOnboarding,
   formatLLMToolsProbe,
+  listLLMModels,
   probeLLMTools,
   login,
   mcpCallTool,
@@ -537,6 +538,10 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [llmBusy, setLLMBusy] = useState(false);
   const [llmMsg, setLLMMsg] = useState("");
+  const [llmModelOptions, setLLMModelOptions] = useState<string[]>([]);
+  const [llmModelsLoading, setLLMModelsLoading] = useState(false);
+  const [llmModelsError, setLLMModelsError] = useState("");
+  const llmModelsReqSeq = useRef(0);
 
   const [agentBusy, setAgentBusy] = useState(false);
   const [channelBusy, setChannelBusy] = useState(false);
@@ -3559,6 +3564,8 @@ export default function App() {
     setEditingId(null);
     setLLMForm({ ...emptyLLMForm, is_default: llms.length === 0 });
     setLLMMsg("");
+    setLLMModelOptions([]);
+    setLLMModelsError("");
   };
 
   const saveLLM = async (e: FormEvent) => {
@@ -3638,6 +3645,49 @@ export default function App() {
       setLLMBusy(false);
     }
   };
+
+  // Auto-fetch OpenAI-compatible model list when base URL + key (or saved connection key) ready.
+  useEffect(() => {
+    const base = llmForm.base_url.trim();
+    const key = (llmForm.api_key || "").trim();
+    const editing = llms.find((c) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || (!key && !canReuseSaved)) {
+      setLLMModelOptions([]);
+      setLLMModelsError("");
+      setLLMModelsLoading(false);
+      return;
+    }
+    const seq = ++llmModelsReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setLLMModelsLoading(true);
+      setLLMModelsError("");
+      void listLLMModels({
+        base_url: base,
+        ...(key ? { api_key: key } : {}),
+        ...(editingId ? { connection_id: editingId } : {}),
+      })
+        .then((res) => {
+          if (seq !== llmModelsReqSeq.current) return;
+          if (!res.ok) {
+            setLLMModelOptions([]);
+            setLLMModelsError(res.detail || res.error || "拉取模型列表失败");
+            return;
+          }
+          setLLMModelOptions(res.models || []);
+          setLLMModelsError("");
+        })
+        .catch((err) => {
+          if (seq !== llmModelsReqSeq.current) return;
+          setLLMModelOptions([]);
+          setLLMModelsError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === llmModelsReqSeq.current) setLLMModelsLoading(false);
+        });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [llmForm.base_url, llmForm.api_key, editingId, llms]);
 
 
   const CONV_LONG_PRESS_MS = 400;
@@ -4914,10 +4964,26 @@ export default function App() {
                       <label>
                         Model
                         <input
+                          list="llm-model-options"
                           value={llmForm.model}
                           onChange={(e) => setLLMForm({ ...llmForm, model: e.target.value })}
-                          placeholder="gpt-4o-mini"
+                          placeholder={llmModelsLoading ? "加载模型列表…" : "gpt-4o-mini"}
+                          autoComplete="off"
                         />
+                        <datalist id="llm-model-options">
+                          {llmModelOptions.map((id) => (
+                            <option key={id} value={id} />
+                          ))}
+                        </datalist>
+                        {llmModelsLoading ? (
+                          <span className="settings-status">正在拉取模型列表…</span>
+                        ) : llmModelsError ? (
+                          <span className="settings-status">{llmModelsError}（仍可手动输入）</span>
+                        ) : llmModelOptions.length > 0 ? (
+                          <span className="settings-status">
+                            已加载 {llmModelOptions.length} 个模型，可下拉选择或手动输入
+                          </span>
+                        ) : null}
                       </label>
                       <label>
                         上下文窗口 (tokens)

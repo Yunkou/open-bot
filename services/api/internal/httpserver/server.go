@@ -100,6 +100,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminGetLLM))
 	mux.HandleFunc("PUT /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminPutLLM))
 	mux.HandleFunc("POST /v1/admin/org/llm/probe-tools", s.requireOrgAdmin(s.handleAdminProbeLLMTools))
+	mux.HandleFunc("POST /v1/admin/org/llm/list-models", s.requireOrgAdmin(s.handleAdminListLLMModels))
 	mux.HandleFunc("GET /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminGetDecision))
 	mux.HandleFunc("PUT /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminPutDecision))
 	mux.HandleFunc("POST /v1/admin/org/decision/test", s.requireOrgAdmin(s.handleAdminTestDecision))
@@ -161,6 +162,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("DELETE /v1/llm-connections/{id}", s.requireAuth(s.handleDeleteLLM))
 	mux.HandleFunc("POST /v1/llm-connections/{id}/default", s.requireAuth(s.handleDefaultLLM))
 	mux.HandleFunc("POST /v1/llm/probe-tools", s.requireAuth(s.handleProbeLLMTools))
+	mux.HandleFunc("POST /v1/llm/list-models", s.requireAuth(s.handleListLLMModels))
 
 	mux.HandleFunc("GET /v1/agents", s.requireAuth(s.handleListAgents))
 	mux.HandleFunc("GET /v1/agents/{id}/conversation", s.requireAuth(s.handlePrimaryAgentConversation))

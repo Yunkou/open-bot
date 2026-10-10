@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Button, Card, Form, Space, message, Typography } from "antd";
+import { useEffect, useRef, useState } from "react";
+import { AutoComplete, Button, Card, Form, Space, message, Typography } from "antd";
 import {
   PageContainer,
   ProForm,
@@ -9,6 +9,7 @@ import {
 } from "@ant-design/pro-components";
 import {
   adminGetOrgLLM,
+  adminListOrgLLMModels,
   adminProbeOrgLLMTools,
   adminPutOrgLLM,
   formatLLMToolsProbe,
@@ -17,12 +18,20 @@ import {
 
 const { Paragraph, Text } = Typography;
 
+const MODELS_DEBOUNCE_MS = 450;
+
 export default function LLMPage() {
   const [llm, setLlm] = useState<OrgLLMSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [probing, setProbing] = useState(false);
   const [probeMsg, setProbeMsg] = useState("");
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
   const [form] = Form.useForm();
+  const modelsReqSeq = useRef(0);
+  const watchedBaseURL = Form.useWatch("base_url", form);
+  const watchedAPIKey = Form.useWatch("api_key", form);
 
   useEffect(() => {
     setLoading(true);
@@ -44,6 +53,49 @@ export default function LLMPage() {
       })
       .finally(() => setLoading(false));
   }, [form]);
+
+  // Auto-fetch OpenAI-compatible model list when endpoint (+ key or saved org key) is ready.
+  useEffect(() => {
+    const base = String(watchedBaseURL || "").trim();
+    const key = String(watchedAPIKey || "").trim();
+    const canReuseSaved = Boolean(llm?.api_key_set);
+    if (!base || (!key && !canReuseSaved)) {
+      setModelOptions([]);
+      setModelsError("");
+      setModelsLoading(false);
+      return;
+    }
+
+    const seq = ++modelsReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setModelsLoading(true);
+      setModelsError("");
+      void adminListOrgLLMModels({
+        base_url: base,
+        ...(key ? { api_key: key } : {}),
+      })
+        .then((res) => {
+          if (seq !== modelsReqSeq.current) return;
+          if (!res.ok) {
+            setModelOptions([]);
+            setModelsError(res.detail || res.error || "拉取模型列表失败");
+            return;
+          }
+          setModelOptions(res.models || []);
+          setModelsError("");
+        })
+        .catch((err) => {
+          if (seq !== modelsReqSeq.current) return;
+          setModelOptions([]);
+          setModelsError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === modelsReqSeq.current) setModelsLoading(false);
+        });
+    }, MODELS_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [watchedBaseURL, watchedAPIKey, llm?.api_key_set]);
 
   const runProbe = async () => {
     setProbing(true);
@@ -82,6 +134,7 @@ export default function LLMPage() {
           {llm?.api_key_hint ? `：${llm.api_key_hint}` : ""}）。
           优先级：个人默认/首个连接 &gt; 组织默认 &gt; 无。
           勾选「启用 tools」前请先检测上游是否支持 function calling；不支持时无法保存开启状态。
+          填写 Base URL 与 API Key 后会自动拉取可用模型列表（仍可手动输入）。
         </Paragraph>
         <ProForm
           form={form}
@@ -139,7 +192,7 @@ export default function LLMPage() {
                 model: data.llm_model || "",
                 enable_tools: Boolean(data.llm_enable_tools),
                 context_window: data.llm_context_window ?? undefined,
-          max_tool_rounds: data.llm_max_tool_rounds ?? 24,
+                max_tool_rounds: data.llm_max_tool_rounds ?? 24,
               });
               return true;
             } catch (err) {
@@ -155,7 +208,30 @@ export default function LLMPage() {
             label="API Key（留空则保持原值）"
             fieldProps={{ autoComplete: "off" }}
           />
-          <ProFormText name="model" label="模型" />
+          <Form.Item
+            name="model"
+            label="模型"
+            extra={
+              modelsLoading
+                ? "正在拉取模型列表…"
+                : modelsError
+                  ? modelsError
+                  : modelOptions.length
+                    ? `已加载 ${modelOptions.length} 个模型，可下拉选择或手动输入`
+                    : "填写 Base URL 与密钥后自动拉取；也可直接输入模型名"
+            }
+          >
+            <AutoComplete
+              options={modelOptions.map((id) => ({ value: id }))}
+              placeholder="gpt-4o-mini"
+              allowClear
+              filterOption={(input, option) =>
+                String(option?.value || "")
+                  .toLowerCase()
+                  .includes(input.toLowerCase())
+              }
+            />
+          </Form.Item>
           <ProFormDigit
             name="context_window"
             label="上下文窗口 (tokens)"

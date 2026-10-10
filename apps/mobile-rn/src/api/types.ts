@@ -217,6 +217,14 @@ export type LLMToolsProbeResult = {
   http_status?: number;
 };
 
+export type LLMListModelsResult = {
+  ok: boolean;
+  models: string[];
+  detail?: string;
+  error?: string;
+  http_status?: number;
+};
+
 export type AttachmentMeta = {
   id: string;
   name: string;
