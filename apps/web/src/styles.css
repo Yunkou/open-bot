@@ -4927,15 +4927,29 @@ html.touch-ui .composer-quote-bar {
 
 /* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets (layout-narrow 860) ---- */
 
-.touch-ui .conv-item:hover .conv-del,
-.touch-ui .conv-item:focus-within .conv-del,
+/* Touch UE lock: clone always visible ≥44; delete stays long-press / hidden inline. */
+.touch-ui .conv-clone {
+  opacity: 1;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  justify-content: center;
+  box-sizing: border-box;
+}
 .touch-ui .conv-item:hover .conv-clone,
 .touch-ui .conv-item:focus-within .conv-clone {
-  /* Desktop hover delete/clone stays; touch uses long-press ConvActionSheet instead. */
+  opacity: 1;
+}
+.touch-ui .conv-del {
   opacity: 0;
 }
-.touch-ui .conv-item:focus-within .conv-del:focus-visible,
-.touch-ui .conv-item:focus-within .conv-clone:focus-visible {
+.touch-ui .conv-item:hover .conv-del,
+.touch-ui .conv-item:focus-within .conv-del {
+  opacity: 0;
+}
+.touch-ui .conv-item:focus-within .conv-del:focus-visible {
   opacity: 1;
 }
 

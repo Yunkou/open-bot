@@ -4563,6 +4563,15 @@ export default function App() {
               : undefined
         }
         onClose={() => setConvSheet(null)}
+        onClone={
+          convSheet?.kind === "agent"
+            ? () => {
+                const agent = convSheet.agent;
+                setConvSheet(null);
+                setCloneTarget(agent);
+              }
+            : undefined
+        }
         onDelete={() => {
           const target = convSheet;
           setConvSheet(null);
