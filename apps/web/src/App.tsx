@@ -111,6 +111,7 @@ import {
   type Machine,
   type BotSecretMeta,
   type BotSecretRequest,
+  getApiBase,
 } from "./api";
 import {
   detectClientContext,
@@ -521,7 +522,7 @@ export default function App() {
   /** Mobile settings hub (C-2); true = Grok-style grouped home. */
   const [settingsShellHub, setSettingsShellHub] = useState(true);
   /** Mobile: `general` tab splits into account-only vs review/timezone-only. */
-  const [settingsGeneralPane, setSettingsGeneralPane] = useState<"account" | "review">("account");
+  const [settingsGeneralPane, setSettingsGeneralPane] = useState<"account" | "server" | "review">("account");
   /** #6 shell list fold — default both expanded; persisted per user. */
   const [assistantsCollapsed, setAssistantsCollapsed] = useState(false);
   const [groupsCollapsed, setGroupsCollapsed] = useState(false);
@@ -4761,6 +4762,10 @@ export default function App() {
                   const m = machines.find((x) => x.id === mid);
                   return m?.label || mid;
                 })()}
+                apiBaseLabel={(() => {
+                  const raw = getApiBase().replace(/^https?:\/\//i, "");
+                  return raw.length > 28 ? `${raw.slice(0, 27)}…` : raw;
+                })()}
                 onClose={() => setShowSettings(false)}
                 onLogout={() => {
                   setShowSettings(false);
@@ -4769,6 +4774,9 @@ export default function App() {
                 onNavigate={(tab: SettingsHubNav) => {
                   if (tab === "account") {
                     setSettingsGeneralPane("account");
+                    setSettingsTab("general");
+                  } else if (tab === "server") {
+                    setSettingsGeneralPane("server");
                     setSettingsTab("general");
                   } else if (tab === "general") {
                     setSettingsGeneralPane("review");
@@ -4819,7 +4827,9 @@ export default function App() {
                   {settingsTab === "general"
                     ? settingsGeneralPane === "account"
                       ? "账户"
-                      : "审核与时区"
+                      : settingsGeneralPane === "server"
+                        ? "服务器"
+                        : "审核与时区"
                     : SETTINGS_TITLE[settingsTab]}
                 </h2>
                 <button
@@ -4941,7 +4951,7 @@ export default function App() {
                     </SettingsCard>
                   </SettingsSection>
                 )}
-                {(!sheetForm || settingsGeneralPane === "account") && (
+                {(!sheetForm || settingsGeneralPane === "account" || settingsGeneralPane === "server") && (
                   <SettingsSection title={sheetForm ? undefined : "服务器"}>
                     <SettingsCard className="settings-card-padded">
                       <ApiServerField

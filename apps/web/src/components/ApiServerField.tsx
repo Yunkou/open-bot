@@ -56,7 +56,7 @@ export function ApiServerField({ variant = "login", onApplied }: Props) {
 
   const help =
     variant === "settings"
-      ? "手机与电脑连同一台 open-bot 服务。改地址后先「检测连接」，通过再保存；切换服务器会保留本机登录态，若连不上请退出后重登。"
+      ? "与电脑同一局域网，或填 ngrok 等 https 隧道。改地址后先「检测连接」，通过再保存；切换后保留本机登录态，连不上请退出重登。"
       : "填写电脑上的 API 地址以配对（局域网如 http://192.168.x.x:18080，或 ngrok https 隧道）。先检测连接，通过后再登录。";
 
   const statusClass =

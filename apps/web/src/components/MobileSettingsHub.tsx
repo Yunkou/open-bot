@@ -1,5 +1,6 @@
 export type SettingsHubNav =
   | "account"
+  | "server"
   | "mcp"
   | "bot"
   | "machines"
@@ -16,6 +17,8 @@ type Props = {
   email?: string;
   accountInitials: string;
   preferredMachineLabel?: string;
+  /** Current API base for hub row value (truncated). */
+  apiBaseLabel?: string;
   onClose: () => void;
   onNavigate: (tab: SettingsHubNav) => void;
   onLogout: () => void;
@@ -38,6 +41,7 @@ export function MobileSettingsHub({
   email,
   accountInitials,
   preferredMachineLabel,
+  apiBaseLabel,
   onClose,
   onNavigate,
   onLogout,
@@ -63,6 +67,14 @@ export function MobileSettingsHub({
               <span className="settings-hub-row-title">{username || "账户"}</span>
               {email ? <span className="settings-hub-row-sub">{email}</span> : null}
             </span>
+            <Chevron />
+          </button>
+          <button type="button" className="settings-hub-row" onClick={() => onNavigate("server")}>
+            <span className="settings-hub-row-main">
+              <span className="settings-hub-row-title">服务器</span>
+              <span className="settings-hub-row-sub">API 地址 · 局域网 / 隧道配对</span>
+            </span>
+            <span className="settings-hub-row-value">{apiBaseLabel || "默认"}</span>
             <Chevron />
           </button>
         </section>
