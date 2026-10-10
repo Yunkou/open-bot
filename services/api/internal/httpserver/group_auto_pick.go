@@ -46,21 +46,53 @@ func clampAutoPickK(k int) int {
 	return k
 }
 
-// groupHasExplicitAddressing is true when @ / @everyone / client agent_ids already chose targets.
-// AutoPick must never replace those forced sets.
+// groupHasExplicitAddressing is true when @ / @everyone / a proper subset of client
+// agent_ids already chose targets. AutoPick must never replace those forced sets.
+//
+// Legacy web clients send every channel member as agent_ids on no-@ turns ("all
+// candidates, each may PASS"). That full-member dump is NOT explicit addressing —
+// treating it as such skipped AutoPick and ran every bot (duplicate UX + wrong pick).
 func groupHasExplicitAddressing(content string, explicit []string, members []string, agents []*db.Agent) bool {
-	for _, id := range explicit {
-		if strings.TrimSpace(id) != "" {
-			return true
-		}
-	}
 	if mentionIncludesEveryone(content) {
 		return true
 	}
 	if len(resolveMentionedAgents(parseMentionTokens(content), members, agents)) > 0 {
 		return true
 	}
-	return false
+	memberSet := map[string]struct{}{}
+	for _, m := range members {
+		m = strings.TrimSpace(m)
+		if m != "" {
+			memberSet[m] = struct{}{}
+		}
+	}
+	if len(memberSet) == 0 {
+		return false
+	}
+	seen := map[string]struct{}{}
+	n := 0
+	for _, id := range explicit {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := memberSet[id]; !ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		n++
+	}
+	if n == 0 {
+		return false
+	}
+	// Full-member dump = legacy candidate list; AutoPick still applies.
+	if n == len(memberSet) {
+		return false
+	}
+	return true
 }
 
 // autoPickHeuristic picks ≤K members by keyword / role-description match; else fail-open to lead.

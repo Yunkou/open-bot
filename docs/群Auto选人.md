@@ -49,6 +49,8 @@ resolveGroupSendTargets / planSendTargets
         heuristic 无命中      → [lead]（非 forced；lead 提示「你是兜底，请回答」）
 ```
 
+**客户端 `agent_ids`：** no-`@` 时**不要**附带全员 id。旧 web 在无 `@` 时把全体成员塞进 `agent_ids`，服务端曾把「任意非空 agent_ids」当成 explicit 而跳过 AutoPick（表现：问「谁会写代码」22+33 都答）。现约定：仅 `@` 子集 / UI 点名写入；全员 dump 在服务端也视为非 explicit（兼容旧客户端）。并行多 bot 时，客户端 `message_saved` 必须按 `agent_id` stamp，避免同 bot 双泡。
+
 ## 4. 轻量选人（A / B）
 
 输入：用户本轮文本、成员名 + 短角色（已有 `groupParticipationRoleHint`）、可选最近 1～2 条摘要。  

@@ -1800,6 +1800,20 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
   if (msg.role === "assistant" && isStopMarkerContent(msg.content)) {
     return prev;
   }
+  // Parallel group: prefer the in-flight bubble for the same agent_id (WS projection
+  // must not sit beside the streaming tokens as a duplicate).
+  const incomingAgent = (msg.agent_id || "").trim();
+  if (msg.role === "assistant" && incomingAgent) {
+    for (let i = prev.length - 1; i >= 0; i--) {
+      const m = prev[i];
+      if (m.role !== "assistant") continue;
+      const local = Boolean(m.streaming) || m.id.startsWith("local-");
+      if (!local) continue;
+      if ((m.agent_id || "").trim() === incomingAgent) {
+        return adopt(i);
+      }
+    }
+  }
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
     if (m.role !== msg.role) continue;
@@ -1811,7 +1825,12 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
       m.content === msg.content ||
       (m.content === "" && !m.streaming) ||
       (m.content !== "" && msg.content.startsWith(m.content));
-    if (!same) break;
+    if (!same) {
+      // Another agent's in-flight bubble — keep scanning (do not stop the walk).
+      const localAgent = (m.agent_id || "").trim();
+      if (incomingAgent && localAgent && localAgent !== incomingAgent) continue;
+      break;
+    }
     return adopt(i);
   }
   return insertKeepingStreamLast({ ...msg, streaming: false } as T);

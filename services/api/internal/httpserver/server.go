@@ -1258,7 +1258,7 @@ type sendBody struct {
 	Content         string          `json:"content"`
 	LLMConnectionID string          `json:"llm_connection_id"`
 	Attachments     []AttachmentRef `json:"attachments"`
-	AgentIDs        []string        `json:"agent_ids"` // group candidates; empty = server resolves (@ / all members)
+	AgentIDs        []string        `json:"agent_ids"` // @ subset or UI pick; empty/full-members = server AutoPick
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
 	// ReplyToID is set only when the user explicitly clicks「回复」(quote / mainline).
 	// Normal sends leave it empty. Bot assistant saves must never copy this onto reply_to_id;
@@ -2069,7 +2069,8 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	}
 	mode := ch.Settings.EffectiveAutoPickMode(orgMode)
 
-	// Never replace @ / @everyone / explicit agent_ids. Mode off → all members (status quo).
+	// Never replace @ / @everyone / subset agent_ids. Full-member agent_ids is legacy (AutoPick still runs).
+	// Mode off → all members (status quo).
 	if groupHasExplicitAddressing(content, explicit, members, agents) || mode == db.AutoPickOff {
 		plan.Targets = base
 		if plan.ShowReplyCandidates {

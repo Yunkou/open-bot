@@ -36,6 +36,18 @@ func TestAutoPickHeuristicPrefersCoderForFunction(t *testing.T) {
 	}
 }
 
+func TestAutoPickHeuristicWhoWritesCodePicksCoder(t *testing.T) {
+	members := []string{"research", "coder"}
+	agents := []*db.Agent{
+		{ID: "research", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "coder", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	got := autoPickHeuristic("谁会写代码", members, agents, "coder", 1, "")
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+		t.Fatalf("want coder(33) only, got %#v conf=%.2f fallback=%s", got.AgentIDs, got.Confidence, got.Fallback)
+	}
+}
+
 func TestAutoPickHeuristicFailOpenLead(t *testing.T) {
 	members, agents := testGroupAgents()
 	got := autoPickHeuristic("随便聊聊天气", members, agents, "lead", 1, "")
@@ -70,7 +82,14 @@ func TestGroupHasExplicitAddressing(t *testing.T) {
 		t.Fatal("@everyone should be explicit")
 	}
 	if !groupHasExplicitAddressing("hi", []string{"coder"}, members, agents) {
-		t.Fatal("explicit agent_ids should count")
+		t.Fatal("subset agent_ids should count as explicit")
+	}
+	// Legacy client: no @ but agent_ids = all members → not explicit (AutoPick must run).
+	if groupHasExplicitAddressing("谁会写代码", members, members, agents) {
+		t.Fatal("full-member agent_ids without @ must not skip AutoPick")
+	}
+	if groupHasExplicitAddressing("谁会写代码", []string{"lead", "coder", "writer", "lead"}, members, agents) {
+		t.Fatal("deduped full-member dump must not skip AutoPick")
 	}
 }
 

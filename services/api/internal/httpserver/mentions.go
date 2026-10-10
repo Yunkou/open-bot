@@ -156,7 +156,7 @@ func mentionIncludesEveryone(content string) bool {
 // DM is handled by the caller (empty channel). Rules:
 //   - @everyone/@all → all members (each should reply)
 //   - specific @Name / explicit agent_ids → those agents (all of them, not first-only)
-//   - no @ → all members (AutoPick / fail-open applied later in planSendTargets)
+//   - no @ → all members as base (AutoPick later; client full-member agent_ids must not skip it)
 // Reply-to-bot is not a hard filter (history/quote still steer relevance).
 func resolveGroupSendTargets(members []string, agents []*db.Agent, explicit []string, content string, replyParent *db.Message, convAgentID string) []string {
 	_ = replyParent // reserved: soft signal via quote/history, not candidate filter

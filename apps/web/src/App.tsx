@@ -1987,18 +1987,28 @@ export default function App() {
     });
   };
 
-  const stampSavedMessage = (convId: string, messageId: string, requestId?: string) => {
+  const stampSavedMessage = (
+    convId: string,
+    messageId: string,
+    requestId?: string,
+    agentId?: string,
+  ) => {
     if (!messageId) return;
     const run = runsRef.current.get(convId);
-    const localId = run?.assistantId;
+    const aid = (agentId || "").trim();
+    // Parallel group: stamp the bubble for this agent_id, not whichever agent last
+    // set run.assistantId (that bug left a streaming bubble + WS row as duplicates).
+    const localId =
+      (aid && run?.assistantIdsByAgent?.[aid]) || run?.assistantId || null;
     const rid = (requestId || "").trim();
     patchConvMessages(convId, (prev) => {
       const existing = prev.find((m) => m.id === messageId);
       if (existing) {
         const local = localId && localId !== messageId ? prev.find((m) => m.id === localId) : undefined;
         if (local && local.role === "assistant" && existing.role === "assistant") {
-          // The saved row already arrived via WS / pullOpen as its own bubble (placeholders never
-          // fuzzy-absorb). Fold: the run's placeholder takes the server id, drop the duplicate.
+          // The saved row already arrived via WS / pullOpen as its own bubble (empty
+          // placeholders never fuzzy-absorb). Fold: this agent's placeholder takes the
+          // server id, drop the duplicate.
           return prev
             .filter((m) => m.id !== messageId)
             .map((m) =>
@@ -2008,21 +2018,45 @@ export default function App() {
                     ...m,
                     id: messageId,
                     content: m.content || existing.content,
+                    ...(aid || existing.agent_id || m.agent_id
+                      ? { agent_id: aid || existing.agent_id || m.agent_id }
+                      : {}),
                     ...(rid || existing.request_id ? { request_id: rid || existing.request_id } : {}),
                   }
                 : m,
             );
         }
-        if (!rid) return prev;
-        return prev.map((m) => (m.id === messageId && !m.request_id ? { ...m, request_id: rid } : m));
+        if (!rid && !aid) return prev;
+        return prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                ...(rid && !m.request_id ? { request_id: rid } : {}),
+                ...(aid && !m.agent_id ? { agent_id: aid } : {}),
+              }
+            : m,
+        );
       }
       if (!localId) return prev;
       return prev.map((m) =>
-        m.id === localId ? { ...m, id: messageId, ...(rid ? { request_id: rid } : {}) } : m,
+        m.id === localId
+          ? {
+              ...m,
+              id: messageId,
+              ...(rid ? { request_id: rid } : {}),
+              ...(aid ? { agent_id: aid } : {}),
+            }
+          : m,
       );
     });
-    if (run && localId && run.assistantId === localId) {
-      run.assistantId = messageId;
+    if (run && localId) {
+      if (run.assistantId === localId) run.assistantId = messageId;
+      if (aid) {
+        if (!run.assistantIdsByAgent) run.assistantIdsByAgent = {};
+        if (run.assistantIdsByAgent[aid] === localId) {
+          run.assistantIdsByAgent[aid] = messageId;
+        }
+      }
     }
   };
 
@@ -2313,6 +2347,7 @@ export default function App() {
                 conv.id,
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
+                typeof meta.agent_id === "string" ? meta.agent_id : undefined,
               );
               if (meta.sources != null) {
                 attachSourcesToStreaming(conv.id, meta.sources, meta.message_id);
@@ -2755,10 +2790,11 @@ export default function App() {
       if (everyone) {
         return groupMentionMembers.map((a) => a.id);
       }
-      // Specific @ → those agents (all of them). No @ → all members as candidates
-      // (each may PASS); server is authoritative and mirrors this.
+      // Specific @ → those agents. No @ → omit agent_ids so server AutoPick runs.
+      // (Legacy sent all member ids here, which made the API treat the turn as
+      // explicit addressing and skip AutoPick — every bot answered.)
       if (ids.length) return ids;
-      return groupMentionMembers.map((a) => a.id);
+      return undefined;
     })();
     let sendSelection: LastActiveSelection | null = null;
     let sendHadError = false;
@@ -2946,6 +2982,7 @@ export default function App() {
                 streamConvId!,
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
+                typeof meta.agent_id === "string" ? meta.agent_id : undefined,
               );
               if (meta.sources != null) {
                 attachSourcesToStreaming(streamConvId!, meta.sources, meta.message_id);
