@@ -96,7 +96,7 @@ resolveGroupSendTargets / planSendTargets
 **薄结构安全（非 all-hands 短语表）**：
 
 - 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。**仅此**（及 lead / 二次 fail-open）为硬 must-answer；who-can / specialty / 宽 fail-open-all **不**标 LeadFallback。
-- **信任全员 count**：非 who-can、非 specialty（核心 role synonym，非 SVG/HTML 针表）且 `count ≥ 成员数` **且** `probs[all]` 有实质质量（≥0.20）时，underpick mN 才展开全员 + LeadFallback。
+- **信任全员 count**：非 who-can、非 specialty（核心 role synonym；coding 桶含 html/canvas/svg/js/网页等**实现标记**，**不是**「再来个哭脸」式追问 anaphora 针表）且 `count ≥ 成员数` **且** `probs[all]` 有实质质量（≥0.20）时，underpick mN 才展开全员 + LeadFallback。peek `a0233dbd`「写个html…canvas」靠 coding synonym 挡住展开，再经 specialty-mismatch → coder。
 - decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员候选**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」），但 **不** LeadFallback——宽路径里无关 bot 仍可 candidacy `[PASS]`。成功 `choice=all` 才硬禁 PASS。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
 - decide 客户端超时约 **20s**（原 8s 曾与 ~7.3s Laya 完成竞态）。

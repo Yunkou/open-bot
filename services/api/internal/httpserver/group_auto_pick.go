@@ -393,7 +393,7 @@ var roleSynonymBuckets = []struct {
 	roleNeedles []string
 }{
 	{
-		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "coding", "coder", "function", "api", "脚本", "单元测试", "写个函数", "修一下"},
+		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "coding", "coder", "function", "api", "脚本", "单元测试", "写个函数", "修一下", "html", "canvas", "svg", "javascript", "js", "网页"},
 		roleNeedles: []string{"码", "程序", "代码", "编程", "开发", "工程", "排障", "tech", "code", "engineer", "软件", "后端", "前端"},
 	},
 	{

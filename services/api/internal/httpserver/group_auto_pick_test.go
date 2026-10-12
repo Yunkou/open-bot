@@ -1915,6 +1915,46 @@ func TestAutoPickDecisionCountExpandRequiresAllMass(t *testing.T) {
 	}
 }
 
+// Production 2026-10-12 19:49 CST Langfuse peek/obs=a0233dbd84136984 (trace a52623e3…):
+// 「给我写个html…通过canvas画出不同的动物表情」 → SystemOne choice=m0(文章) @0.53,
+// probs[all]=0.35, noul≈0.997 → count=2. Old full_roster_count_expand (probs[all]≥0.20
+// only) expanded to both + LeadFallback; session showed 文章+代码 both must-answer.
+// Fix: html/canvas/svg/js/网页 coding synonym blocks expand + specialty-mismatch
+// fail-opens to coder-only heuristic (AllowSecondFailOpen=false, no LeadFallback).
+func TestReproLangfuseA023HTMLCanvasNoCountExpand(t *testing.T) {
+	members := []string{"b82b2fbe-c621-4943-aff0-f59e7fc075b6", "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"}
+	writer, coder := members[0], members[1]
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。"},
+	}
+	ut := "给我写个html，选择不同的情绪。通过canvas画出不同的动物表情"
+	syn := "User: 大家好 | User: 给我写个html，选择不同的情绪。通过canvas画出不同的动物表情 | Last answered by: 代码 — 负责写代码与排障：改项目、查 bug、联调。小步…, 文章 — 负责写东西与改稿：邮件、文档、文案。尊重用户语气…"
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"count": map[string]any{"type": "noul", "noul": "0.9967"},
+				"pick": map[string]any{
+					"type": "choice", "choice": "m0",
+					"probabilities": map[string]any{"all": "0.3477", "m0": "0.5344", "m1": "0.1179"},
+					"confidence": "0.1314",
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, writer, 1, syn, deps)
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != coder {
+		t.Fatalf("html/canvas specialty must resolve to coder only, got method=%s ids=%#v fallback=%s LeadFallback=%#v", got.Method, got.AgentIDs, got.Fallback, got.LeadFallback)
+	}
+	if got.LeadFallback[writer] || got.LeadFallback[coder] {
+		t.Fatalf("specialty must not LeadFallback, got %#v", got.LeadFallback)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("html/canvas coding synonym must close second-wave")
+	}
+}
+
 // When the model correctly classifies FOLLOW-UP / SPECIALTY onto the coding profile,
 // trust choice/count — no synonym needle rescue required.
 func TestAutoPickDecisionTrustsSpecialtyChoice(t *testing.T) {

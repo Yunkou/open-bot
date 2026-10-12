@@ -135,7 +135,10 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	// Thin structural safety (no specialty/anaphora needle tables): full-roster count
 	// expands an underpick mN primary only when the model also put meaningful mass on
 	// "all" (intro underpick). Weak probs[all] (<0.20) keeps the mapped specialty subset even
-	// if noul was inflated. Current-utterance specialty synonym still blocks expand.
+	// if noul was inflated. Current-utterance specialty synonym still blocks expand —
+	// Langfuse a0233dbd 「写个html…canvas」: choice=m0 + probs[all]=0.35 + noul≈1 must not
+	// expand; coding synonym (html/canvas/…) closes this gate and specialty-mismatch
+	// fail-opens to the capable profile.
 	if ok && !whoCan && !allSelected && !userTextHitsRoleSynonym(userText) &&
 		countHint >= len(members) && len(members) > 1 &&
 		probs[autoPickDecisionAllKey] >= 0.20 {
