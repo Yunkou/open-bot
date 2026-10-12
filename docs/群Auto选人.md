@@ -48,7 +48,7 @@ resolveGroupSendTargets / planSendTargets
         auto_pick=heuristic  → AutoPick(K) A 档（专长/角色；无 all-hands 短语短路）
         auto_pick=decision   → 始终 SystemOne choice（含 opaque `all` + mN）；
                                prompt 分类 all-hands/who-can/specialty；
-                               choice=all / 全员映射 → 全员 + LeadFallback；失败 → heuristic
+                               choice=all / 全员映射 → 全员 + LeadFallback；失败 → heuristic（全员候选、不 LeadFallback）
         heuristic 无命中      → [lead]（非 forced；lead 提示「你是兜底，请回答」）
 ```
 
@@ -78,7 +78,7 @@ resolveGroupSendTargets / planSendTargets
 
 **Fail-open 规则（硬）：**
 
-- decision：解析失败、超时、空列表、`confidence < θ`、决策层 off、runtime 不可达 → **heuristic**；若 heuristic 无专长命中 / 仅 lead → **全员 + LeadFallback**（禁止误变成 lead-only；Langfuse cf23 「大家好」）
+- decision：解析失败、超时、空列表、`confidence < θ`、决策层 off、runtime 不可达 → **heuristic**；若 heuristic 无专长命中 / 仅 lead → **全员候选**（禁止误变成 lead-only；Langfuse cf23 「大家好」；宽路径不 LeadFallback）
 - heuristic：无命中 / 低分 → `[lead]`；lead 不在群成员里 → 退回**全员候选**
 - Auto 选人**不得**替代 `@` 强制集合
 
@@ -95,9 +95,9 @@ resolveGroupSendTargets / planSendTargets
 
 **薄结构安全（非 all-hands 短语表）**：
 
-- 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。
+- 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。**仅此**（及 lead / 二次 fail-open）为硬 must-answer；who-can / specialty / 宽 fail-open-all **不**标 LeadFallback。
 - **信任全员 count**：非 who-can、非 specialty（核心 role synonym，非 SVG/HTML 针表）且 `count ≥ 成员数` **且** `probs[all]` 有实质质量（≥0.20）时，underpick mN 才展开全员 + LeadFallback。
-- decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员 + LeadFallback**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」）。
+- decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员候选**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」），但 **不** LeadFallback——宽路径里无关 bot 仍可 candidacy `[PASS]`。成功 `choice=all` 才硬禁 PASS。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
 - decide 客户端超时约 **20s**（原 8s 曾与 ~7.3s Laya 完成竞态）。
 
@@ -127,9 +127,9 @@ resolveGroupSendTargets / planSendTargets
 
 **映射硬化（who-can，已批准的 all→capable 重映射）**：`choice=all` + `count≥成员数`（SystemOne 把 noul 抬到全员，如 Langfuse `21ed840c` / 12:18 CST「谁会写代码」）时**不**信任该 count，改为按 mN 相对概率推断有能力子集（与 count 省略/undershoot 同一路径）。不是 keyword role-match，也不是 all-hands underpick→全员展开。
 
-**PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。这是结构安全，不是 keyword 纠偏。
+**PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，`AllowSecondFailOpen=false`（禁止「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」，Langfuse `a1f143e3` / obs `30796cdf`）。**不**标 `LeadFallback`：选中但无关 / 误选的 bot 仍走 candidacy，可 `[PASS]`。硬禁 PASS 只留给真全员 / 故意 must-answer。
 
-**PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `LeadFallback` + `AllowSecondFailOpen=false`。否则会出现「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST「写个js的代码…」即此（Langfuse `a32fde27` / obs `5808f45a`）。heuristic 与 decision 成功路径均适用。
+**PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `AllowSecondFailOpen=false`（否则「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST，Langfuse `a32fde27` / obs `5808f45a`）。**不** LeadFallback——无关选中 bot 可 PASS。heuristic 与 decision 成功路径均适用。
 
 **专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 意图摘要 + 作答连续性，非 keyword 针表）**：decide state **始终**写入 **Current user intent**（`用户想：…`）与成员能力画像；prompt 要求按 intent 分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**INTERRUPT / newest wins**：新专长问（如「通过选择不同心情生成不同svg」，Langfuse peek `38529ebd`）打断未完成旧问，不得因 Recent 里多 bot 作答就选 `all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（`probs[all]` 有实质质量时才做 full-roster count 展开；choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
 
@@ -141,8 +141,8 @@ resolveGroupSendTargets / planSendTargets
 
 ## 5. 与 PASS / 全员候选并存
 
-- 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑。  
-- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**例外**：who-can / specialty / **all-hands** 关闭二次 fail-open，并对候选标 `LeadFallback` 强制作答（见 §4.1 / §4.2）。  
+- 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑（who-can / specialty 亦然）。  
+- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**例外**：who-can / specialty / **all-hands** 关闭二次 fail-open；其中仅 **all-hands**（`choice=all` / 全员映射）及 lead/二次 fail-open 标 `LeadFallback` 硬禁 `[PASS]`（见 §4.1 / §4.2）。  
 - 开关：仅 org `feature_flags_json.auto_pick` 三态；默认 **heuristic**。
 
 ## 6. 文案 / 可观测
@@ -184,7 +184,7 @@ resolveGroupSendTargets / planSendTargets
 4. heuristic 无命中 → 仅 lead 答，不出现空回合。  
 5. org `auto_pick=off` → 与今日全员+PASS 一致。  
 6. org `auto_pick=decision` + 决策层可用 → SystemOne choice 选人；日志 `auto_pick=decision`。  
-7. org `auto_pick=decision` 但决策 off / 超时 / 低置信 → `decision->heuristic`；有专长命中则用专长子集，否则 **全员 + LeadFallback**（**不是**仅 lead）。  
+7. org `auto_pick=decision` 但决策 off / 超时 / 低置信 → `decision->heuristic`；有专长命中则用专长子集，否则 **全员候选**（**不是**仅 lead；宽路径不 LeadFallback，成功 `choice=all` 才硬禁 PASS）。  
 8. 历史 bool `true/false` 在 org flags / channel 存储可读为 heuristic / off；channel 显式值**不**覆盖 org。  
 9. Admin 功能开关可选三策略中文标签，写回 `feature_flags_json.auto_pick`。  
 10. channel `settings.auto_pick=off` 且 org=`decision` → 仍按 decision 规划。

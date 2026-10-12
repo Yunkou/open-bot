@@ -23,9 +23,13 @@ type groupAutoPickResult struct {
 	Confidence float64
 	Method     string // "heuristic"
 	Fallback   string // "" | "lead" | "all"
-	// LeadFallback marks agents that should get the "you are the fallback, please answer" prompt.
+	// LeadFallback marks agents that get the hard must-answer / no-[PASS] participation
+	// prompt. Only true all-hands (choice=all / full roster) or intentional must-answer
+	// (lead fail-open, second fail-open). Who-can / specialty / broad fail-open-all do
+	// NOT set this — selected bots keep candidacy [PASS] when off-topic.
 	LeadFallback map[string]bool
 	// AllowSecondFailOpen: if every AutoPick candidate PASS-es, run lead (or all).
+	// False for who-can / specialty / all-hands so PASS cannot dump incapable peers.
 	AllowSecondFailOpen bool
 }
 
@@ -121,17 +125,16 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 
 	failOpenAll := func() groupAutoPickResult {
 		out := copyStringSlice(members)
-		leadFB := map[string]bool{}
-		for _, id := range out {
-			leadFB[id] = true
-		}
+		// Broad path: everyone is a candidate, but do not ban [PASS] — unrelated bots
+		// must still be able to stay silent via candidacy. True all-hands uses
+		// choice=all LeadFallback instead.
 		log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=all", method, out)
 		return groupAutoPickResult{
 			AgentIDs:            out,
 			Confidence:          0,
 			Method:              method,
 			Fallback:            "all",
-			LeadFallback:        leadFB,
+			LeadFallback:        map[string]bool{},
 			AllowSecondFailOpen: false,
 		}
 	}
@@ -237,15 +240,13 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 	leadFB := map[string]bool{}
 	allowSecond := true
-	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): capable must answer;
-	// no PASS→second-wave dump of incapable peers. Production 13:45 CST Langfuse
-	// peek/obs=5808f45a (「写个js的代码…」): low-conf decision→heuristic picked both
-	// coders; both [PASS]; second fail-open dumped to 文档助手 who answered.
+	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): close second-wave
+	// so PASS cannot dump incapable peers (13:45 CST 5808f45a → 文档助手). Do NOT
+	// LeadFallback / ban [PASS]: AutoPick may mis-select, and an off-topic selected
+	// bot must still PASS via candidacy. LeadFallback is reserved for true all-hands
+	// / intentional must-answer.
 	if isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText) {
 		allowSecond = false
-		for _, id := range ids {
-			leadFB[id] = true
-		}
 	}
 	log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
 	return groupAutoPickResult{
@@ -625,22 +626,21 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 		// would have returned choice=all (Langfuse cf23 「大家好」 7.3s vs 8s client
 		// timeout) does not collapse the room to a single lead reply.
 		h := autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
-		// Lead-only still expands to all (cf23 all-hands decide timeout). A single
+		// Lead-only still expands to all (cf23 all-hands decide timeout) so the room is
+		// not collapsed to a single lead. Do NOT LeadFallback everyone: this is a broad
+		// path when intent is unknown — unrelated bots must still [PASS] via candidacy.
+		// True all-hands with successful choice=all still LeadFallbacks. A single
 		// specialty hit recovered via Recent-context synopsis (FOLLOW-UP + prior specialty
 		// USER ask) must NOT be dumped to everyone — that is the fail-open-all trap.
 		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText) && !userTextHitsRoleSynonym(synopsis)) {
 			out := copyStringSlice(members)
-			leadFB := map[string]bool{}
-			for _, id := range out {
-				leadFB[id] = true
-			}
 			log.Printf("auto_pick=decision->heuristic ids=%v conf=0.00 fallback=all note=decide_fail_all_hands_failopen", out)
 			return groupAutoPickResult{
 				AgentIDs:            out,
 				Confidence:          0,
 				Method:              "decision->heuristic",
 				Fallback:            "all",
-				LeadFallback:        leadFB,
+				LeadFallback:        map[string]bool{},
 				AllowSecondFailOpen: false,
 			}
 		}

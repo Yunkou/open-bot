@@ -77,10 +77,11 @@ func decisionEffectiveK(k, memberCount int, countHint int) int {
 // Trusts model choice+count+probs. Decide state always feeds Member capability profiles;
 // the prompt classifies ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no isAllHandsIntent
 // phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: choice=all /
-// full roster → LeadFallback; count-expand only when probs[all] is meaningful; who-can may
-// remap choice=all → capable subset; who-can / specialty mismatch vs Member capability
-// profiles (core role synonyms) rematches or fail-opens. On soft failure the caller
-// fail-opens to heuristic (not lead-only).
+// full roster → LeadFallback (hard no-[PASS]); who-can / specialty close second-wave but
+// do NOT LeadFallback (selected off-topic bots may still [PASS]); count-expand only when
+// probs[all] is meaningful; who-can may remap choice=all → capable subset; who-can /
+// specialty mismatch vs Member capability profiles rematches or fail-opens. On soft
+// failure the caller fail-opens to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	whoCan := isWhoCanIntent(userText)
@@ -200,15 +201,13 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		}
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=%s", method, ids, conf, choiceKey, countHint, probs, fallback)
 	} else {
-		// Who-can / specialty: capable picks must answer (leadFallback prompt) and must
-		// not second-fail-open into incapable peers. Production 11:41 CST 「谁会写代码」
-		// mapped to 33 only, then 33 [PASS] → 22+44 spoke; 13:45 CST 「写个js的代码」
-		// (peek/obs=5808f45a) low-conf→heuristic both coders PASS → 文档助手 spoke.
+		// Who-can / specialty: close second-wave so PASS cannot dump incapable peers
+		// (11:41 CST 「谁会写代码」 33 PASS→22+44; 13:45 CST 5808f45a → 文档助手).
+		// Do NOT LeadFallback: selected bots keep candidacy [PASS] when off-topic /
+		// mis-selected. Hard no-PASS is only for true all-hands (above) or intentional
+		// must-answer (lead / second fail-open).
 		if whoCan || userTextHitsRoleSynonym(userText) {
 			allowSecond = false
-			for _, id := range ids {
-				leadFB[id] = true
-			}
 		}
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
 	}

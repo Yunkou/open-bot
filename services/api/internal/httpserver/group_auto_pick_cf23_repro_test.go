@@ -61,8 +61,11 @@ func TestReproLangfuseCF23DecideTimeoutFailOpenAll(t *testing.T) {
 	if got.Method != "decision->heuristic" || got.Fallback != "all" || len(got.AgentIDs) != 2 {
 		t.Fatalf("timeout must fail-open all (not lead-only), got %#v", got)
 	}
-	if !got.LeadFallback[writer.ID] || !got.LeadFallback[coder.ID] || got.AllowSecondFailOpen {
-		t.Fatalf("LeadFallback both + no second-wave: %#v", got)
+	if got.AllowSecondFailOpen {
+		t.Fatalf("no second-wave on all fail-open: %#v", got)
+	}
+	if got.LeadFallback[writer.ID] || got.LeadFallback[coder.ID] {
+		t.Fatalf("broad decide-fail must not LeadFallback (PASS ok), got %#v", got.LeadFallback)
 	}
 }
 

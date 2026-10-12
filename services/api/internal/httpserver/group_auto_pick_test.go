@@ -28,8 +28,11 @@ func TestAutoPickHeuristicPrefersCoderForFunction(t *testing.T) {
 	if got.Fallback != "" || got.Method != "heuristic" {
 		t.Fatalf("unexpected meta %#v", got)
 	}
-	if got.AllowSecondFailOpen || !got.LeadFallback["coder"] {
-		t.Fatalf("specialty coding: LeadFallback coder, no second-wave dump, got %#v", got)
+	if got.AllowSecondFailOpen {
+		t.Fatalf("specialty coding: no second-wave dump, got %#v", got)
+	}
+	if got.LeadFallback["coder"] {
+		t.Fatalf("specialty must not LeadFallback (off-topic selected can PASS), got %#v", got.LeadFallback)
 	}
 	if got.Confidence < autoPickConfidenceFloor {
 		t.Fatalf("confidence too low: %.2f", got.Confidence)
@@ -657,7 +660,8 @@ func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 }
 
 func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
-	// Decide timeout/err: no specialty signal → all members + LeadFallback (not lead-only).
+	// Decide timeout/err: no specialty signal → all members (not lead-only), but no
+	// LeadFallback — broad path must still allow unrelated bots to [PASS].
 	// Langfuse cf23: SystemOne finished choice=all in ~7.3s but 8s client timeout → lead-only.
 	members, agents := testGroupAgents()
 	deps := &autoPickDecisionDeps{
@@ -677,8 +681,8 @@ func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
 		t.Fatalf("decide-fail with no specialty must fail-open all, got %#v", got)
 	}
 	for _, id := range members {
-		if !got.LeadFallback[id] {
-			t.Fatalf("LeadFallback missing %s: %#v", id, got.LeadFallback)
+		if got.LeadFallback[id] {
+			t.Fatalf("broad decide-fail must not LeadFallback %s: %#v", id, got.LeadFallback)
 		}
 	}
 	if got.AllowSecondFailOpen {
@@ -883,8 +887,8 @@ func TestAutoPickDecisionTwoOfThreeViaCount(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatal("specialty synonym phrase must not AllowSecondFailOpen")
 	}
-	if !got.LeadFallback["coder"] || !got.LeadFallback["writer"] {
-		t.Fatalf("LeadFallback want coder+writer, got %#v", got.LeadFallback)
+	if got.LeadFallback["coder"] || got.LeadFallback["writer"] {
+		t.Fatalf("specialty must not LeadFallback (candidacy PASS ok), got %#v", got.LeadFallback)
 	}
 }
 
@@ -1107,8 +1111,8 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("who-can must not AllowSecondFailOpen")
 	}
-	if !got.LeadFallback["22"] || !got.LeadFallback["44"] || got.LeadFallback["33"] {
-		t.Fatalf("leadFallback want 22+44, got %#v", got.LeadFallback)
+	if got.LeadFallback["22"] || got.LeadFallback["44"] || got.LeadFallback["33"] {
+		t.Fatalf("who-can must not LeadFallback (candidacy PASS ok), got %#v", got.LeadFallback)
 	}
 }
 
@@ -1238,8 +1242,11 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 	if got.Method != "decision" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
 		t.Fatalf("want only coder 33, got %#v method=%s", got.AgentIDs, got.Method)
 	}
-	if got.AllowSecondFailOpen || !got.LeadFallback["33"] {
-		t.Fatalf("structural safety: LeadFallback 33, no second-wave, got %#v", got)
+	if got.AllowSecondFailOpen {
+		t.Fatalf("structural safety: no second-wave, got %#v", got)
+	}
+	if got.LeadFallback["33"] {
+		t.Fatalf("who-can must not LeadFallback, got %#v", got.LeadFallback)
 	}
 }
 
@@ -1324,8 +1331,11 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != members[0] || got2.Fallback == "all" {
 		t.Fatalf("who-can must stay coder-only subset, got %#v fallback=%s", got2.AgentIDs, got2.Fallback)
 	}
-	if got2.AllowSecondFailOpen || !got2.LeadFallback[members[0]] {
-		t.Fatalf("who-can structural safety: LeadFallback + no second-wave, got %#v", got2)
+	if got2.AllowSecondFailOpen {
+		t.Fatalf("who-can structural safety: no second-wave, got %#v", got2)
+	}
+	if got2.LeadFallback[members[0]] {
+		t.Fatalf("who-can must not LeadFallback, got %#v", got2.LeadFallback)
 	}
 }
 
@@ -1503,7 +1513,8 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 // (trace a32fde27da3cf91c5cf57a042b456afa): 「写个js的代码，格式化日期为hh:mm:ss。输入是时间戳」
 // SystemOne choice=m0 (代码与排障助手) noul≈0.98 conf field 0.05 pick-prob 0.38 → below
 // floor → decision→heuristic both coders; both [PASS]; second fail-open dumped to 文档助手
-// who answered. Specialty picks must LeadFallback + AllowSecondFailOpen=false.
+// who answered. Specialty picks: AllowSecondFailOpen=false (no dump to 文档助手);
+// no LeadFallback so off-topic selected bots can still [PASS].
 func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 	members := []string{
 		"1d818a58-4f4a-48f3-9bcd-1de613d6dcec", // 代码与排障助手 (m0 / lead)
@@ -1551,15 +1562,12 @@ func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 		t.Fatalf("specialty must not AllowSecondFailOpen (else PASS→文档助手), got %#v", got)
 	}
 	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("LeadFallback missing for capable %s, got %#v", id, got.LeadFallback)
+		if got.LeadFallback[id] {
+			t.Fatalf("specialty must not LeadFallback capable %s (PASS ok), got %#v", id, got.LeadFallback)
 		}
 	}
-	if got.LeadFallback[members[2]] {
-		t.Fatalf("文档助手 must not be LeadFallback, got %#v", got.LeadFallback)
-	}
 
-	// Heuristic alone (same channel) must also block second-wave.
+	// Heuristic alone (same channel) must also block second-wave, without LeadFallback.
 	h := autoPickHeuristic(phrase, members, agents, members[0], 1, "")
 	if h.AllowSecondFailOpen {
 		t.Fatalf("heuristic specialty must not AllowSecondFailOpen, got %#v", h)
@@ -1568,8 +1576,8 @@ func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 		if id == members[2] {
 			t.Fatalf("heuristic must not pick 文档助手, got %#v", h.AgentIDs)
 		}
-		if !h.LeadFallback[id] {
-			t.Fatalf("heuristic LeadFallback missing %s, got %#v", id, h.LeadFallback)
+		if h.LeadFallback[id] {
+			t.Fatalf("heuristic must not LeadFallback %s, got %#v", id, h.LeadFallback)
 		}
 	}
 }
