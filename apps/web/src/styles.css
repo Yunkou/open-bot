@@ -1885,7 +1885,9 @@ button.ghost {
 .conv-item:hover .conv-del,
 .conv-item:focus-within .conv-del,
 .conv-item:hover .conv-clone,
-.conv-item:focus-within .conv-clone {
+.conv-item:focus-within .conv-clone,
+.conv-item:hover .conv-settings,
+.conv-item:focus-within .conv-settings {
   opacity: 1;
 }
 
@@ -1895,6 +1897,26 @@ button.ghost {
 }
 
 .conv-clone:hover {
+  color: var(--text);
+  background: var(--bg-soft);
+}
+
+.conv-settings {
+  flex-shrink: 0;
+  /* Desktop: hover-only like clone (UE). Touch override below. */
+  opacity: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.conv-settings:hover {
   color: var(--text);
   background: var(--bg-soft);
 }
@@ -4927,8 +4949,12 @@ html.touch-ui .composer-quote-bar {
 
 /* ---- P0 multi-endpoint: touch-ui + create-bot / bot settings sheets (layout-narrow 860) ---- */
 
-/* Touch UE lock: clone always visible ≥44; delete stays long-press / hidden inline. */
-.touch-ui .conv-clone {
+/* Touch + shell-narrow (≤860 sheet form): clone + Bot settings gear always visible ≥44.
+ * Narrow fine-pointer (768–860) used to miss hover-only gears — user report. */
+.touch-ui .conv-clone,
+.touch-ui .conv-settings,
+.shell-narrow .conv-clone,
+.shell-narrow .conv-settings {
   opacity: 1;
   width: 44px;
   height: 44px;
@@ -4939,7 +4965,13 @@ html.touch-ui .composer-quote-bar {
   box-sizing: border-box;
 }
 .touch-ui .conv-item:hover .conv-clone,
-.touch-ui .conv-item:focus-within .conv-clone {
+.touch-ui .conv-item:focus-within .conv-clone,
+.touch-ui .conv-item:hover .conv-settings,
+.touch-ui .conv-item:focus-within .conv-settings,
+.shell-narrow .conv-item:hover .conv-clone,
+.shell-narrow .conv-item:focus-within .conv-clone,
+.shell-narrow .conv-item:hover .conv-settings,
+.shell-narrow .conv-item:focus-within .conv-settings {
   opacity: 1;
 }
 .touch-ui .conv-del {
@@ -6987,4 +7019,222 @@ html.touch-ui .composer-quote-clear {
   max-height: 100%;
   border-radius: 0;
   padding: 0;
+}
+
+/* ---- list-settings-group-members: 群设置 · 成员 + agent row Bot 设置 gear ---- */
+
+.group-channel-backdrop {
+  z-index: 80;
+}
+
+.group-channel-backdrop-sheet {
+  padding: 0;
+  background: rgba(0, 0, 0, 0.35);
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.group-channel-modal {
+  width: min(420px, 100%);
+  max-height: min(88vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.group-channel-modal-shell {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  padding: 0;
+  background: #F2F2F7;
+}
+
+[data-theme="dark"] .group-channel-modal-shell {
+  background: #1C1C1E;
+}
+
+.group-channel-modal-head {
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  padding: max(16px, calc(env(safe-area-inset-top, 0px) + 8px)) 16px 12px;
+  flex-shrink: 0;
+}
+
+.group-channel-modal:not(.group-channel-modal-shell) .group-channel-modal-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 16px 8px;
+}
+
+.group-channel-modal-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  text-align: left;
+  justify-self: start;
+}
+
+.group-channel-head-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.group-channel-close {
+  min-width: 44px;
+  min-height: 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--bg-soft, #f3f4f6);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--text, #111827);
+  margin: 0;
+  padding: 0;
+}
+
+.group-channel-scroll {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.group-channel-name-line {
+  margin: 0;
+}
+
+.group-channel-section {
+  background: #fff;
+  border-radius: 16px;
+  padding: 14px 14px 10px;
+}
+
+[data-theme="dark"] .group-channel-section {
+  background: #2C2C2E;
+}
+
+.group-channel-section-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+}
+
+.group-members-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.group-members-section-head .group-channel-section-title {
+  margin: 0;
+}
+
+.group-members-add-btn {
+  flex-shrink: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.group-members-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.group-members-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 6px 4px;
+  border-radius: 10px;
+}
+
+.group-members-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-members-remove {
+  flex-shrink: 0;
+  color: var(--danger, #dc2626);
+  min-height: 36px;
+  padding: 6px 10px;
+  font-size: 13px;
+  margin-top: 0;
+}
+
+.group-channel-modal .group-members-add-btn,
+.group-channel-modal .group-members-remove,
+.group-channel-modal .group-add-member-btn,
+.group-channel-modal .group-channel-close,
+.group-channel-modal .group-channel-head-actions .ghost {
+  margin-top: 0;
+}
+
+.group-add-members {
+  margin-top: 4px;
+}
+
+.group-add-member-btn {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.group-add-member-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Channel pill opens 群设置 */
+.agent-pill-channel {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: inherit;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  max-width: 100%;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.agent-pill-channel:focus-visible {
+  outline: 2px solid var(--accent, #2563eb);
+  outline-offset: 2px;
+  border-radius: 8px;
 }

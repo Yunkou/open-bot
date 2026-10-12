@@ -185,6 +185,7 @@ import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
 import { CloneAgentModal } from "./components/CloneAgentModal";
+import { GroupMembersSettings } from "./components/GroupMembersSettings";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
@@ -578,6 +579,7 @@ export default function App() {
 
   const [agentBusy, setAgentBusy] = useState(false);
   const [cloneTarget, setCloneTarget] = useState<Agent | null>(null);
+  const [groupMembersChannel, setGroupMembersChannel] = useState<Channel | null>(null);
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
@@ -4419,6 +4421,23 @@ export default function App() {
                   </div>
                   <button
                     type="button"
+                    className="conv-settings"
+                    title="Bot 设置"
+                    aria-label="Bot 设置"
+                    disabled={agentBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onSelectAgent(a.id);
+                      void openSettings("bot");
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
                     className="conv-clone"
                     title="复制助手"
                     aria-label="复制助手"
@@ -4610,6 +4629,15 @@ export default function App() {
               }
             : undefined
         }
+        onGroupSettings={
+          convSheet?.kind === "channel"
+            ? () => {
+                const ch = convSheet.channel;
+                setConvSheet(null);
+                setGroupMembersChannel(ch);
+              }
+            : undefined
+        }
         onClone={
           convSheet?.kind === "agent"
             ? () => {
@@ -4646,7 +4674,13 @@ export default function App() {
           </button>
           <div className="agent-pill">
             {activeChannel ? (
-              <>
+              <button
+                type="button"
+                className="agent-pill-channel"
+                aria-label={`群设置 ${activeChannel.name}`}
+                title="群设置"
+                onClick={() => setGroupMembersChannel(activeChannel)}
+              >
                 <span className="channel-member-stack" aria-hidden>
                   {channelMemberProfiles(activeChannel).map((p) => (
                     <AgentAvatar
@@ -4667,7 +4701,7 @@ export default function App() {
                     .map((id) => agentNameById.get(id) || id)
                     .join("、")}
                 </span>
-              </>
+              </button>
             ) : !selectionHydrated ? (
               <span className="agent-pill-name muted">加载中…</span>
             ) : (
@@ -6693,6 +6727,27 @@ export default function App() {
           </div>
         </div>
       )}
+      <GroupMembersSettings
+        open={Boolean(groupMembersChannel)}
+        channel={groupMembersChannel}
+        agents={agents}
+        onClose={() => setGroupMembersChannel(null)}
+        onChanged={(ch) => {
+          setChannels((prev) => {
+            const i = prev.findIndex((c) => c.id === ch.id);
+            if (i < 0) return prev;
+            const next = prev.slice();
+            next[i] = { ...prev[i], ...ch, name: ch.name || prev[i].name };
+            return next;
+          });
+          setGroupMembersChannel((cur) =>
+            cur && cur.id === ch.id
+              ? { ...cur, ...ch, name: ch.name || cur.name }
+              : cur,
+          );
+          void refreshChannels().catch(() => {});
+        }}
+      />
       <CloneAgentModal
         agent={cloneTarget}
         onClose={() => setCloneTarget(null)}

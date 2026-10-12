@@ -7,15 +7,26 @@ type Props = {
   onDelete: () => void;
   /** When set (agent long-press), show non-danger「复制助手」above delete. */
   onClone?: () => void;
-  /** When set (agent long-press), show「编辑人设」to open Bot settings. */
+  /** When set (agent long-press), show「Bot 设置」to open Bot settings / 人设. */
   onSettings?: () => void;
+  /** When set (channel long-press), show「群设置」for member management. */
+  onGroupSettings?: () => void;
 };
 
 /**
  * Bottom sheet for conversation / agent / channel row long-press (touch UI).
- * Mirrors MessageActionSheet chrome; agents get 编辑人设 + 复制助手 + destructive delete.
+ * Agents: Bot 设置 + 复制助手 + destructive delete.
+ * Channels: 群设置 + destructive delete.
  */
-export function ConvActionSheet({ open, title, onClose, onDelete, onClone, onSettings }: Props) {
+export function ConvActionSheet({
+  open,
+  title,
+  onClose,
+  onDelete,
+  onClone,
+  onSettings,
+  onGroupSettings,
+}: Props) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -47,7 +58,19 @@ export function ConvActionSheet({ open, title, onClose, onDelete, onClone, onSet
               onSettings();
             }}
           >
-            编辑人设
+            Bot 设置
+          </button>
+        ) : null}
+        {onGroupSettings ? (
+          <button
+            type="button"
+            className="action-sheet-row"
+            onClick={() => {
+              onClose();
+              onGroupSettings();
+            }}
+          >
+            群设置
           </button>
         ) : null}
         {onClone ? (

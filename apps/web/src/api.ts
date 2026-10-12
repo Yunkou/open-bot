@@ -1541,6 +1541,33 @@ export async function addChannelMember(channelId: string, agentId: string): Prom
   return res.json();
 }
 
+/**
+ * Remove a member from a channel.
+ * DELETE /v1/channels/{id}/members/{agentId}
+ * 404 channel/member missing; 400 群里至少保留一位成员 / 不能移除主助理;
+ * success returns updated Channel (same shape as add).
+ */
+export async function removeChannelMember(channelId: string, agentId: string): Promise<Channel> {
+  const res = await fetch(
+    `${API_BASE}/v1/channels/${encodeURIComponent(channelId)}/members/${encodeURIComponent(agentId)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  // 204 / empty body → stub without members so UI can patch locally then refresh.
+  if (res.status === 204) {
+    return { id: channelId, user_id: "", name: "", created_at: "" };
+  }
+  const text = await res.text();
+  if (!text.trim()) {
+    return { id: channelId, user_id: "", name: "", created_at: "" };
+  }
+  return JSON.parse(text) as Channel;
+}
+
+
 export async function postAgentBusMessage(body: {
   from_agent_id?: string;
   to_agent_id?: string;
