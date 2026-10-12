@@ -75,9 +75,8 @@ func decisionEffectiveK(k, memberCount int, allHands bool, countHint int) int {
 // autoPickDecision asks org decision model (choice + optional count) for members.
 // Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
 // count noul → how many (1..members); specialty soft K; multi/all-hands may raise to members.
-// Trusts model choice+count+probs (no keyword role-match remap).
-// All-hands intent (「都介绍下自己」) still calls decide, then maps everyone even when
-// choice is an mN with diluted probs; who-can stays a capable subset.
+// Trusts model choice+count+probs (no keyword role-match remap; no all-hands underpick→roster expand).
+// All-hands intent is prompt-driven (choice=all + full count); who-can stays a capable subset.
 // On any soft failure the caller should fail-open to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
@@ -132,27 +131,6 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
-	}
-	// All-hands structural safety (Langfuse 38726dc4 / 12:06 CST 「都介绍下自己」):
-	// SystemOne often returns choice=mN + count=N with diluted mN probs below the
-	// absolute confidence floor, so mapping keeps only the primary. When intent is
-	// everyone-speak (and not who-can census), expand to the full roster — same as
-	// choice=all. Who-can subset mapping is unchanged.
-	if allHands && !whoCan {
-		full := orderedDecisionMemberIDs(members, keyToID)
-		if len(full) > 0 && len(ids) < len(full) {
-			ids = full
-			allSelected = true
-			if conf < autoPickConfidenceFloor {
-				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
-					conf = pAll
-				}
-				if conf < autoPickConfidenceFloor {
-					conf = 0.55
-				}
-			}
-			log.Printf("auto_pick=decision note=all_hands_expand choice=%s count=%d probs=%v -> ids=%v", choiceKey, countHint, probs, ids)
-		}
 	}
 	if conf < autoPickConfidenceFloor {
 		log.Printf("auto_pick=decision ids=%v conf=%.2f choice=%s count=%d probs=%v note=low_conf_failopen_heuristic", ids, conf, choiceKey, countHint, probs)
@@ -230,8 +208,12 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"prefer the generalist only for vague single-responder requests. " +
 		"When several specialists fit, pick the best primary — also set count and probabilities so extras can be included (multi subset, not only all-or-one)."
 	if allHands {
-		instr += " The user message looks like an all-hands / everyone-speak request: prefer choice \"all\" " +
-			"unless a single specialist is clearly intended."
+		instr += " ALL-HANDS / EVERYONE-SPEAK (intro-everyone): the user asks every member to introduce or speak " +
+			"(e.g. 「都介绍下自己」「大家都介绍一下」「introduce yourselves」). " +
+			"You MUST set choice=\"all\" — never a single mN as primary. " +
+			"Set count to the full roster (noul near 1). Put HIGH probability mass on \"all\" " +
+			"and keep every mN probability high/even; never concentrate mass on one mN. " +
+			"Do not pick a specialist primary for collective intro / round-robin asks."
 	}
 	if whoCan {
 		instr += " CAPABILITY CENSUS (who-can): the user asks who can do X. " +
@@ -256,6 +238,14 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"near 1 → all %d members. Example: for exactly 2 of %d, use about %.2f.",
 		memberN, memberN, frac2,
 	)
+	if allHands {
+		countInstr = fmt.Sprintf(
+			"ALL-HANDS count: every member should reply (intro-everyone / round-robin). "+
+				"Output noul near 1 → all %d members. Do not use near 0 (single specialist) "+
+				"for 「都介绍下自己」「大家都介绍一下」 / introduce-yourselves asks.",
+			memberN,
+		)
+	}
 	if whoCan {
 		countInstr = fmt.Sprintf(
 			"CAPABILITY CENSUS count: how many members' roles can do what the user asked? "+
@@ -281,6 +271,9 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	b.WriteString("User message:\n")
 	b.WriteString(strings.TrimSpace(userText))
 	b.WriteString("\n\nMember roles are in the pick criteria keys (m0, m1, …). Match capability to those role labels.")
+	if allHands {
+		b.WriteString(" For all-hands / intro-everyone asks: choice must be \"all\", count=full roster; never a single mN.")
+	}
 	if whoCan {
 		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros that merely mention skills.")
 	}

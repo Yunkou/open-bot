@@ -88,7 +88,9 @@ resolveGroupSendTargets / planSendTargets
 | 模式 | 行为 |
 |---|---|
 | **heuristic** | phrase 短路 → 全员候选（非 forced，可 PASS；同 `off`） |
-| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；模型选 `all`（或 probabilities 补满）→ 多人 / 全员；**结构安全**：即便 choice=mN 且 mN 概率被绝对置信度门槛滤掉，仍展开全员（与 who-can 子集互斥） |
+| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；**Prompt 强制** `choice=all`、count=全员、高概率质量压在 `all`（「都介绍下自己」「大家都介绍一下」）；**信任模型映射**（无 underpick→全员结构展开）。与 who-can 子集互斥 |
+
+**Prompt 驱动（all-hands）**：`buildAutoPickDecisionPayload` 在 all-hands 时强化 instructions / count noul / state——必须 `choice="all"`、noul near 1、禁止单 mN；示例含「都介绍下自己」「大家都介绍一下」。已移除 `all_hands_expand` 在 choice≠all 时强制展开全员的路径。
 
 **短语检测**（`isAllHandsIntent`）仍用于：heuristic 短路、decision 抬高 K / 加强指令、decision 失败时 fail-open 全员。
 

@@ -385,11 +385,24 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 			t.Fatalf("leaked agent id as key: %s", k)
 		}
 	}
-	// allHands strengthens instructions
-	_, q2, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
+	// allHands strengthens instructions: must force choice=all / full roster / high mass on all
+	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
 	pick2 := q2["pick"].(map[string]any)
-	if !strings.Contains(fmt.Sprint(pick2["instructions"]), "all-hands") {
-		t.Fatalf("allHands instructions missing hint: %v", pick2["instructions"])
+	instr2 := fmt.Sprint(pick2["instructions"])
+	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN", "HIGH probability"} {
+		if !strings.Contains(instr2, needle) {
+			t.Fatalf("all-hands instructions missing %q: %s", needle, instr2)
+		}
+	}
+	count2 := q2[autoPickDecisionCountKey].(map[string]any)
+	countInstr2 := fmt.Sprint(count2["instructions"])
+	for _, needle := range []string{"ALL-HANDS count", "near 1", "都介绍下自己"} {
+		if !strings.Contains(countInstr2, needle) {
+			t.Fatalf("all-hands count instructions missing %q: %s", needle, countInstr2)
+		}
+	}
+	if !strings.Contains(st2, `choice must be "all"`) || !strings.Contains(st2, "never a single mN") {
+		t.Fatalf("all-hands state missing roster mandate: %q", st2)
 	}
 	// who-can: prompt must drive specific mN + capable count (no role-match remap later)
 	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", false, true)
@@ -520,7 +533,8 @@ func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 			if _, ok := crit[autoPickDecisionAllKey]; ok {
 				sawAllCriterion = true
 			}
-			if strings.Contains(fmt.Sprint(pick["instructions"]), "all-hands") {
+			instr := fmt.Sprint(pick["instructions"])
+			if strings.Contains(instr, "ALL-HANDS") || strings.Contains(strings.ToLower(instr), "all-hands") {
 				sawAllHandsHint = true
 			}
 			return map[string]any{
@@ -994,19 +1008,37 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 	}
 }
 
-func TestAutoPickDecisionAllHandsExpandsWhenChoiceMNDiluted(t *testing.T) {
-	// Langfuse 38726dc4 / obs e28462a156054b71 @ 12:06 CST:
-	// 「都介绍下自己」→ choice=m0 count=3 probs all:0.29 m0:0.45 m1:0.21 m2:0.05
-	// Absolute floor dropped m1/m2 → only 33 replied. All-hands must expand to 22+33+44.
+func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
+	// Prompt-only fix (no underpick→roster remap): all-hands payload must force choice=all.
+	// Langfuse 38726dc4 shape (choice=m0 diluted) is trusted as-is — do NOT assert expand.
 	members := []string{"635d1077-5611-41bb-9fcf-2a4454d43d5a", "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf", "f634df70-8e30-4f71-9415-c7f80a8c0ec3"}
 	agents := []*db.Agent{
 		{ID: members[0], Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
 		{ID: members[1], Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
 		{ID: members[2], Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
 	}
+	var sawAllHandsPrompt bool
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick := questions["pick"].(map[string]any)
+			instr := fmt.Sprint(pick["instructions"])
+			countQ := questions[autoPickDecisionCountKey].(map[string]any)
+			countInstr := fmt.Sprint(countQ["instructions"])
+			st := fmt.Sprint(state)
+			for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN"} {
+				if !strings.Contains(instr, needle) {
+					t.Fatalf("all-hands pick instructions missing %q: %s", needle, instr)
+				}
+			}
+			if !strings.Contains(countInstr, "ALL-HANDS count") || !strings.Contains(countInstr, "near 1") {
+				t.Fatalf("all-hands count instructions weak: %s", countInstr)
+			}
+			if !strings.Contains(st, `choice must be "all"`) {
+				t.Fatalf("all-hands state missing mandate: %q", st)
+			}
+			sawAllHandsPrompt = true
+			// Langfuse 38726dc4 underpick shape — mapping must trust model (no structural expand).
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
@@ -1021,18 +1053,17 @@ func TestAutoPickDecisionAllHandsExpandsWhenChoiceMNDiluted(t *testing.T) {
 		},
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, members[0], 1, "都介绍下自己", deps)
-	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 3 {
-		t.Fatalf("all-hands must expand to everyone, got %#v method=%s fallback=%s", got.AgentIDs, got.Method, got.Fallback)
+	if !sawAllHandsPrompt {
+		t.Fatal("decide must receive all-hands-strengthened payload")
 	}
-	for i, id := range members {
-		if got.AgentIDs[i] != id {
-			t.Fatalf("order want %#v got %#v", members, got.AgentIDs)
-		}
+	// Trust model: do not remap underpick to full roster (prompt should make live model return choice=all).
+	if got.Fallback == "all" && len(got.AgentIDs) == 3 {
+		t.Fatalf("must not structurally expand underpick to roster; got %#v (prompt-only fix)", got.AgentIDs)
 	}
-	if got.AllowSecondFailOpen {
-		t.Fatal("full roster: second fail-open should be off")
+	if got.Method != "decision" && !strings.HasPrefix(got.Method, "decision->heuristic") {
+		t.Fatalf("unexpected method=%s got=%#v", got.Method, got)
 	}
-	// Contrast: who-can with same diluted shape must NOT expand to all.
+	// Contrast: who-can with single capable must NOT expand to all.
 	deps2 := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
@@ -1053,6 +1084,9 @@ func TestAutoPickDecisionAllHandsExpandsWhenChoiceMNDiluted(t *testing.T) {
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != members[0] || got2.Fallback == "all" {
 		t.Fatalf("who-can must stay coder-only subset, got %#v fallback=%s", got2.AgentIDs, got2.Fallback)
 	}
+	if got2.AllowSecondFailOpen || !got2.LeadFallback[members[0]] {
+		t.Fatalf("who-can structural safety: LeadFallback + no second-wave, got %#v", got2)
+	}
 }
 
 func TestAutoPickDecisionAllHandsStillCallsDecide(t *testing.T) {
@@ -1069,8 +1103,9 @@ func TestAutoPickDecisionAllHandsStillCallsDecide(t *testing.T) {
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
 			called = true
 			pick := questions["pick"].(map[string]any)
-			if !strings.Contains(fmt.Sprint(pick["instructions"]), "all-hands") {
-				t.Fatalf("all-hands decide must get all-hands instructions")
+			instr := fmt.Sprint(pick["instructions"])
+			if !strings.Contains(instr, "ALL-HANDS") && !strings.Contains(strings.ToLower(instr), "all-hands") {
+				t.Fatalf("all-hands decide must get all-hands instructions, got %s", instr)
 			}
 			return map[string]any{
 				"pick": map[string]any{
