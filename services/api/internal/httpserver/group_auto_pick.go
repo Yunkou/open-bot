@@ -230,8 +230,11 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 	leadFB := map[string]bool{}
 	allowSecond := true
-	if isWhoCanIntent(userText) {
-		// Same as decision who-can: capable must speak; no second-wave dump.
+	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): capable must answer;
+	// no PASS→second-wave dump of incapable peers. Production 13:45 CST Langfuse
+	// peek/obs=5808f45a (「写个js的代码…」): low-conf decision→heuristic picked both
+	// coders; both [PASS]; second fail-open dumped to 文档助手 who answered.
+	if isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText) {
 		allowSecond = false
 		for _, id := range ids {
 			leadFB[id] = true

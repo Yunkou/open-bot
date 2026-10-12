@@ -156,10 +156,11 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		allowSecond = false
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
 	} else {
-		// Who-can census: capable picks must answer (leadFallback prompt) and must not
-		// second-fail-open into the remaining channel (incapable peers). Production
-		// 11:41 CST 「谁会写代码」mapped to 33 only, then 33 [PASS] → 22+44 spoke.
-		if whoCan {
+		// Who-can / specialty: capable picks must answer (leadFallback prompt) and must
+		// not second-fail-open into incapable peers. Production 11:41 CST 「谁会写代码」
+		// mapped to 33 only, then 33 [PASS] → 22+44 spoke; 13:45 CST 「写个js的代码」
+		// (peek/obs=5808f45a) low-conf→heuristic both coders PASS → 文档助手 spoke.
+		if whoCan || userTextHitsRoleSynonym(userText) {
 			allowSecond = false
 			for _, id := range ids {
 				leadFB[id] = true

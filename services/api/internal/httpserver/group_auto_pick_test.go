@@ -28,8 +28,8 @@ func TestAutoPickHeuristicPrefersCoderForFunction(t *testing.T) {
 	if got.Fallback != "" || got.Method != "heuristic" {
 		t.Fatalf("unexpected meta %#v", got)
 	}
-	if !got.AllowSecondFailOpen {
-		t.Fatal("pick should allow second fail-open")
+	if got.AllowSecondFailOpen || !got.LeadFallback["coder"] {
+		t.Fatalf("specialty coding: LeadFallback coder, no second-wave dump, got %#v", got)
 	}
 	if got.Confidence < autoPickConfidenceFloor {
 		t.Fatalf("confidence too low: %.2f", got.Confidence)
@@ -739,8 +739,12 @@ func TestAutoPickDecisionTwoOfThreeViaCount(t *testing.T) {
 	if got.AgentIDs[0] != "coder" || got.AgentIDs[1] != "writer" {
 		t.Fatalf("order want coder,writer got %#v", got.AgentIDs)
 	}
-	if got.AllowSecondFailOpen != true {
-		t.Fatal("multi subset (not all) should allow second fail-open")
+	// Phrase hits coding specialty synonym → structural safety (no PASS→incapable dump).
+	if got.AllowSecondFailOpen {
+		t.Fatal("specialty synonym phrase must not AllowSecondFailOpen")
+	}
+	if !got.LeadFallback["coder"] || !got.LeadFallback["writer"] {
+		t.Fatalf("LeadFallback want coder+writer, got %#v", got.LeadFallback)
 	}
 }
 
@@ -1336,3 +1340,77 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	}
 }
 
+// Production 2026-10-12 13:45 CST Langfuse peek/obs=5808f45a342469dc
+// (trace a32fde27da3cf91c5cf57a042b456afa): 「写个js的代码，格式化日期为hh:mm:ss。输入是时间戳」
+// SystemOne choice=m0 (代码与排障助手) noul≈0.98 conf field 0.05 pick-prob 0.38 → below
+// floor → decision→heuristic both coders; both [PASS]; second fail-open dumped to 文档助手
+// who answered. Specialty picks must LeadFallback + AllowSecondFailOpen=false.
+func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
+	members := []string{
+		"1d818a58-4f4a-48f3-9bcd-1de613d6dcec", // 代码与排障助手 (m0 / lead)
+		"550cda95-1e8f-4abd-911a-eead2c4803e3", // coder (m1)
+		"a21d3e74-a9a1-4b30-8e5f-042074819ccf", // 文档助手 (m2)
+	}
+	agents := []*db.Agent{
+		{ID: members[0], Name: "代码与排障助手", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。远程 SSH 先 load_skill host-ssh。"},
+		{ID: members[1], Name: "coder", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。远程 SSH 先 load_skill host-ssh。"},
+		{ID: members[2], Name: "文档助手", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+	}
+	phrase := "写个js的代码，格式化日期为hh:mm:ss。输入是时间戳"
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// Exact Langfuse 5808f45a shape.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m0",
+					"confidence": 0.0463,
+					"probabilities": map[string]any{
+						"all": 0.2593, "m0": 0.3837, "m1": 0.2219, "m2": 0.1352,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9824},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, phrase, members, agents, members[0], 1, phrase+" | "+phrase, deps)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("want low-conf fail-open decision->heuristic, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if set[members[2]] {
+		t.Fatalf("must not pick 文档助手 for JS coding ask, got %#v", got.AgentIDs)
+	}
+	if !set[members[0]] && !set[members[1]] {
+		t.Fatalf("want at least one coding bot, got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("specialty must not AllowSecondFailOpen (else PASS→文档助手), got %#v", got)
+	}
+	for _, id := range got.AgentIDs {
+		if !got.LeadFallback[id] {
+			t.Fatalf("LeadFallback missing for capable %s, got %#v", id, got.LeadFallback)
+		}
+	}
+	if got.LeadFallback[members[2]] {
+		t.Fatalf("文档助手 must not be LeadFallback, got %#v", got.LeadFallback)
+	}
+
+	// Heuristic alone (same channel) must also block second-wave.
+	h := autoPickHeuristic(phrase, members, agents, members[0], 1, "")
+	if h.AllowSecondFailOpen {
+		t.Fatalf("heuristic specialty must not AllowSecondFailOpen, got %#v", h)
+	}
+	for _, id := range h.AgentIDs {
+		if id == members[2] {
+			t.Fatalf("heuristic must not pick 文档助手, got %#v", h.AgentIDs)
+		}
+		if !h.LeadFallback[id] {
+			t.Fatalf("heuristic LeadFallback missing %s, got %#v", id, h.LeadFallback)
+		}
+	}
+}
