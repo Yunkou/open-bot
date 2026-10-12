@@ -70,7 +70,8 @@ func TestReproLangfuseCF23DecideTimeoutFailOpenAll(t *testing.T) {
 }
 
 func TestReproUnderpickFullRosterCountExpand(t *testing.T) {
-	// choice=m0 + count=N on non-specialty → expand (thin structural, no phrase table).
+	// choice=m0 + count=N must NOT expand (full_roster_count_expand removed).
+	// Only explicit choice=all means everyone — see TestAutoPickDecisionNoCountExpandUnderpick.
 	writer := &db.Agent{ID: "writer", Name: "文章", Description: "负责写东西与改稿"}
 	coder := &db.Agent{ID: "coder", Name: "代码", Description: "负责写代码与排障"}
 	members := []string{"writer", "coder"}
@@ -91,7 +92,10 @@ func TestReproUnderpickFullRosterCountExpand(t *testing.T) {
 		},
 	}
 	got := runAutoPickByMode("decision", "在座的各位都是辣鸡", members, []*db.Agent{writer, coder}, "writer", 1, "", deps)
-	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 2 {
-		t.Fatalf("full-roster count underpick must expand, got %#v", got)
+	if got.Method != "decision" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "writer" {
+		t.Fatalf("underpick mN must NOT count-expand, got %#v", got)
+	}
+	if got.Fallback == "all" {
+		t.Fatalf("must not Fallback=all from underpick, got %#v", got)
 	}
 }

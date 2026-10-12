@@ -401,6 +401,11 @@ var roleSynonymBuckets = []struct {
 		roleNeedles: []string{"写", "文案", "写作", "编辑", "内容", "诗人", "作家"},
 	},
 	{
+		// UI/UE design specialty (distinct from coding html/canvas and writing copy).
+		userNeedles: []string{"线框", "原型", "设计稿", "交互稿", "视觉稿", "信息架构", "高保真", "低保真", "点击态", "组件规范", "用户体验", "ui设计", "ue设计", "ux设计", "wireframe", "mockup", "figma", "prototype", "做个设计", "设计一下", "设计个", "画个界面", "画一个界面", "界面设计", "交互设计", "视觉设计"},
+		roleNeedles: []string{"设计", "ui", "ue", "ux", "交互", "视觉", "线框", "原型", "体验", "design", "设计师"},
+	},
+	{
 		userNeedles: []string{"查资料", "查下资料", "查一下资料", "查下", "帮我查", "查一查", "搜一下", "搜索", "研究", "调研", "检索", "百科", "look up", "research"},
 		roleNeedles: []string{"研究", "调研", "资料", "搜索", "分析"},
 	},
