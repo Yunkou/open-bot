@@ -9,8 +9,20 @@ from langgraph.types import Command
 from .graph import get_compiled_graph
 from .inbox import submit_when_busy, thread_is_busy
 from .journal import JournalSession, get_journal
+from .live import is_live
+from .pause import is_approval_pause
 from . import tracing
 from .child import abort_owned_children
+
+
+async def _pause_flags(thread_id: str) -> dict[str, bool]:
+    graph = await get_compiled_graph()
+    snap = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+    tasks = getattr(snap, "tasks", None) or ()
+    return {
+        "approval": is_approval_pause(tasks),
+        "live": is_live(thread_id),
+    }
 
 
 async def steer_thread(
@@ -31,7 +43,7 @@ async def steer_thread(
     if m in ("follow_up", "steer", "reject"):
         busy = await thread_is_busy(thread_id)
         if busy or m == "reject":
-            return await submit_when_busy(
+            out = await submit_when_busy(
                 thread_id,
                 text=t,
                 when_busy=m,  # type: ignore[arg-type]
@@ -40,12 +52,17 @@ async def steer_thread(
                 agent_id=agent_id,
                 request_id=request_id,
             )
+            if isinstance(out, dict):
+                out.update(await _pause_flags(thread_id))
+            return out
     # Not busy: still park on queue for next prepare/llm.
     graph = await get_compiled_graph()
     config = {"configurable": {"thread_id": thread_id}}
     field = "steer_queue" if m == "steer" else "follow_up_queue"
     await graph.aupdate_state(config, {field: [t]})
-    return {"ok": True, "thread_id": thread_id, "mode": m}
+    out = {"ok": True, "thread_id": thread_id, "mode": m}
+    out.update(await _pause_flags(thread_id))
+    return out
 
 
 async def abort_thread(thread_id: str) -> dict[str, Any]:
@@ -59,7 +76,15 @@ async def abort_thread(thread_id: str) -> dict[str, Any]:
             "interrupted_reason": "aborted",
         },
     )
-    journal = JournalSession(thread_id=thread_id, client=get_journal())
+    # thread_id is "{conversation_id}:{request_id}" — keep conversation_id so
+    # UpsertHarnessThread does not wipe the busy-thread index row.
+    cid = ""
+    tid = (thread_id or "").strip()
+    if ":" in tid:
+        cid = tid.split(":", 1)[0].strip()
+    journal = JournalSession(
+        thread_id=thread_id, conversation_id=cid, client=get_journal()
+    )
     await journal.set_status("aborted")
     await abort_owned_children(thread_id, include_background=False)
     return {"ok": True, "thread_id": thread_id, "status": "aborted"}
@@ -104,7 +129,7 @@ async def get_thread_state(thread_id: str) -> dict[str, Any]:
     snap = await graph.aget_state(config)
     values = getattr(snap, "values", None) or {}
     tasks = getattr(snap, "tasks", None) or ()
-    interrupted = bool(tasks)
+    interrupted = is_approval_pause(tasks)
     return {
         "thread_id": thread_id,
         "status": values.get("status"),

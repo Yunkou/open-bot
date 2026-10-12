@@ -56,6 +56,65 @@ func isAutoToolChoiceUnsupportedBody(body string) bool {
 	return false
 }
 
+// isOpenAIReasoningModel mirrors agent-runtime model_compat.detect_family → openai_reasoning.
+// Those models need reasoning_effort=none for function tools on /v1/chat/completions.
+func isOpenAIReasoningModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return false
+	}
+	if strings.HasPrefix(m, "o1") || strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4") {
+		return true
+	}
+	if strings.HasPrefix(m, "gpt-5") {
+		return true
+	}
+	if strings.Contains(m, "luna") || strings.Contains(m, "-thinking") || strings.Contains(m, "reasoning") {
+		return true
+	}
+	return false
+}
+
+func isReasoningEffortToolsRejectBody(body string) bool {
+	m := strings.ToLower(body)
+	if !strings.Contains(m, "reasoning_effort") {
+		return false
+	}
+	// Upstream: "Function tools with reasoning_effort are not supported ... set reasoning_effort to 'none'."
+	return strings.Contains(m, "function tools") ||
+		strings.Contains(m, "set reasoning_effort") ||
+		strings.Contains(m, "tools") ||
+		strings.Contains(m, "'none'") ||
+		strings.Contains(m, `"none"`)
+}
+
+func applyToolsReasoningEffort(payload map[string]any, model string) {
+	if isOpenAIReasoningModel(model) {
+		payload["reasoning_effort"] = "none"
+	}
+}
+
+// postUpstreamChatTools posts a tools probe payload. If the gateway rejects because
+// reasoning_effort must be none (common for luna / gpt-5 / o-series), retry once with none.
+func postUpstreamChatTools(
+	ctx context.Context,
+	baseURL, apiKey, model string,
+	payload map[string]any,
+) (*upstreamChatResult, error) {
+	applyToolsReasoningEffort(payload, model)
+	r, err := postUpstreamChat(ctx, baseURL, apiKey, model, payload)
+	if err != nil {
+		return r, err
+	}
+	if r.status >= 400 &&
+		isReasoningEffortToolsRejectBody(r.body) &&
+		payload["reasoning_effort"] != "none" {
+		payload["reasoning_effort"] = "none"
+		return postUpstreamChat(ctx, baseURL, apiKey, model, payload)
+	}
+	return r, nil
+}
+
 func contentLooksLikeToolMarkup(text string) bool {
 	low := strings.ToLower(text)
 	if strings.Contains(low, "<tool_call") || strings.Contains(low, "<function=") {
@@ -183,12 +242,13 @@ func probeLLMTools(ctx context.Context, baseURL, apiKey, model string) LLMToolsP
 	tools := pingToolDefs()
 
 	// Attempt 1: tools without explicit tool_choice (OpenAI defaults to auto; Qwen profile omits auto).
-	r1, err := postUpstreamChat(ctx, baseURL, apiKey, model, map[string]any{
+	r1Payload := map[string]any{
 		"model":    model,
 		"stream":   false,
 		"messages": msgs,
 		"tools":    tools,
-	})
+	}
+	r1, err := postUpstreamChatTools(ctx, baseURL, apiKey, model, r1Payload)
 	if err != nil {
 		return LLMToolsProbeResult{
 			OK: false, Mode: "error", Detail: "无法连接上游：" + err.Error(),
@@ -215,7 +275,7 @@ func probeLLMTools(ctx context.Context, baseURL, apiKey, model string) LLMToolsP
 	autoBlocked := r1.status >= 400 && isAutoToolChoiceUnsupportedBody(r1.body)
 
 	// Attempt 2: forced tool_choice (some vLLM builds accept this without auto flags).
-	r2, err := postUpstreamChat(ctx, baseURL, apiKey, model, map[string]any{
+	r2Payload := map[string]any{
 		"model":    model,
 		"stream":   false,
 		"messages": msgs,
@@ -224,7 +284,8 @@ func probeLLMTools(ctx context.Context, baseURL, apiKey, model string) LLMToolsP
 			"type":     "function",
 			"function": map[string]any{"name": "ping"},
 		},
-	})
+	}
+	r2, err := postUpstreamChatTools(ctx, baseURL, apiKey, model, r2Payload)
 	if err != nil {
 		return LLMToolsProbeResult{
 			OK: false, Mode: "error", Detail: "无法连接上游：" + err.Error(),

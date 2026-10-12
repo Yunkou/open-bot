@@ -152,11 +152,11 @@ func mentionIncludesEveryone(content string) bool {
 	return false
 }
 
-// resolveGroupSendTargets picks candidate agents for a group turn.
+// resolveGroupSendTargets picks candidate agents for a group turn (@ layer only).
 // DM is handled by the caller (empty channel). Rules:
 //   - @everyone/@all → all members (each should reply)
 //   - specific @Name / explicit agent_ids → those agents (all of them, not first-only)
-//   - no @ → all members are candidates; each may reply or PASS by relevance
+//   - no @ → all members as base (AutoPick later; client full-member agent_ids must not skip it)
 // Reply-to-bot is not a hard filter (history/quote still steer relevance).
 func resolveGroupSendTargets(members []string, agents []*db.Agent, explicit []string, content string, replyParent *db.Message, convAgentID string) []string {
 	_ = replyParent // reserved: soft signal via quote/history, not candidate filter
@@ -267,11 +267,21 @@ func formatGroupMemberRoster(members []string, agents []*db.Agent, selfID string
 
 // groupParticipationExtraSystem is appended in channel turns so bots can stay silent.
 // forced: this agent was @mentioned or @everyone — should reply, not PASS.
+// leadFallback: AutoPick miss / second fail-open — should answer; do not prefer PASS.
 // Non-forced prompts name this bot's role and inject a short member roster so
 // specialty bots prefer [PASS] when another peer is the better fit.
+// User-visible bubbles must never leak internal words like 「Auto 选人」 or 「PASS」
+// from fail-open copy; this prompt only steers the model.
 func groupParticipationExtraSystem(forced bool, self *db.Agent, members []string, agents []*db.Agent) string {
+	return groupParticipationExtraSystemMode(forced, false, self, members, agents)
+}
+
+func groupParticipationExtraSystemMode(forced, leadFallback bool, self *db.Agent, members []string, agents []*db.Agent) string {
 	if forced {
 		return "【群聊参与】你在群聊中，且本回合被用户点名（@你或 @everyone/@all）。请直接回复用户，不要输出 [PASS]，也不要只打招呼敷衍。"
+	}
+	if leadFallback {
+		return "【群聊参与】你在群聊中。本回合需要你来回答用户。请直接给出有帮助的回复，不要只打招呼敷衍，也不要沉默不语。"
 	}
 	selfID := ""
 	selfName := "你"

@@ -1,4 +1,4 @@
-/** Formal palette — locked with open bot / UI UE design (unchanged in v2). */
+/** Formal palette — locked with open bot / UI UE design (unchanged). */
 export const AVATAR_COLOR_PALETTE = [
   "#e85d4c",
   "#2a9d8f",
@@ -14,27 +14,42 @@ export const AVATAR_COLOR_PALETTE = [
   "#118ab2",
 ] as const;
 
-/** Formal shapes — avatar v2 organic silhouettes. */
-export const AVATAR_SHAPES = [
-  "cloud",
-  "bean",
-  "drop",
-  "soft-hex",
-  "petal",
-  "puff",
-] as const;
+/**
+ * Robot-heads shapes (npm `robot-heads`).
+ * Stored `avatar_shape` may still be old organic ids — resolve via LEGACY map.
+ */
+export const AVATAR_SHAPES = ["circle", "square", "hexagon", "rectangle"] as const;
 
 export type AvatarShape = (typeof AVATAR_SHAPES)[number];
 export type AvatarColor = (typeof AVATAR_COLOR_PALETTE)[number] | string;
 
-/** Old CSS-shape ids → v2 silhouette ids (read-path compat). */
+/** Chinese labels for settings / create pickers. */
+export const AVATAR_SHAPE_LABELS: Record<AvatarShape, string> = {
+  circle: "圆",
+  square: "正方",
+  hexagon: "六边",
+  rectangle: "方屏",
+};
+
+/**
+ * Old organic / CSS-shape ids → robot-heads shapes (read-path migrate).
+ * Stored writes use library four: circle|square|hexagon|rectangle.
+ */
 export const LEGACY_SHAPE_MAP: Record<string, AvatarShape> = {
-  circle: "cloud",
-  rounded: "puff",
-  squircle: "bean",
-  hex: "soft-hex",
-  diamond: "drop",
-  "soft-square": "petal",
+  // pre-v2 CSS shapes (UE / PM lock)
+  circle: "circle",
+  rounded: "square",
+  "soft-square": "square",
+  squircle: "square",
+  hex: "hexagon",
+  diamond: "square", // 菱形已并入方角
+  // v2.1 organic silhouettes
+  cloud: "circle",
+  puff: "circle",
+  bean: "square",
+  petal: "square",
+  drop: "rectangle",
+  "soft-hex": "hexagon",
 };
 
 export const BOT_PRESENCE_STATUSES = [
@@ -48,9 +63,24 @@ export const BOT_PRESENCE_STATUSES = [
 export type BotPresenceStatus = "idle" | "thinking" | "working" | "awaiting_approval" | "error";
 
 /**
- * Normalize any wire/UI status to one of the five faces.
+ * robot-heads display states used by this product.
+ * Product presence stays five-only (`BotPresenceStatus`); `searching` is a
+ * working-animation variant only (§8) — never a product / SSE status.
+ * Do NOT use speaking / happy / sleeping.
+ */
+export type RobotHeadState =
+  | "idle"
+  | "thinking"
+  | "working"
+  | "listening"
+  | "error"
+  | "searching";
+
+/**
+ * Normalize any wire/UI status to one of the five product faces.
  * Empty / missing → idle; known five pass through; anything else → working
- * (product rule v2.1: unknown status shows as working, never throws).
+ * (product rule: unknown status shows as working, never throws).
+ * Never returns searching / speaking / happy / sleeping.
  */
 export function normalizePresenceStatus(status?: string | null): BotPresenceStatus {
   const s = (status ?? "").trim().toLowerCase();
@@ -60,6 +90,36 @@ export function normalizePresenceStatus(status?: string | null): BotPresenceStat
     : "working";
 }
 
+/**
+ * Heuristic: tool name / host-activity / run-label looks like search/retrieve.
+ * Used only to flip RobotHead working → searching animation (§8).
+ * Does not expand product presence.
+ */
+const SEARCH_TOOL_RE =
+  /search|web_?search|websearch|browse|browser|retrieve|retrieval|grep|web_fetch|webfetch|duckduck|serp|爬取|抓取|搜索|检索|联网/i;
+
+export function toolNameLooksLikeSearch(nameOrLabel?: string | null): boolean {
+  const s = (nameOrLabel ?? "").trim();
+  if (!s) return false;
+  return SEARCH_TOOL_RE.test(s);
+}
+
+/**
+ * Map BotPresenceStatus → RobotHead state (UE hard lock + §8 variant).
+ * idle→idle, thinking→thinking, working→working (or searching if hint),
+ * awaiting_approval→listening, error→error.
+ * Empty → idle; unknown non-empty → working.
+ * `searchingHint` only applies when the mapped face would be `working`.
+ */
+export function presenceToRobotState(
+  status?: string | null,
+  searchingHint?: boolean,
+): RobotHeadState {
+  const face = normalizePresenceStatus(status);
+  if (face === "awaiting_approval") return "listening";
+  if (face === "working" && searchingHint) return "searching";
+  return face; // idle | thinking | working | error
+}
 
 const AVATAR_COLORS = AVATAR_COLOR_PALETTE;
 
@@ -69,6 +129,11 @@ export function hashString(input: string): number {
     h = (h * 31 + input.charCodeAt(i)) | 0;
   }
   return Math.abs(h);
+}
+
+/** 0–1 seed for robot-heads blink/glance desync. */
+export function avatarSeed01(seed: string): number {
+  return (hashString(seed || "?") % 1000) / 1000;
 }
 
 export function avatarColor(seed: string): string {
@@ -91,6 +156,50 @@ export function resolveAvatarShape(seed: string, override?: string | null): Avat
   if ((AVATAR_SHAPES as readonly string[]).includes(s)) return s as AvatarShape;
   if (s && LEGACY_SHAPE_MAP[s]) return LEGACY_SHAPE_MAP[s];
   return avatarShape(seed);
+}
+
+/** Lighten/darken hex for trim / screen LEDs. */
+function clampByte(n: number): number {
+  return Math.max(0, Math.min(255, Math.round(n)));
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return (
+    "#" +
+    [r, g, b]
+      .map((x) => clampByte(x).toString(16).padStart(2, "0"))
+      .join("")
+  );
+}
+
+/** Pale steel trim derived from shell (or fixed fallback). */
+export function deriveTrimColor(shell: string): string {
+  const rgb = hexToRgb(shell);
+  if (!rgb) return "#93a6c8";
+  // Mix toward pale steel
+  return rgbToHex(
+    rgb.r * 0.35 + 147 * 0.65,
+    rgb.g * 0.35 + 166 * 0.65,
+    rgb.b * 0.35 + 200 * 0.65,
+  );
+}
+
+/** Cool LED screen color derived from shell (or fixed fallback). */
+export function deriveScreenColor(shell: string): string {
+  const rgb = hexToRgb(shell);
+  if (!rgb) return "#e8f2ff";
+  return rgbToHex(
+    rgb.r * 0.15 + 232 * 0.85,
+    rgb.g * 0.15 + 242 * 0.85,
+    rgb.b * 0.15 + 255 * 0.85,
+  );
 }
 
 /** Initial letter(s) — kept for non-avatar uses; AgentAvatar must not show letters. */

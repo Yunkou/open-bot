@@ -20,6 +20,8 @@ type Channel struct {
 	TaskActive     bool      `json:"task_active,omitempty"`
 	// MemberProfiles carries avatar shape/color for each member agent.
 	MemberProfiles []ChannelMemberProfile `json:"member_profiles,omitempty"`
+	// Settings: auto_pick off|heuristic|decision / debug「本轮将由谁回答」(see ChannelSettings).
+	Settings ChannelSettings `json:"settings"`
 }
 
 type ChannelMemberProfile struct {
@@ -68,7 +70,7 @@ func (d *DB) CreateChannel(userID, name string) (*Channel, error) {
 
 func (d *DB) ListChannels(userID string) ([]*Channel, error) {
 	rows, err := d.SQL.Query(
-		`SELECT id, user_id, name, created_at FROM channels WHERE user_id = $1 ORDER BY created_at DESC`,
+		`SELECT id, user_id, name, created_at, COALESCE(settings_json,'{}') FROM channels WHERE user_id = $1 ORDER BY created_at DESC`,
 		userID,
 	)
 	if err != nil {
@@ -78,9 +80,11 @@ func (d *DB) ListChannels(userID string) ([]*Channel, error) {
 	var out []*Channel
 	for rows.Next() {
 		var c Channel
-		if err := rows.Scan(&c.ID, &c.UserID, &c.Name, &c.CreatedAt); err != nil {
+		var settingsRaw string
+		if err := rows.Scan(&c.ID, &c.UserID, &c.Name, &c.CreatedAt, &settingsRaw); err != nil {
 			return nil, err
 		}
+		c.Settings = parseChannelSettingsJSON(settingsRaw)
 		members, _ := d.ListChannelMembers(c.ID)
 		c.Members = members
 		c.MemberProfiles = d.channelMemberProfiles(userID, members)
@@ -91,16 +95,18 @@ func (d *DB) ListChannels(userID string) ([]*Channel, error) {
 
 func (d *DB) GetChannel(userID, id string) (*Channel, error) {
 	row := d.SQL.QueryRow(
-		`SELECT id, user_id, name, created_at FROM channels WHERE id = $1 AND user_id = $2`,
+		`SELECT id, user_id, name, created_at, COALESCE(settings_json,'{}') FROM channels WHERE id = $1 AND user_id = $2`,
 		id, userID,
 	)
 	var c Channel
-	if err := row.Scan(&c.ID, &c.UserID, &c.Name, &c.CreatedAt); err != nil {
+	var settingsRaw string
+	if err := row.Scan(&c.ID, &c.UserID, &c.Name, &c.CreatedAt, &settingsRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	c.Settings = parseChannelSettingsJSON(settingsRaw)
 	members, _ := d.ListChannelMembers(c.ID)
 	c.Members = members
 	c.MemberProfiles = d.channelMemberProfiles(userID, members)
@@ -175,6 +181,50 @@ func (d *DB) AddChannelMember(userID, channelID, agentID string) error {
 		channelID, agentID,
 	)
 	return err
+}
+
+// RemoveChannelMember deletes agentID from the channel.
+// Rules: channel/member must exist (ErrNotFound); at least one member remains;
+// cannot remove the channel lead (conversation.agent_id / 主助理).
+func (d *DB) RemoveChannelMember(userID, channelID, agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("agent_id required")
+	}
+	ch, err := d.GetChannel(userID, channelID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, id := range ch.Members {
+		if id == agentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	if len(ch.Members) <= 1 {
+		return errors.New("群里至少保留一位成员")
+	}
+	if conv, cerr := d.GetConversationByChannel(userID, channelID); cerr == nil && conv != nil {
+		if strings.TrimSpace(conv.AgentID) == agentID {
+			return errors.New("不能移除主助理")
+		}
+	}
+	res, err := d.SQL.Exec(
+		`DELETE FROM channel_members WHERE channel_id = $1 AND agent_id = $2`,
+		channelID, agentID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (d *DB) PostAgentMessage(userID, fromAgentID string, toAgentID, channelID *string, priority bool, body string, replyToID *string) (*AgentBusMessage, error) {

@@ -11,6 +11,7 @@ from ...llm import (
     AutoToolChoiceUnsupported,
     TOOL_DEFS,
     chat_completion,
+    fold_tool_results_in_messages,
     is_context_length_error,
     openai_config,
     postprocess_text,
@@ -25,6 +26,7 @@ from ...tool_markup import (
     strip_tool_markup,
     to_openai_tool_calls,
 )
+from ..long_task import continue_nudge, early_ack_visible, should_project_tool_partial, try_auto_defer
 from ..state import AgentState
 from .. import tracing
 
@@ -76,12 +78,51 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     compaction_retries = int(state.get("compaction_retries") or 0)
 
     if rnd > max_rounds:
+        # Prefer auto-defer for unfinished long work; else finalize-at-cap (no 上限 canned).
+        existing = str(state.get("final_text") or "").strip()
+        if existing:
+            return {
+                "status": "done",
+                "final_text": existing,
+                "pending_tool_calls": [],
+                "round": rnd,
+                "needs_finalize": False,
+                "needs_continue": False,
+            }
+        used = list(state.get("tools_used") or [])
+        deferred = await try_auto_defer(
+            tool_handler=cfg.get("tool_handler"),
+            tools_used=used,
+            messages=msgs,
+            final_text="",
+            finished_cleanly=False,
+            on_status=on_status,
+        )
+        if deferred:
+            used = list(used)
+            if "defer_work" not in used:
+                used.append("defer_work")
+            if journal is not None:
+                await journal.commit_assistant(deferred, project=not _is_group_pass(deferred))
+                await journal.put_live({"phase": "assistant", "len": len(deferred)}, force=True)
+            if on_event is not None:
+                await on_event("message_end", {"text": deferred})
+            return {
+                "status": "done",
+                "final_text": deferred,
+                "pending_tool_calls": [],
+                "tools_used": used,
+                "round": rnd,
+                "needs_finalize": False,
+                "needs_continue": False,
+            }
         return {
-            "status": "done",
-            "final_text": state.get("final_text")
-            or "（已达工具轮次上限，请缩小任务或使用 defer_work。）",
+            "status": "running",
+            "final_text": "",
             "pending_tool_calls": [],
             "round": rnd,
+            "needs_finalize": True,
+            "needs_continue": False,
         }
 
     # Merge follow-ups before the next model call.
@@ -95,6 +136,9 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     _, base, model = openai_config(override)
     profile = profile_for(model, base)
     tools_on = tools_enabled(override)
+
+    # Fold oversized tool observations before this LLM round (durable path).
+    msgs = fold_tool_results_in_messages(msgs)
 
     if on_status is not None:
         await on_status({"phase": "thinking", "label": "思考中"})
@@ -200,9 +244,40 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 gen_obs,
                 output=lf.truncate({"content": content, "tool_calls": len(tool_calls)}),
             )
+            tool_llm_rounds = int(state.get("tool_llm_rounds") or 0) + 1
+            already_projected = bool(state.get("early_ack_projected"))
+            projected_now = False
             if journal is not None:
                 await journal.commit_tool_intent(tool_calls)
-                if content_str.strip():
+                ack = early_ack_visible(
+                    postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
+                )
+                if ack and not _is_group_pass(ack):
+                    # First short ack + occasional 阶段性进展; not every tool monologue.
+                    do_project = should_project_tool_partial(
+                        already_projected=already_projected,
+                        tool_llm_rounds=tool_llm_rounds,
+                    )
+                    await journal.append(
+                        "assistant_partial",
+                        {"role": "assistant", "content": ack},
+                        project=do_project,
+                        role="assistant",
+                        content=ack,
+                    )
+                    if do_project:
+                        projected_now = True
+                        await journal.put_live(
+                            {"phase": "assistant_partial", "len": len(ack)}, force=True
+                        )
+                        if on_status is not None:
+                            await on_status(
+                                {
+                                    "phase": "thinking",
+                                    "label": "正在做…",
+                                }
+                            )
+                elif content_str.strip():
                     await journal.append(
                         "assistant_partial",
                         {"content": content_str},
@@ -217,10 +292,51 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "usage": usage_acc,
                 "follow_up_queue": [],
                 "needs_compaction": False,
+                "needs_continue": False,
+                "tool_llm_rounds": tool_llm_rounds,
+                "early_ack_projected": already_projected or projected_now,
             }
 
         final = postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
         final = sanitize_fake_tool_narration(final)
+        used = list(state.get("tools_used") or [])
+        already = bool(state.get("work_continued"))
+        # Build provisional history including this assistant text for unfinished checks.
+        probe_msgs = list(msgs) + [{"role": "assistant", "content": final or content or ""}]
+        body = cfg.get("body")
+        after_interrupt = bool(body is not None and getattr(body, "after_interrupt", False))
+        nudge = continue_nudge(
+            used,
+            probe_msgs,
+            already_continued=already,
+            after_interrupt=after_interrupt,
+            final_text=final or "",
+        )
+        if nudge:
+            if on_status is not None:
+                label = (
+                    "先访问本机…"
+                    if "host_delete" in nudge or "list_machines" in nudge or "host_ls" in nudge
+                    else "正在做…"
+                )
+                await on_status({"phase": "thinking", "label": label})
+            msgs.append({"role": "assistant", "content": final or content or ""})
+            msgs.append({"role": "user", "content": nudge})
+            lf.update_obs(gen_obs, output=lf.truncate({"continued": True, "nudge": nudge[:40]}))
+            return {
+                "messages": msgs,
+                "pending_tool_calls": [],
+                "final_text": "",
+                "status": "running",
+                "round": rnd,
+                "usage": usage_acc,
+                "follow_up_queue": [],
+                "needs_compaction": False,
+                "needs_continue": True,
+                "work_continued": True,
+                "needs_finalize": False,
+            }
+
         msgs.append({"role": "assistant", "content": content})
         lf.update_obs(gen_obs, output=lf.truncate(final))
         if journal is not None and final:
@@ -237,6 +353,7 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             "usage": usage_acc,
             "follow_up_queue": [],
             "needs_compaction": False,
+            "needs_continue": False,
         }
 
 

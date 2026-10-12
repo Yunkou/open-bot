@@ -54,6 +54,8 @@ function urlTransform(url: string): string {
   const trimmed = (url || "").trim();
   if (/^sandbox:/i.test(trimmed)) return trimmed;
   if (isAttachmentAuthUrl(trimmed)) return trimmed;
+  // In-message citation jumps ([1] → footer anchor).
+  if (/^#cite-[\w-]+$/i.test(trimmed)) return trimmed;
   return defaultUrlTransform(url);
 }
 
@@ -271,6 +273,57 @@ export function MarkdownMessage({ content, streaming, agentId }: Props) {
               }}
             >
               {friendly}
+            </a>
+          );
+        }
+        const citeHref = (href || "").trim();
+        const labelText = extractText(children).trim();
+        const looksLikeCiteMarker = /^\[\d+\]$/.test(labelText);
+        // Legacy in-message jump to footer anchor (#cite-{msg}-{n}).
+        if (citeHref.startsWith("#cite-")) {
+          return (
+            <a
+              href={citeHref}
+              className="md-cite"
+              title="查看来源"
+              onClick={(e) => {
+                e.preventDefault();
+                const id = citeHref.slice(1);
+                const el = document.getElementById(id);
+                if (el) {
+                  el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                  el.classList.add("msg-sources-flash");
+                  window.setTimeout(() => el.classList.remove("msg-sources-flash"), 1200);
+                }
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
+        // Numbered citation → open the source URL in a new tab (and flash footer if present).
+        if (looksLikeCiteMarker && /^https?:\/\//i.test(citeHref)) {
+          return (
+            <a
+              href={citeHref}
+              className="md-cite"
+              target="_blank"
+              rel="noreferrer noopener"
+              title={citeHref}
+              onClick={() => {
+                // Best-effort: highlight matching footer row by URL.
+                const items = document.querySelectorAll<HTMLElement>(".msg-sources-item[data-source-url]");
+                for (const el of items) {
+                  if (el.getAttribute("data-source-url") === citeHref) {
+                    el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+                    el.classList.add("msg-sources-flash");
+                    window.setTimeout(() => el.classList.remove("msg-sources-flash"), 1200);
+                    break;
+                  }
+                }
+              }}
+            >
+              {children}
             </a>
           );
         }

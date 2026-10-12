@@ -152,7 +152,7 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 	if conv != nil {
 		channelID = conv.ChannelID
 	}
-	s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, channelID, "running", "正在做，做好会发在这里")
+	s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, channelID, "running", "正在做…")
 
 	var lastErr error
 	for attempt := 1; attempt <= 2; attempt++ {
@@ -164,7 +164,7 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 			return
 		}
 		_ = s.db.SetConversationTaskAttempt(task.ID, attempt)
-		reply, requestID, runErr := s.runConversationTaskOnce(ctx, task)
+		reply, requestID, runSources, runErr := s.runConversationTaskOnce(ctx, task)
 		if runErr != nil {
 			lastErr = runErr
 			if ctx.Err() != nil {
@@ -173,7 +173,7 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 			continue
 		}
 		if strings.TrimSpace(reply) != "" {
-			s.finishTaskMessage(task, reply, db.TaskDone, "", channelID, requestID)
+			s.finishTaskMessage(task, reply, db.TaskDone, "", channelID, requestID, runSources)
 			return
 		}
 		lastErr = errors.New("empty")
@@ -195,10 +195,10 @@ func (s *Server) executeConversationTask(task *db.ConversationTask) {
 	} else if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
-	s.finishTaskMessage(task, msg, status, errText, channelID, "")
+	s.finishTaskMessage(task, msg, status, errText, channelID, "", nil)
 }
 
-func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, lastError, channelID, requestID string) {
+func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, lastError, channelID, requestID string, sources []db.MessageSource) {
 	cur, err := s.db.GetConversationTask(task.ID)
 	if err != nil || cur == nil || cur.Status != db.TaskRunning {
 		return
@@ -207,9 +207,12 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	if err != nil || !ok {
 		return
 	}
+	normSources := db.FilterMessageSourcesCited(sources, text, nil)
+	text = db.InjectCitationMarkers(text, normSources)
 	msg, err := s.db.AddMessageWithOpts(task.ConversationID, "assistant", text, db.AddMessageOpts{
 		AgentID:   task.AgentID,
 		RequestID: strings.TrimSpace(requestID),
+		Sources:   normSources,
 	})
 	if err != nil {
 		log.Printf("conversation task message %s: %v", task.ID, err)
@@ -223,14 +226,14 @@ func (s *Server) finishTaskMessage(task *db.ConversationTask, text, status, last
 	s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, channelID, "idle", label)
 }
 
-func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.ConversationTask) (string, string, error) {
+func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.ConversationTask) (string, string, []db.MessageSource, error) {
 	msgs, err := s.db.ListMessages(task.UserID, task.ConversationID)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	conv, err := s.db.GetConversation(task.UserID, task.ConversationID)
 	if err != nil {
-		return "", "", err
+		return "", "", nil, err
 	}
 	systemPrompt := ""
 	agentName := ""
@@ -251,7 +254,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	var llmPayload map[string]any
 	conn, err := s.db.ResolveEffectiveLLM(task.UserID)
 	if err != nil && !errors.Is(err, db.ErrNotFound) {
-		return "", "", err
+		return "", "", nil, err
 	}
 	if conn != nil {
 		llmPayload = llmRuntimePayload(conn)
@@ -270,7 +273,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		"system_prompt":   systemPrompt,
 		"messages":        historyForRuntime(msgs, task.AgentID, speakerNamesForHistory(s.db, msgs, task.AgentID, agentName)),
 		"enabled_skills":  enabledSkills,
-		"max_tool_rounds": 16,
+		"max_tool_rounds": s.effectiveMaxToolRounds(task.UserID),
 		"request_id":      task.ID,
 		"background":      true,
 		"owner_task":      task.ID,
@@ -280,6 +283,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(task.UserID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(task.UserID))
+	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(task.UserID))
 	s.attachPreferredMachine(payloadMap, task.UserID, task.AgentID)
 
 	emit := func(event string, data any) {
@@ -291,7 +295,7 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 			label, _ = m["label"].(string)
 		}
 		if strings.TrimSpace(label) == "" {
-			label = "正在做，做好会发在这里"
+			label = "正在做…"
 		}
 		s.publishTaskStatus(task.UserID, task.ConversationID, task.AgentID, conv.ChannelID, "running", label)
 	}
@@ -302,12 +306,12 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 		MessageID:      task.SourceMessageID,
 		Source:         "defer_work",
 	}
-	text, _, runID, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap, recallCtx)
+	text, _, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(ctx, emit, payloadMap, recallCtx)
 	if runErr == nil {
 		_ = s.db.RecordUsageRun("", task.UserID, task.AgentID, task.ConversationID, "defer_work",
 			runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
 	}
-	return text, runID, runErr
+	return text, runID, runSources, runErr
 }
 
 func (s *Server) abortTask(conversationID string) {
@@ -349,7 +353,6 @@ func botAssistantMessageOpts(agentID, threadRootID, requestID string) db.AddMess
 	}
 }
 
-
 // dropProjectedGroupPass deletes an assistant row already projected for this
 // runtime request_id when the turn is classified as group PASS / silence.
 func (s *Server) dropProjectedGroupPass(conversationID, requestID string) {
@@ -368,7 +371,7 @@ func (s *Server) dropProjectedGroupPass(conversationID, requestID string) {
 }
 
 func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emit func(event string, data any)) *db.Message {
-	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", "", emit)
+	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", "", nil, emit)
 }
 
 // saveAssistantThreaded persists an assistant row.
@@ -377,7 +380,8 @@ func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emi
 // reply_to_id. Use requestID (runtime run_id) to associate with the triggering turn.
 // threadRootID must match the triggering user turn: empty on mainline (including
 // quote-only reply_to); non-empty only for explicit sidebar-thread posts.
-func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID, requestID string, emit func(event string, data any)) *db.Message {
+// sources are citation URLs from retrieval tools (optional; only real http(s)).
+func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, replyToID, threadRootID, requestID string, sources []db.MessageSource, emit func(event string, data any)) *db.Message {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
@@ -386,11 +390,31 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 		return nil
 	}
 	rid := strings.TrimSpace(requestID)
+	normSources := db.FilterMessageSourcesCited(sources, text, nil)
+	text = db.InjectCitationMarkers(text, normSources)
 	// Durable harness may already have projected this turn via journal
 	// commit_assistant(project=True). Reuse that row so one user turn cannot
 	// produce two identical assistant messages in DB/UI.
 	if rid != "" {
 		if existing, err := s.db.FindAssistantByRequestID(conversationID, rid); err == nil && existing != nil {
+			if len(normSources) > 0 {
+				if serr := s.db.SetMessageSources(conversationID, existing.ID, normSources); serr == nil {
+					existing.Sources = normSources
+				} else {
+					log.Printf("save assistant sources conv=%s msg=%s: %v", conversationID, existing.ID, serr)
+				}
+			}
+			annotated := db.InjectCitationMarkers(existing.Content, normSources)
+			if annotated != existing.Content {
+				if um, uerr := s.db.UpdateMessageContent(conversationID, existing.ID, annotated); uerr == nil && um != nil {
+					existing = um
+					existing.Sources = normSources
+				} else if uerr != nil {
+					log.Printf("save assistant cite markers conv=%s msg=%s: %v", conversationID, existing.ID, uerr)
+				} else {
+					existing.Content = annotated
+				}
+			}
 			s.emitAssistantSaved(emit, conversationID, existing)
 			s.publishConversationMessage(userID, existing)
 			return existing
@@ -401,6 +425,7 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 		ReplyToID:    strings.TrimSpace(replyToID),
 		ThreadRootID: strings.TrimSpace(threadRootID),
 		RequestID:    rid,
+		Sources:      normSources,
 	})
 	if err != nil {
 		log.Printf("save assistant conv=%s: %v", conversationID, err)
@@ -424,6 +449,9 @@ func (s *Server) emitAssistantSaved(emit func(event string, data any), conversat
 	}
 	if msg.RequestID != "" {
 		meta["request_id"] = msg.RequestID
+	}
+	if len(msg.Sources) > 0 {
+		meta["sources"] = msg.Sources
 	}
 	emit("meta", meta)
 }
@@ -475,7 +503,7 @@ func (s *Server) tryShortcutTurn(userID string, conv *db.Conversation, sourceMes
 		return false
 	}
 	s.wakeTasks()
-	s.publishTaskStatus(userID, conv.ID, agentID, conv.ChannelID, "running", "正在做，做好会发在这里")
+	s.publishTaskStatus(userID, conv.ID, agentID, conv.ChannelID, "running", "正在做…")
 	emit("meta", map[string]any{"phase": "task_queued", "conversation_id": conv.ID})
 	s.speakShortcut(userID, conv, agentID, statusWaitText, emit)
 	return true

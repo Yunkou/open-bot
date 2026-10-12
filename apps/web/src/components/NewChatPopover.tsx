@@ -5,6 +5,7 @@ import { machinePresenceLabel, preferHostMachines } from "../lib/clientEnv";
 import { AgentAvatar } from "./AgentAvatar";
 import {
   AVATAR_COLOR_PALETTE,
+  AVATAR_SHAPE_LABELS,
   AVATAR_SHAPES,
   pickDefaultAvatar,
   type AvatarShape,
@@ -54,7 +55,7 @@ export function NewChatPopover({
   const [botName, setBotName] = useState("");
   const [botDesc, setBotDesc] = useState("");
   const [botPrompt, setBotPrompt] = useState("");
-  const [botShape, setBotShape] = useState<AvatarShape>("cloud");
+  const [botShape, setBotShape] = useState<AvatarShape>("rectangle");
   const [botColor, setBotColor] = useState("#457b9d");
   const [botMachineId, setBotMachineId] = useState("");
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -393,7 +394,8 @@ export function NewChatPopover({
                       type="button"
                       className={`bot-avatar-shape-opt${botShape === s ? " active" : ""}`}
                       onClick={() => setBotShape(s)}
-                      title={s}
+                      title={AVATAR_SHAPE_LABELS[s]}
+                      aria-label={AVATAR_SHAPE_LABELS[s]}
                     >
                       <AgentAvatar
                         id={botName || "new-bot"}
@@ -402,6 +404,7 @@ export function NewChatPopover({
                         shape={s}
                         color={botColor}
                       />
+                      <span className="bot-avatar-shape-label">{AVATAR_SHAPE_LABELS[s]}</span>
                     </button>
                   ))}
                 </div>

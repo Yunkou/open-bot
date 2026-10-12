@@ -3,13 +3,13 @@ import { toast } from "sonner";
 import { useConfirm, useDismissConfirm } from "./components/ConfirmProvider";
 import {
   Agent,
-  API_BASE,
   Channel,
   CompactConfig,
   Conversation,
   LLMConnection,
   LLMInput,
   Message,
+  normalizeMessageSources,
   Skill,
   User,
   clearSession,
@@ -38,7 +38,10 @@ import {
   uploadSkillPackage,
   deleteSkill,
   applyAgentOnboarding,
+  formatLLMPromptCacheProbe,
   formatLLMToolsProbe,
+  listLLMModels,
+  probeLLMPromptCache,
   probeLLMTools,
   login,
   mcpCallTool,
@@ -57,9 +60,13 @@ import {
   subscribeConversationEvents,
   cancelConversationRun,
   approveConversationRun,
+  approveConversation,
+  listToolAllowlist,
+  revokeToolAllowlistEntry,
+  type ApprovalDecision,
   chatEventsWebSocketUrl,
   mergeIncomingMessage,
-  STOP_MARKER_TEXT,
+  isStopMarkerContent,
   createHostConfirm,
   decideHostConfirm,
   uploadConversationAttachment,
@@ -108,6 +115,7 @@ import {
   type Machine,
   type BotSecretMeta,
   type BotSecretRequest,
+  getApiBase,
 } from "./api";
 import {
   detectClientContext,
@@ -140,6 +148,19 @@ import {
 } from "./lib/userSettings";
 import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, classifyHostExecReview, setHostExecUserSettings, setHostExecMachinePolicy, type HostExecRequest } from "./lib/hostExec";
 import { parseHostConfirm } from "./components/HostConfirmCard";
+import {
+  ALWAYS_ALLOW_TOAST,
+  REVIEW_EMPTY_COPY,
+  grantToolFamilyAlwaysAllow,
+  isToolFamilyAlwaysAllowed,
+  listToolAllowEntries,
+  revokeToolFamilyAlwaysAllow,
+  toolFamilyForHostOp,
+  toolFamilyLabel,
+  toolLabelForHostOp,
+  type ToolAllowEntry,
+  type ToolFamilyId,
+} from "./lib/toolAllowlist";
 import { AccountMenu } from "./components/AccountMenu";
 import {
   SettingsPage,
@@ -152,16 +173,19 @@ import { AgentAvatar } from "./components/AgentAvatar";
 import { FeedbackModal, type FeedbackTarget } from "./components/FeedbackModal";
 import { TrainPanel } from "./components/TrainPanel";
 import { NewChatPopover, type CreateBotInput, type NewChatMode } from "./components/NewChatPopover";
-import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
+import { normalizePresenceStatus, resolveAvatarColor, toolNameLooksLikeSearch } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ConvActionSheet } from "./components/ConvActionSheet";
 import { CreateActionSheet } from "./components/CreateActionSheet";
 import { MobileSettingsHub, type SettingsHubNav } from "./components/MobileSettingsHub";
+import { ApiServerField } from "./components/ApiServerField";
 import { LAYOUT_NARROW_MQ, useIsTouchUi, useSheetFormUi } from "./components/useIsTouchUi";
 import { ChatMessage } from "./components/ChatMessage";
 import { BotSettingsPanel } from "./components/BotSettingsPanel";
 import { GeneralBotSettings } from "./components/GeneralBotSettings";
 import { SecretPromptModal } from "./components/SecretPromptModal";
+import { CloneAgentModal } from "./components/CloneAgentModal";
+import { GroupMembersSettings } from "./components/GroupMembersSettings";
 import { Composer, PendingFile, type ComposerMentionItem, type ComposerReplyTarget, type ComposerSkillOption } from "./components/Composer";
 import { RunStatus } from "./components/RunStatus";
 import {
@@ -173,7 +197,7 @@ import {
   type OnboardingOption,
 } from "./components/BotOnboardingCard";
 
-type UiMessage = Message & { streaming?: boolean; /** Local stop stamp set when an interrupted empty bubble is sealed as 「（已停止）」. */ stopped?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
+type UiMessage = Message & { streaming?: boolean; /** Legacy local stop stamp; unused — empty bubbles are dropped instead of 「（已停止）」. */ stopped?: boolean; attachments?: AttachmentMeta[]; agent_name?: string; reply_to_id?: string; thread_root_id?: string };
 type SettingsTab =
   | "general"
   | "bot"
@@ -184,7 +208,8 @@ type SettingsTab =
   | "routines"
   | "sandbox"
   | "machines"
-  | "secrets";
+  | "secrets"
+  | "review";
 
 const SETTINGS_TITLE: Record<SettingsTab, string> = {
   general: "通用",
@@ -197,6 +222,7 @@ const SETTINGS_TITLE: Record<SettingsTab, string> = {
   sandbox: "运行环境",
   machines: "电脑",
   secrets: "密钥",
+  review: "审核",
 };
 
 function accountInitials(name: string) {
@@ -285,6 +311,13 @@ function SettingsGlyph({ id }: { id: SettingsTab }) {
           <path d="M11 13l9-9 2 2-2 1-1-1-2 2 1 1-2 2" />
         </svg>
       );
+    case "review":
+      return (
+        <svg {...p}>
+          <path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" />
+          <path d="M9.5 12l1.8 1.8L15 10" />
+        </svg>
+      );
   }
 }
 type LastActiveSelection = { kind: "agent" | "channel"; id: string };
@@ -295,6 +328,8 @@ type ConvRunState = {
   /** Parallel group: map agent_id → local streaming bubble id */
   assistantIdsByAgent?: Record<string, string>;
   runLabel: string;
+  /** Last tool name from stream onStatus phase=tool; cleared on thinking/tool_done. §8 searching hint. */
+  activeTool: string;
   selectionKey: string; // `agent:${id}` | `channel:${id}` for sidebar busy
 };
 
@@ -501,6 +536,8 @@ export default function App() {
   taskConvIdsRef.current = taskConvIds;
   const [, setStatus] = useState(""); // chat chrome status bar removed; keep setter for clear/error paths
   const [runLabel, setRunLabel] = useState("正在思考…");
+  /** Current-view tool name for §8 searching animation variant (mirrors ConvRunState.activeTool). */
+  const [runActiveTool, setRunActiveTool] = useState("");
   /** Durable HITL: request_id awaiting tool approval. */
   const [approvalGate, setApprovalGate] = useState<{
     conversationId: string;
@@ -517,7 +554,7 @@ export default function App() {
   /** Mobile settings hub (C-2); true = Grok-style grouped home. */
   const [settingsShellHub, setSettingsShellHub] = useState(true);
   /** Mobile: `general` tab splits into account-only vs review/timezone-only. */
-  const [settingsGeneralPane, setSettingsGeneralPane] = useState<"account" | "review">("account");
+  const [settingsGeneralPane, setSettingsGeneralPane] = useState<"account" | "server" | "review">("account");
   /** #6 shell list fold — default both expanded; persisted per user. */
   const [assistantsCollapsed, setAssistantsCollapsed] = useState(false);
   const [groupsCollapsed, setGroupsCollapsed] = useState(false);
@@ -536,8 +573,17 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [llmBusy, setLLMBusy] = useState(false);
   const [llmMsg, setLLMMsg] = useState("");
+  const [llmModelOptions, setLLMModelOptions] = useState<string[]>([]);
+  const [llmModelsLoading, setLLMModelsLoading] = useState(false);
+  const [llmModelsError, setLLMModelsError] = useState("");
+  const llmModelsReqSeq = useRef(0);
+  const [llmCacheProbing, setLLMCacheProbing] = useState(false);
+  const [llmCacheProbeMsg, setLLMCacheProbeMsg] = useState("");
+  const llmCacheReqSeq = useRef(0);
 
   const [agentBusy, setAgentBusy] = useState(false);
+  const [cloneTarget, setCloneTarget] = useState<Agent | null>(null);
+  const [groupMembersChannel, setGroupMembersChannel] = useState<Channel | null>(null);
   const [channelBusy, setChannelBusy] = useState(false);
 
   const [avatarSettingsAgent, setAvatarSettingsAgent] = useState<Agent | null>(null);
@@ -746,6 +792,10 @@ export default function App() {
   const [hostActivity, setHostActivity] = useState("");
   const hostConfirmResolvers = useRef(new Map<string, (ok: boolean) => void>());
   const askHostConfirmRef = useRef<(req: HostExecRequest) => Promise<boolean>>(async () => false);
+  /** Optimistic Always-allow cache + server list for 设置 · 审核. */
+  const [toolAllowEntries, setToolAllowEntries] = useState<ToolAllowEntry[]>([]);
+  const [toolAllowServerOk, setToolAllowServerOk] = useState(false);
+  const [toolAllowBusy, setToolAllowBusy] = useState(false);
   const applyRemoteHostDecisionRef = useRef<(msg: Message) => void>(() => {});
   const clientEnv = useMemo(() => detectClientContext(), []);
 
@@ -1307,6 +1357,16 @@ export default function App() {
     return keys;
   }, [runBusyTick, agents, channels, taskConvIds]);
 
+  /** True while runsRef still owns this conversation — survives localOnly interrupt
+   *  where setSending(false) used to desync from the kept map entry (lost RunStatus). */
+  const viewingRunActive = useMemo(() => {
+    void runBusyTick;
+    const id = conversation?.id;
+    return Boolean(id && runsRef.current.has(id));
+  }, [runBusyTick, conversation?.id]);
+
+  const chatProcessing = sending || taskBusy || viewingRunActive;
+
   const messagesRef = useRef<HTMLDivElement | null>(null);
   /** When true, keep the message list pinned to the latest content. */
   const stickToBottomRef = useRef(true);
@@ -1346,7 +1406,7 @@ export default function App() {
       scrollToBottom(false);
     });
     return () => cancelAnimationFrame(id);
-  }, [messages, sending, runLabel, scrollToBottom]);
+  }, [messages, sending, chatProcessing, runLabel, scrollToBottom]);
 
 
 
@@ -1355,6 +1415,25 @@ export default function App() {
     () => (agentId ? agents.find((a) => a.id === agentId) : undefined),
     [agents, agentId],
   );
+
+  /** §8: search/retrieve tool signal this turn (stream tool name or host_activity label). */
+  const searchingHintNow = useMemo(
+    () =>
+      toolNameLooksLikeSearch(runActiveTool) || toolNameLooksLikeSearch(hostActivity),
+    [runActiveTool, hostActivity],
+  );
+
+  /**
+   * In-chat RunStatus face: prefer SSE presence; if idle while a run is live,
+   * fall back to working (tool) or thinking so RobotHead stays in sync with the row.
+   */
+  const runStatusFace = useMemo((): BotPresenceStatus => {
+    const fromSse = activeAgent ? normalizePresenceStatus(presenceByAgent[activeAgent.id]) : "idle";
+    if (fromSse !== "idle") return fromSse;
+    if (!(sending || taskBusy || viewingRunActive)) return "idle";
+    if (runActiveTool) return "working";
+    return "thinking";
+  }, [activeAgent, presenceByAgent, sending, taskBusy, viewingRunActive, runActiveTool]);
 
   const onboardingKey = useMemo(
     () => onboardingStorageKey(conversation?.id, agentId),
@@ -1377,7 +1456,7 @@ export default function App() {
       !conversation?.channel_id &&
       !hasChatMessages &&
       !onboardingDismissed &&
-      !sending &&
+      !chatProcessing &&
       !chatSwitchPending,
   );
 
@@ -1771,6 +1850,17 @@ export default function App() {
   askHostConfirmRef.current = (req) => {
     const conversationId = req.conversation_id || conversationRef.current?.id || "";
     return new Promise<boolean>((resolve) => {
+      // Optimistic Always-allow skip (client cache / server list). exec_policy=ask forces a card.
+      const family = toolFamilyForHostOp(req.op, req.path || "");
+      const uid = user?.id || "";
+      if (
+        hostExecPolicy !== "ask" &&
+        (isToolFamilyAlwaysAllowed(uid, family) ||
+          toolAllowEntries.some((e) => e.family === family))
+      ) {
+        resolve(true);
+        return;
+      }
       hostConfirmResolvers.current.set(req.req_id, resolve);
       if (!conversationId) return;
       const raw = req.content || "";
@@ -1810,35 +1900,140 @@ export default function App() {
     });
   };
 
-  const settleHostConfirm = (message: Message, ok: boolean) => {
+  const refreshToolAllowlist = async () => {
+    const uid = user?.id || "";
+    const local = listToolAllowEntries(uid);
+    try {
+      const remote = await listToolAllowlist();
+      if (remote.length > 0 || toolAllowServerOk) {
+        setToolAllowServerOk(true);
+        const mapped: ToolAllowEntry[] = remote.map((e) => ({
+          family: (e.tool_group || "other") as ToolFamilyId,
+          tool: e.tool || e.tool_group,
+          label: e.label || toolFamilyLabel((e.tool_group || "other") as ToolFamilyId),
+          granted_at: e.granted_at || new Date().toISOString(),
+        }));
+        const remoteFamilies = new Set(mapped.map((m) => m.family));
+        const merged = [...mapped, ...local.filter((l) => !remoteFamilies.has(l.family))];
+        setToolAllowEntries(merged);
+        return merged;
+      }
+    } catch {
+      /* fall through to local */
+    }
+    setToolAllowEntries(local);
+    return local;
+  };
+
+  const settleHostConfirm = (message: Message, decision: ApprovalDecision) => {
     const parsed = parseHostConfirm(message.content);
     if (!parsed?.req_id || parsed.status === "allowed" || parsed.status === "denied") return;
+    const ok = decision !== "deny";
     const status = ok ? "allowed" : "denied";
-    const content = JSON.stringify({ ...parsed, status });
+    const family = toolFamilyForHostOp(parsed.op, parsed.path);
+    const tool = toolLabelForHostOp(parsed.op, parsed.path);
+    const scope = { tool, tool_group: family };
+    const content = JSON.stringify({ ...parsed, status, decision });
     const convId = message.conversation_id || conversationRef.current?.id || "";
+    const runRequestId = (message as Message & { request_id?: string }).request_id || "";
+
+    if (decision === "always_allow") {
+      const uid = user?.id || "";
+      setToolAllowEntries(grantToolFamilyAlwaysAllow(uid, family, tool));
+      toast.message(ALWAYS_ALLOW_TOAST, { duration: 4000 });
+    }
+
     if (convId) {
       patchConvMessages(convId, (prev) => prev.map((m) => (m.id === message.id ? { ...m, content } : m)));
       if (!message.id.startsWith("local-")) {
-        void decideHostConfirm(convId, message.id, status)
+        void decideHostConfirm(convId, message.id, status, {
+          decision,
+          scope,
+          reason: parsed.reason || "",
+        })
           .then((saved) => acceptServerMessage(saved))
           .catch(() => {});
+      }
+      if (runRequestId) {
+        void approveConversation(convId, {
+          request_id: runRequestId,
+          decision,
+          approve: ok,
+          reason: parsed.reason || "",
+          scope,
+        }).catch(() => {});
       }
     }
     releaseHostConfirm(parsed.req_id, ok);
   };
 
-  const stampSavedMessage = (convId: string, messageId: string, requestId?: string) => {
+  // Hydrate Always-allow cache (optimistic local + server if available).
+  useEffect(() => {
+    if (!user?.id) {
+      setToolAllowEntries([]);
+      return;
+    }
+    setToolAllowEntries(listToolAllowEntries(user.id));
+    void refreshToolAllowlist();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id]);
+
+
+  const attachSourcesToStreaming = (convId: string, raw: unknown, messageId?: string) => {
+    const sources = normalizeMessageSources(raw);
+    if (!sources.length) return;
+    const run = runsRef.current.get(convId);
+    const targetId = (messageId || "").trim() || run?.assistantId || "";
+    patchConvMessages(convId, (prev) => {
+      // Prefer explicit message id, then current streaming assistant, then last assistant.
+      let idx = targetId ? prev.findIndex((m) => m.id === targetId) : -1;
+      if (idx < 0 && run?.assistantId) {
+        idx = prev.findIndex((m) => m.id === run.assistantId);
+      }
+      if (idx < 0) {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          if (prev[i].role === "assistant") {
+            idx = i;
+            break;
+          }
+        }
+      }
+      if (idx < 0) return prev;
+      const cur = prev[idx];
+      const merged = normalizeMessageSources([...(cur.sources || []), ...sources]);
+      if (merged.length === (cur.sources || []).length) {
+        // Same set — skip churn
+        const same =
+          merged.length === (cur.sources || []).length &&
+          merged.every((s, i) => s.url === (cur.sources || [])[i]?.url);
+        if (same) return prev;
+      }
+      return prev.map((m, i) => (i === idx ? { ...m, sources: merged } : m));
+    });
+  };
+
+  const stampSavedMessage = (
+    convId: string,
+    messageId: string,
+    requestId?: string,
+    agentId?: string,
+  ) => {
     if (!messageId) return;
     const run = runsRef.current.get(convId);
-    const localId = run?.assistantId;
+    const aid = (agentId || "").trim();
+    // Parallel group: stamp the bubble for this agent_id, not whichever agent last
+    // set run.assistantId (that bug left a streaming bubble + WS row as duplicates).
+    const localId =
+      (aid && run?.assistantIdsByAgent?.[aid]) || run?.assistantId || null;
     const rid = (requestId || "").trim();
     patchConvMessages(convId, (prev) => {
       const existing = prev.find((m) => m.id === messageId);
       if (existing) {
         const local = localId && localId !== messageId ? prev.find((m) => m.id === localId) : undefined;
         if (local && local.role === "assistant" && existing.role === "assistant") {
-          // The saved row already arrived via WS / pullOpen as its own bubble (placeholders never
-          // fuzzy-absorb). Fold: the run's placeholder takes the server id, drop the duplicate.
+          // The saved row already arrived via WS / pullOpen as its own bubble (empty
+          // placeholders never fuzzy-absorb). Fold: this agent's placeholder takes the
+          // server id, drop the duplicate.
           return prev
             .filter((m) => m.id !== messageId)
             .map((m) =>
@@ -1848,21 +2043,45 @@ export default function App() {
                     ...m,
                     id: messageId,
                     content: m.content || existing.content,
+                    ...(aid || existing.agent_id || m.agent_id
+                      ? { agent_id: aid || existing.agent_id || m.agent_id }
+                      : {}),
                     ...(rid || existing.request_id ? { request_id: rid || existing.request_id } : {}),
                   }
                 : m,
             );
         }
-        if (!rid) return prev;
-        return prev.map((m) => (m.id === messageId && !m.request_id ? { ...m, request_id: rid } : m));
+        if (!rid && !aid) return prev;
+        return prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                ...(rid && !m.request_id ? { request_id: rid } : {}),
+                ...(aid && !m.agent_id ? { agent_id: aid } : {}),
+              }
+            : m,
+        );
       }
       if (!localId) return prev;
       return prev.map((m) =>
-        m.id === localId ? { ...m, id: messageId, ...(rid ? { request_id: rid } : {}) } : m,
+        m.id === localId
+          ? {
+              ...m,
+              id: messageId,
+              ...(rid ? { request_id: rid } : {}),
+              ...(aid ? { agent_id: aid } : {}),
+            }
+          : m,
       );
     });
-    if (run && localId && run.assistantId === localId) {
-      run.assistantId = messageId;
+    if (run && localId) {
+      if (run.assistantId === localId) run.assistantId = messageId;
+      if (aid) {
+        if (!run.assistantIdsByAgent) run.assistantIdsByAgent = {};
+        if (run.assistantIdsByAgent[aid] === localId) {
+          run.assistantIdsByAgent[aid] = messageId;
+        }
+      }
     }
   };
 
@@ -1920,18 +2139,17 @@ export default function App() {
     messagesByConvRef.current.set(id, messagesLiveRef.current);
   };
 
-  const sealStreamingMessagesForConv = (convId: string, markStopped: boolean) => {
+  const sealStreamingMessagesForConv = (convId: string, _markStopped?: boolean) => {
     patchConvMessages(convId, (prev) =>
       prev
-        .filter((m) => !(m.streaming && isGroupPassContent(m.content || "")))
+        .filter((m) => {
+          if (m.streaming && isGroupPassContent(m.content || "")) return false;
+          // Stop and supersede: drop empty streaming bubbles — never stamp 「（已停止）」.
+          if (m.streaming && !(m.content && m.content.trim())) return false;
+          return true;
+        })
         .map((m) => {
         if (!m.streaming) return m;
-        const empty = !(m.content && m.content.trim());
-        if (empty && markStopped) {
-          // Local stop stamp: the server's single stop row adopts THIS bubble (mergeIncomingMessage),
-          // not the next turn's empty streaming placeholder.
-          return { ...m, streaming: false, content: STOP_MARKER_TEXT, stopped: true };
-        }
         return { ...m, streaming: false };
       }),
     );
@@ -1941,9 +2159,15 @@ export default function App() {
 
   /** Stop a specific conversation's run (default: currently viewed). Does not touch other bots. */
   const stopCurrentRun = async (opts?: {
+    /** @deprecated Ignored — empty bubbles are always dropped; no 「（已停止）」. */
     markStopped?: boolean;
     waitForFlush?: boolean;
     conversationId?: string;
+    /**
+     * Abort the local stream only. Used when a newer send will supersede via
+     * server register (cancelReason=replace).
+     */
+    localOnly?: boolean;
   }) => {
     const convId = opts?.conversationId ?? conversationRef.current?.id;
     if (!convId) return;
@@ -1951,15 +2175,34 @@ export default function App() {
     if (run) {
       run.generation += 1;
       run.abort.abort();
-      runsRef.current.delete(convId);
-      bumpRunBusy();
+      // localOnly (interrupt-and-send): keep the map entry so generation stays
+      // monotonic. Deleting reset gen→0 and let the stale send's finally match
+      // the superseding run (same gen) and drop it — bot appeared silent.
+      if (!opts?.localOnly) {
+        runsRef.current.delete(convId);
+        bumpRunBusy();
+      } else {
+        // Refresh busy tick so viewingRunActive/chatProcessing re-render while
+        // the map entry is retained (pairs with d6c4fcf processing indicator).
+        bumpRunBusy();
+      }
     }
-    sealStreamingMessagesForConv(convId, opts?.markStopped !== false);
+    sealStreamingMessagesForConv(convId);
     if (conversationRef.current?.id === convId) {
-      setSending(false);
+      // localOnly (interrupt-and-send): keep sending/processing UI. Clearing it
+      // while runsRef is retained (e806a30) desynced RunStatus after replace interrupts.
+      if (!opts?.localOnly) {
+        setSending(false);
+      }
       setRunLabel("正在思考…");
     }
-    const cancelPromise = cancelConversationRun(convId).catch(() => {});
+    if (opts?.localOnly) return;
+    const rid =
+      conversationRef.current?.id === convId ? lastRequestIdRef.current.trim() : "";
+    const cancelPromise = cancelConversationRun(
+      convId,
+      rid ? { requestId: rid } : undefined,
+    ).catch(() => {});
     if (opts?.waitForFlush) {
       await cancelPromise;
     }
@@ -1976,6 +2219,8 @@ export default function App() {
       .filter((m) => m.role !== "summary")
       // Drop any silence tokens that leaked into storage (journal race / old rows).
       .filter((m) => !(m.role === "assistant" && isGroupPassContent(m.content || "")))
+      // Legacy 「（已停止）」 rows: never show (Stop and supersede both omit the marker).
+      .filter((m) => !(m.role === "assistant" && isStopMarkerContent(m.content)))
       .map((m) => ({
         ...m,
         agent_name: m.agent_id ? nameOf(m.agent_id) : undefined,
@@ -2003,27 +2248,34 @@ export default function App() {
       generation: gen,
       assistantId: null,
       runLabel: "正在思考…",
+      activeTool: "",
       selectionKey: selectionKeyForConv(conv),
     });
     bumpRunBusy();
     if (conversationRef.current?.id === conv.id) {
       setSending(true);
       setRunLabel("正在思考…");
+      setRunActiveTool("");
     }
 
     const isRunCurrent = () => {
       const run = runsRef.current.get(conv.id);
-      return Boolean(run && run.generation === gen);
+      return Boolean(run && run.generation === gen && run.abort === ac);
     };
     const isViewingStream = () => conversationRef.current?.id === conv.id;
     const setRunLabelForStream = (label: string) => {
       const run = runsRef.current.get(conv.id);
-      if (run && run.generation === gen) run.runLabel = label;
+      if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
       if (isViewingStream()) setRunLabel(label);
+    };
+    const setActiveToolForStream = (tool: string) => {
+      const run = runsRef.current.get(conv.id);
+      if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
+      if (isViewingStream()) setRunActiveTool(tool);
     };
     const ensureStreamingBubble = (agentId?: string, agentName?: string) => {
       const run = runsRef.current.get(conv.id);
-      if (!run || run.generation !== gen) return;
+      if (!run || run.generation !== gen || run.abort !== ac) return;
       if (!run.assistantIdsByAgent) run.assistantIdsByAgent = {};
       if (agentId && run.assistantIdsByAgent[agentId]) {
         const id = run.assistantIdsByAgent[agentId];
@@ -2110,9 +2362,10 @@ export default function App() {
               return;
             }
             if (meta.phase === "cancelled") {
-              sealStreamingMessagesForConv(conv.id, true);
+              sealStreamingMessagesForConv(conv.id);
+              setActiveToolForStream("");
+              // finally clears sending when this resume gen still owns the run.
               if (isViewingStream()) {
-                setSending(false);
                 setRunLabel("正在思考…");
               }
             }
@@ -2127,16 +2380,27 @@ export default function App() {
                 conv.id,
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
+                typeof meta.agent_id === "string" ? meta.agent_id : undefined,
               );
+              if (meta.sources != null) {
+                attachSourcesToStreaming(conv.id, meta.sources, meta.message_id);
+              }
+            } else if (meta.sources != null) {
+              attachSourcesToStreaming(conv.id, meta.sources);
             }
             if (meta.phase === "task_queued") {
-              noteTask(conv.id, true, "正在做，做好会发在这里");
+              noteTask(conv.id, true, "正在做…");
             }
           },
           onStatus: (data) => {
             if (!isRunCurrent()) return;
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
+            if (phase === "tool") {
+              setActiveToolForStream(tool || data.label || "tool");
+            } else if (phase === "thinking" || phase === "tool_done") {
+              setActiveToolForStream("");
+            }
             if (typeof data.label === "string" && data.label.trim()) {
               if (phase === "tool" && tool) {
                 setRunLabelForStream(`${data.label} · ${tool}`);
@@ -2169,6 +2433,7 @@ export default function App() {
           onDone: () => {
             if (!isRunCurrent()) return;
             sealStreamingMessagesForConv(conv.id, false);
+            setActiveToolForStream("");
             setRunLabelForStream("正在思考…");
             void listMessages(conv.id)
               .then((msgs) => {
@@ -2198,7 +2463,9 @@ export default function App() {
       console.warn("resume run failed", err);
     } finally {
       const run = runsRef.current.get(conv.id);
-      if (run && run.generation === gen) {
+      // Match generation AND abort controller (same as sendUserText) so a
+      // superseded resume cannot clear the interrupt replacement run's UI.
+      if (run && run.generation === gen && run.abort === ac) {
         runsRef.current.delete(conv.id);
         bumpRunBusy();
         if (conversationRef.current?.id === conv.id) {
@@ -2231,10 +2498,12 @@ export default function App() {
       setMessages(buffered);
       setSending(true);
       setRunLabel(activeRun.runLabel || "正在思考…");
+      setRunActiveTool(activeRun.activeTool || "");
       return;
     }
     setSending(false);
     setRunLabel("正在思考…");
+    setRunActiveTool("");
     if (apiMsgs) {
       const mapped = mapApiMessages(apiMsgs, nameLookup ?? agents);
       messagesByConvRef.current.set(conv.id, mapped);
@@ -2288,7 +2557,7 @@ export default function App() {
         if (selectGen !== selectGenRef.current) return;
         apiMsgs = listed.messages;
         runActive = Boolean(listed.run_active);
-        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
+        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做…" : undefined);
       } else {
         setTaskBusy(taskConvIdsRef.current.has(conv.id));
       }
@@ -2349,7 +2618,7 @@ export default function App() {
         if (selectGen !== selectGenRef.current) return;
         apiMsgs = listed.messages;
         runActive = Boolean(listed.run_active);
-        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做，做好会发在这里" : undefined);
+        noteTask(conv.id, Boolean(listed.task_active), listed.task_active ? "正在做…" : undefined);
       } else {
         setTaskBusy(taskConvIdsRef.current.has(conv.id));
       }
@@ -2373,9 +2642,25 @@ export default function App() {
     const threadRootAtSend = (openThreadRootIdRef.current || "").trim();
     const threadConvAtSend = conversationRef.current?.id;
     // keep-partial-next-turn: only interrupt the *current* conversation's run.
+    // Supersede: seal partial locally, drop empty bubbles (no 「（已停止）」). Server
+    // cancel + durable abort is left to the next send's register (cancelReason=replace).
     const viewedId = conversationRef.current?.id;
+    let supersededBusy = false;
     if (viewedId && runsRef.current.has(viewedId)) {
-      await stopCurrentRun({ markStopped: true, waitForFlush: true, conversationId: viewedId });
+      supersededBusy = true;
+      await stopCurrentRun({
+        localOnly: true,
+        conversationId: viewedId,
+      });
+    } else if (
+      sending ||
+      taskBusy ||
+      (viewedId ? taskConvIdsRef.current.has(viewedId) : false)
+    ) {
+      // Durable still busy but client map empty (SSE drop / finally raced): force
+      // when_busy=replace so the API aborts the old harness instead of inbox-queue
+      // (inbox → done with no tokens → empty bubble → looks like never replied).
+      supersededBusy = true;
     }
 
     // DM: @其他 Bot → 切到对方主线程再发；原会话留下转交记录，并把近期上下文带给对方。
@@ -2432,7 +2717,7 @@ export default function App() {
           noteTask(
             targetConv.id,
             Boolean(listed.task_active),
-            listed.task_active ? "正在做，做好会发在这里" : undefined,
+            listed.task_active ? "正在做…" : undefined,
           );
           handoffConv = targetConv;
           sendContent = stripLeadingAtAgent(content, mentioned);
@@ -2546,15 +2831,17 @@ export default function App() {
       if (everyone) {
         return groupMentionMembers.map((a) => a.id);
       }
-      // Specific @ → those agents (all of them). No @ → all members as candidates
-      // (each may PASS); server is authoritative and mirrors this.
+      // Specific @ → those agents. No @ → omit agent_ids so server AutoPick runs.
+      // (Legacy sent all member ids here, which made the API treat the turn as
+      // explicit addressing and skip AutoPick — every bot answered.)
       if (ids.length) return ids;
-      return groupMentionMembers.map((a) => a.id);
+      return undefined;
     })();
     let sendSelection: LastActiveSelection | null = null;
     let sendHadError = false;
     let streamConvId: string | null = null;
     let gen = 0;
+    let ac: AbortController | undefined;
     try {
       const conv = handoffConv ?? (await ensureConversation());
       streamConvId = conv.id;
@@ -2589,26 +2876,35 @@ export default function App() {
           }),
         );
       }
-      const ac = new AbortController();
+      ac = new AbortController();
       gen = (runsRef.current.get(streamConvId)?.generation ?? 0) + 1;
       runsRef.current.set(streamConvId, {
         abort: ac,
         generation: gen,
         assistantId,
         runLabel: "正在思考…",
+        activeTool: "",
         selectionKey: selectionKeyForConv(conv),
       });
       bumpRunBusy();
       const isRunCurrent = () => {
         const run = runsRef.current.get(streamConvId!);
-        return Boolean(run && run.generation === gen);
+        // Match abort too (same as finally) so a superseded slot that somehow
+        // kept the same generation cannot steal tokens from the replacement.
+        return Boolean(run && run.generation === gen && run.abort === ac);
       };
       const isViewingStream = () => conversationRef.current?.id === streamConvId;
       const setRunLabelForStream = (label: string) => {
         const run = runsRef.current.get(streamConvId!);
-        if (run && run.generation === gen) run.runLabel = label;
+        if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
         if (isViewingStream()) setRunLabel(label);
       };
+      const setActiveToolForStream = (tool: string) => {
+        const run = runsRef.current.get(streamConvId!);
+        if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
+        if (isViewingStream()) setRunActiveTool(tool);
+      };
+      if (isViewingStream()) setRunActiveTool("");
       await sendMessageStream(
         conv.id,
         sendContent,
@@ -2689,9 +2985,12 @@ export default function App() {
               });
             }
             if (meta.phase === "cancelled") {
-              sealStreamingMessagesForConv(streamConvId!, true);
+              sealStreamingMessagesForConv(streamConvId!);
+              setActiveToolForStream("");
+              // Do not setSending(false) here: localOnly supersede keeps runsRef and
+              // a newer turn may already own the processing indicator. finally clears
+              // sending only when this gen+abort still owns the map entry.
               if (isViewingStream()) {
-                setSending(false);
                 setRunLabel("正在思考…");
               }
             }
@@ -2732,10 +3031,16 @@ export default function App() {
                 streamConvId!,
                 meta.message_id,
                 typeof meta.request_id === "string" ? meta.request_id : undefined,
+                typeof meta.agent_id === "string" ? meta.agent_id : undefined,
               );
+              if (meta.sources != null) {
+                attachSourcesToStreaming(streamConvId!, meta.sources, meta.message_id);
+              }
+            } else if (meta.sources != null) {
+              attachSourcesToStreaming(streamConvId!, meta.sources);
             }
             if (meta.phase === "task_queued") {
-              noteTask(streamConvId!, true, "正在做，做好会发在这里");
+              noteTask(streamConvId!, true, "正在做…");
             }
           },
           onStatus: (data) => {
@@ -2743,6 +3048,7 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (phase === "waiting_approval") {
+              setActiveToolForStream("");
               setRunLabelForStream(
                 typeof data.label === "string" && data.label.trim()
                   ? data.label
@@ -2753,6 +3059,11 @@ export default function App() {
                 setApprovalGate({ conversationId: streamConvId, requestId: rid });
               }
               return;
+            }
+            if (phase === "tool") {
+              setActiveToolForStream(tool || data.label || "tool");
+            } else if (phase === "thinking" || phase === "tool_done") {
+              setActiveToolForStream("");
             }
             if (typeof data.label === "string" && data.label.trim()) {
               if (phase === "tool" && tool) {
@@ -2772,6 +3083,7 @@ export default function App() {
             if (!isRunCurrent()) return;
             sendHadError = true;
             setStatus(`错误：${msg}`);
+            setActiveToolForStream("");
             setRunLabelForStream("正在思考…");
             const run = runsRef.current.get(streamConvId!);
             const agentId = info?.agent_id;
@@ -2797,11 +3109,16 @@ export default function App() {
               doneFailed && typeof data?.error === "string"
                 ? `（失败）${(data.error as string).trim()}`
                 : "";
+            const inboxQueued = Boolean(data?.inbox);
             // Parallel group: seal every streaming bubble; drop PASS silence
             // (keep empty streaming bubble when doneFailed so failure text can show).
+            // Inbox queue: drop empty placeholders — no tokens will arrive on this SSE.
             patchConvMessages(streamConvId!, (prev) =>
               prev
                 .filter((m) => {
+                  if (inboxQueued && m.role === "assistant" && !(m.content || "").trim() && (m.streaming || m.id === assistantId)) {
+                    return false;
+                  }
                   if (!(m.streaming && isGroupPassContent(m.content || ""))) return true;
                   return Boolean(doneFailed);
                 })
@@ -2812,6 +3129,7 @@ export default function App() {
                   return { ...m, streaming: false, content };
                 }),
             );
+            setActiveToolForStream("");
             if (data?.waiting_approval && streamConvId) {
               const rid =
                 (typeof data.request_id === "string" && data.request_id) ||
@@ -2846,6 +3164,7 @@ export default function App() {
         handoffContext,
         activeReply?.id,
         sendThreadRootId || undefined,
+        supersededBusy ? "replace" : undefined,
       );
       if (!sendHadError && sendSelection) {
         saveLastActiveSelection(sendSelection);
@@ -2879,14 +3198,20 @@ export default function App() {
     } finally {
       if (streamConvId) {
         const run = runsRef.current.get(streamConvId);
-        if (run && run.generation === gen) {
+        // Match generation AND abort controller so a superseded turn's late
+        // finally cannot delete the interrupt replacement run.
+        if (run && run.generation === gen && run.abort === ac) {
           runsRef.current.delete(streamConvId);
           bumpRunBusy();
           if (conversationRef.current?.id === streamConvId) {
             setSending(false);
           }
         }
-      } else if (conversationRef.current?.id === viewedId) {
+      } else if (
+        conversationRef.current?.id === viewedId &&
+        !(viewedId && runsRef.current.has(viewedId))
+      ) {
+        // No streamConvId yet (failed before register) and no superseding run.
         setSending(false);
       }
     }
@@ -3122,6 +3447,17 @@ export default function App() {
 
   const refreshSandbox = useCallback(async () => {
     const s = await getSandbox();
+    // stale error: 注册时镜像/依赖未就绪留下的错误，尝试一次自愈
+    if (s.status === "error") {
+      try {
+        const fresh = await ensureSandbox({});
+        setSandbox(fresh);
+        setSandboxMsg("已自动重试启动运行环境");
+        return;
+      } catch {
+        // 重试失败，保留原错误状态展示
+      }
+    }
     setSandbox(s);
   }, []);
 
@@ -3503,6 +3839,9 @@ export default function App() {
     setEditingId(null);
     setLLMForm({ ...emptyLLMForm, is_default: llms.length === 0 });
     setLLMMsg("");
+    setLLMModelOptions([]);
+    setLLMModelsError("");
+    setLLMCacheProbeMsg("");
   };
 
   const saveLLM = async (e: FormEvent) => {
@@ -3582,6 +3921,85 @@ export default function App() {
       setLLMBusy(false);
     }
   };
+
+  // Auto-fetch OpenAI-compatible model list when base URL + key (or saved connection key) ready.
+  useEffect(() => {
+    const base = llmForm.base_url.trim();
+    const key = (llmForm.api_key || "").trim();
+    const editing = llms.find((c) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || (!key && !canReuseSaved)) {
+      setLLMModelOptions([]);
+      setLLMModelsError("");
+      setLLMModelsLoading(false);
+      return;
+    }
+    const seq = ++llmModelsReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setLLMModelsLoading(true);
+      setLLMModelsError("");
+      void listLLMModels({
+        base_url: base,
+        ...(key ? { api_key: key } : {}),
+        ...(editingId ? { connection_id: editingId } : {}),
+      })
+        .then((res) => {
+          if (seq !== llmModelsReqSeq.current) return;
+          if (!res.ok) {
+            setLLMModelOptions([]);
+            setLLMModelsError(res.detail || res.error || "拉取模型列表失败");
+            return;
+          }
+          setLLMModelOptions(res.models || []);
+          setLLMModelsError("");
+        })
+        .catch((err) => {
+          if (seq !== llmModelsReqSeq.current) return;
+          setLLMModelOptions([]);
+          setLLMModelsError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === llmModelsReqSeq.current) setLLMModelsLoading(false);
+        });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [llmForm.base_url, llmForm.api_key, editingId, llms]);
+
+  // Auto-detect prompt-cache support when endpoint + key + model are ready.
+  useEffect(() => {
+    const base = llmForm.base_url.trim();
+    const key = (llmForm.api_key || "").trim();
+    const model = llmForm.model.trim();
+    const editing = llms.find((c) => c.id === editingId);
+    const canReuseSaved = Boolean(editingId && editing?.api_key_set);
+    if (!base || !model || (!key && !canReuseSaved)) {
+      setLLMCacheProbeMsg("");
+      setLLMCacheProbing(false);
+      return;
+    }
+    const seq = ++llmCacheReqSeq.current;
+    const timer = window.setTimeout(() => {
+      setLLMCacheProbing(true);
+      void probeLLMPromptCache({
+        base_url: base,
+        model,
+        ...(key ? { api_key: key } : {}),
+        ...(editingId ? { connection_id: editingId } : {}),
+      })
+        .then((res) => {
+          if (seq !== llmCacheReqSeq.current) return;
+          setLLMCacheProbeMsg(formatLLMPromptCacheProbe(res));
+        })
+        .catch((err) => {
+          if (seq !== llmCacheReqSeq.current) return;
+          setLLMCacheProbeMsg(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (seq === llmCacheReqSeq.current) setLLMCacheProbing(false);
+        });
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [llmForm.base_url, llmForm.api_key, llmForm.model, editingId, llms]);
 
 
   const CONV_LONG_PRESS_MS = 400;
@@ -3849,7 +4267,7 @@ export default function App() {
               </button>
             </>
           ) : null}
-          <p className="muted small">API：{API_BASE}</p>
+          <ApiServerField variant="login" />
         </form>
       </div>
     );
@@ -3924,6 +4342,9 @@ export default function App() {
                           shape={focus.avatar_shape}
                           color={focus.avatar_color}
                           status={presenceByAgent[focus.id] || "idle"}
+                          searchingHint={
+                            Boolean(activeAgent && focus.id === activeAgent.id && searchingHintNow)
+                          }
                           online={isBotOnline(focus.id)}
                           onClick={() => openAvatarSettings(focus)}
                         />
@@ -4044,6 +4465,9 @@ export default function App() {
                     shape={a.avatar_shape}
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
+                    searchingHint={
+                      Boolean(activeAgent && a.id === activeAgent.id && searchingHintNow)
+                    }
                     online={isBotOnline(a.id)}
                     onClick={() => openAvatarSettings(a)}
                   />
@@ -4056,6 +4480,39 @@ export default function App() {
                     </div>
                     <div className="agent-desc">{snippet || "尚开始对话"}</div>
                   </div>
+                  <button
+                    type="button"
+                    className="conv-settings"
+                    title="Bot 设置"
+                    aria-label="Bot 设置"
+                    disabled={agentBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onSelectAgent(a.id);
+                      void openSettings("bot");
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    className="conv-clone"
+                    title="复制助手"
+                    aria-label="复制助手"
+                    disabled={agentBusy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCloneTarget(a);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                      <rect x="9" y="9" width="13" height="13" rx="2" />
+                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                    </svg>
+                  </button>
                   <button
                     type="button"
                     className="conv-del"
@@ -4223,6 +4680,34 @@ export default function App() {
               : undefined
         }
         onClose={() => setConvSheet(null)}
+        onSettings={
+          convSheet?.kind === "agent"
+            ? () => {
+                const agent = convSheet.agent;
+                setConvSheet(null);
+                void onSelectAgent(agent.id);
+                void openSettings("bot");
+              }
+            : undefined
+        }
+        onGroupSettings={
+          convSheet?.kind === "channel"
+            ? () => {
+                const ch = convSheet.channel;
+                setConvSheet(null);
+                setGroupMembersChannel(ch);
+              }
+            : undefined
+        }
+        onClone={
+          convSheet?.kind === "agent"
+            ? () => {
+                const agent = convSheet.agent;
+                setConvSheet(null);
+                setCloneTarget(agent);
+              }
+            : undefined
+        }
         onDelete={() => {
           const target = convSheet;
           setConvSheet(null);
@@ -4250,7 +4735,13 @@ export default function App() {
           </button>
           <div className="agent-pill">
             {activeChannel ? (
-              <>
+              <button
+                type="button"
+                className="agent-pill-channel"
+                aria-label={`群设置 ${activeChannel.name}`}
+                title="群设置"
+                onClick={() => setGroupMembersChannel(activeChannel)}
+              >
                 <span className="channel-member-stack" aria-hidden>
                   {channelMemberProfiles(activeChannel).map((p) => (
                     <AgentAvatar
@@ -4261,6 +4752,7 @@ export default function App() {
                       shape={p.avatar_shape}
                       color={p.avatar_color}
                       status={presenceByAgent[p.agent_id] || "idle"}
+                      searchingHint={searchingHintNow && normalizePresenceStatus(presenceByAgent[p.agent_id]) === "working"}
                       online={isBotOnline(p.agent_id, p.online)}
                     />
                   ))}
@@ -4271,7 +4763,7 @@ export default function App() {
                     .map((id) => agentNameById.get(id) || id)
                     .join("、")}
                 </span>
-              </>
+              </button>
             ) : !selectionHydrated ? (
               <span className="agent-pill-name muted">加载中…</span>
             ) : (
@@ -4283,6 +4775,7 @@ export default function App() {
                   shape={activeAgent?.avatar_shape}
                   color={activeAgent?.avatar_color}
                   status={(activeAgent && presenceByAgent[activeAgent.id]) || "idle"}
+                  searchingHint={searchingHintNow}
                   online={isBotOnline(activeAgent?.id)}
                   onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
@@ -4321,7 +4814,7 @@ export default function App() {
                 />
               ))}
               <BotOnboardingCard
-                disabled={sending}
+                disabled={chatProcessing}
                 onSelectOption={(opt: OnboardingOption) => {
                   void (async () => {
                     try {
@@ -4370,7 +4863,8 @@ export default function App() {
               message={m}
               agentId={m.agent_id || agentId}
               speakerName={speakerNameFor(m)}
-              onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+              onHostDecide={m.role === "host_confirm" ? (d) => settleHostConfirm(m, d) : undefined}
+              alwaysAllowEnabled={hostExecPolicy !== "ask"}
               replyQuote={quoteFor(m)}
               replyCount={replyCountByRoot.get(m.id) || 0}
               onReply={beginReplyTo}
@@ -4391,11 +4885,17 @@ export default function App() {
               onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
             />
           ))}
-          {sending || taskBusy ? (
+          {chatProcessing ? (
             !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
               <RunStatus
-                label={taskBusy && !sending ? runLabel || "正在做，做好会发在这里" : runLabel || "正在思考…"}
+                label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
+                agentId={activeAgent?.id}
+                agentName={activeAgent?.name ?? "助手"}
+                shape={activeAgent?.avatar_shape}
+                avatarColor={activeAgent?.avatar_color}
                 color={resolveAvatarColor(activeAgent?.id || activeAgent?.name || "open-bot", activeAgent?.avatar_color)}
+                status={runStatusFace}
+                searchingHint={searchingHintNow}
               />
             ) : null
           ) : null}
@@ -4424,7 +4924,8 @@ export default function App() {
                   replyQuote={quoteFor(m)}
                   onReply={beginReplyTo}
                   onJumpToParent={(pid) => jumpToMessage(pid)}
-                  onHostDecide={m.role === "host_confirm" ? (ok) => settleHostConfirm(m, ok) : undefined}
+                  onHostDecide={m.role === "host_confirm" ? (d) => settleHostConfirm(m, d) : undefined}
+                  alwaysAllowEnabled={hostExecPolicy !== "ask"}
                   onToggleReaction={onToggleReaction}
                   onFeedback={(msg) => openFeedbackForMessage(msg, "feedback_menu")}
                   onNegativeReaction={(msg) => openFeedbackForMessage(msg, "reaction_followup")}
@@ -4455,6 +4956,7 @@ export default function App() {
                       gate.requestId,
                       false,
                       "user_rejected",
+                      { decision: "deny" },
                     )
                       .then(() => setApprovalGate(null))
                       .catch((err) =>
@@ -4473,6 +4975,8 @@ export default function App() {
                       gate.conversationId,
                       gate.requestId,
                       true,
+                      "",
+                      { decision: "allow_once" },
                     )
                       .then(() => {
                         setApprovalGate(null);
@@ -4505,7 +5009,7 @@ export default function App() {
             onChange={setInput}
             onSubmit={onSubmit}
             onStop={() => stopCurrentRun({ markStopped: true })}
-            sending={sending || taskBusy}
+            sending={chatProcessing}
             agentName={activeChannel ? activeChannel.name : activeAgent?.name}
             files={pendingFiles}
             onFilesChange={setPendingFiles}
@@ -4535,6 +5039,7 @@ export default function App() {
                 username={user?.username || "账户"}
                 email={user?.email}
                 accountInitials={accountInitials(user?.username || "")}
+                focusBot={activeAgent || agents[0] || null}
                 preferredMachineLabel={(() => {
                   const focus = activeAgent || agents[0];
                   const mid = focus?.machine_id;
@@ -4542,7 +5047,21 @@ export default function App() {
                   const m = machines.find((x) => x.id === mid);
                   return m?.label || mid;
                 })()}
+                apiBaseLabel={(() => {
+                  const raw = getApiBase().replace(/^https?:\/\//i, "");
+                  return raw.length > 28 ? `${raw.slice(0, 27)}…` : raw;
+                })()}
                 onClose={() => setShowSettings(false)}
+                onOpenBotAvatar={() => {
+                  const focus = activeAgent || agents[0];
+                  if (focus) {
+                    setShowSettings(false);
+                    openAvatarSettings(focus);
+                  } else {
+                    setSettingsShellHub(false);
+                    setSettingsTab("bot");
+                  }
+                }}
                 onLogout={() => {
                   setShowSettings(false);
                   onLogout();
@@ -4551,6 +5070,12 @@ export default function App() {
                   if (tab === "account") {
                     setSettingsGeneralPane("account");
                     setSettingsTab("general");
+                  } else if (tab === "server") {
+                    setSettingsGeneralPane("server");
+                    setSettingsTab("general");
+                  } else if (tab === "review") {
+                    setSettingsTab("review");
+                    void refreshToolAllowlist();
                   } else if (tab === "general") {
                     setSettingsGeneralPane("review");
                     setSettingsTab("general");
@@ -4600,7 +5125,9 @@ export default function App() {
                   {settingsTab === "general"
                     ? settingsGeneralPane === "account"
                       ? "账户"
-                      : "审核与时区"
+                      : settingsGeneralPane === "server"
+                        ? "服务器"
+                        : "时区与自动审核"
                     : SETTINGS_TITLE[settingsTab]}
                 </h2>
                 <button
@@ -4621,6 +5148,7 @@ export default function App() {
               {(
                 [
                   ["general", "通用"],
+                  ["review", "审核"],
                   ["bot", "当前 Bot"],
                   ["machines", "电脑"],
                   ["sandbox", "运行环境"],
@@ -4658,6 +5186,8 @@ export default function App() {
                       );
                     } else if (id === "secrets") {
                       void refreshSecrets();
+                    } else if (id === "review") {
+                      void refreshToolAllowlist();
                     }
                   }}
                 >
@@ -4722,6 +5252,18 @@ export default function App() {
                     </SettingsCard>
                   </SettingsSection>
                 )}
+                {(!sheetForm || settingsGeneralPane === "account" || settingsGeneralPane === "server") && (
+                  <SettingsSection title={sheetForm ? undefined : "服务器"}>
+                    <SettingsCard className="settings-card-padded">
+                      <ApiServerField
+                        variant="settings"
+                        onApplied={() => {
+                          setStatus("已切换服务器地址");
+                        }}
+                      />
+                    </SettingsCard>
+                  </SettingsSection>
+                )}
                 {!sheetForm ? (
                   <SettingsSection title="模型">
                     <SettingsCard>
@@ -4745,7 +5287,7 @@ export default function App() {
                       </SettingsHint>
                     ) : null}
                     <GeneralBotSettings
-                      sectionTitle={sheetForm ? undefined : "审核与时区"}
+                      sectionTitle={sheetForm ? undefined : "时区与自动审核"}
                       onSettingsChange={(s) => {
                         setHostExecUserSettings(s);
                       }}
@@ -4755,9 +5297,70 @@ export default function App() {
               </SettingsPage>
             )}
 
+            {settingsTab === "review" && (
+              <SettingsPage>
+                <SettingsSection title="始终允许">
+                  <SettingsHint>
+                    这里是你点过「始终允许」的操作。撤销后，同类操作会再次请求确认。
+                  </SettingsHint>
+                  <SettingsCard>
+                    {toolAllowEntries.length === 0 ? (
+                      <SettingsEmpty>{REVIEW_EMPTY_COPY}</SettingsEmpty>
+                    ) : (
+                      <ul className="review-allow-list" aria-label="始终允许的操作">
+                        {toolAllowEntries.map((entry) => (
+                          <li key={entry.family} className="review-allow-row">
+                            <div className="review-allow-main">
+                              <span className="review-allow-name">{entry.label}</span>
+                              {entry.tool ? (
+                                <span className="review-allow-sub">{entry.tool}</span>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              className="settings-pill review-allow-revoke"
+                              disabled={toolAllowBusy}
+                              onClick={() => {
+                                void (async () => {
+                                  setToolAllowBusy(true);
+                                  try {
+                                    const serverOk = await revokeToolAllowlistEntry({
+                                      tool_group: entry.family,
+                                    });
+                                    if (serverOk) setToolAllowServerOk(true);
+                                    const uid = user?.id || "";
+                                    setToolAllowEntries(revokeToolFamilyAlwaysAllow(uid, entry.family));
+                                    toast.message("已撤销，下次将再次询问");
+                                  } finally {
+                                    setToolAllowBusy(false);
+                                  }
+                                })();
+                              }}
+                            >
+                              撤销
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </SettingsCard>
+                  {!toolAllowServerOk ? (
+                    <SettingsHint>
+                      列表暂存在本机；服务端 allowlist API 就绪后将自动同步。
+                    </SettingsHint>
+                  ) : null}
+                </SettingsSection>
+              </SettingsPage>
+            )}
+
             {settingsTab === "bot" && (
               <BotSettingsPanel
                 agent={activeAgent ?? null}
+                onClone={(a) => setCloneTarget(a)}
+                onOpenAvatar={(a) => {
+                  setShowSettings(false);
+                  openAvatarSettings(a);
+                }}
                 onSaved={(a) => {
                   void refreshAgents().then(() => {
                     toast.success(`已更新「${a.name}」`);
@@ -4771,6 +5374,7 @@ export default function App() {
                 <SettingsHint>
                   可配置多个 OpenAI 兼容连接；聊天默认使用标记为「默认」的连接。密钥不会完整回显。
                   勾选「启用 tools」前可用「检测 tools 能力」验证上游是否支持 function calling；不支持时无法开启。
+                  选定模型后会自动检测该端点是否支持 prompt cache（与运行时 OPENBOT_PROMPT_CACHE 一致）。
                 </SettingsHint>
                 <SettingsSection title="已有连接">
                   <SettingsCard>
@@ -4858,10 +5462,31 @@ export default function App() {
                       <label>
                         Model
                         <input
+                          list="llm-model-options"
                           value={llmForm.model}
                           onChange={(e) => setLLMForm({ ...llmForm, model: e.target.value })}
-                          placeholder="gpt-4o-mini"
+                          placeholder={llmModelsLoading ? "加载模型列表…" : "gpt-4o-mini"}
+                          autoComplete="off"
                         />
+                        <datalist id="llm-model-options">
+                          {llmModelOptions.map((id) => (
+                            <option key={id} value={id} />
+                          ))}
+                        </datalist>
+                        {llmModelsLoading ? (
+                          <span className="settings-status">正在拉取模型列表…</span>
+                        ) : llmModelsError ? (
+                          <span className="settings-status">{llmModelsError}（仍可手动输入）</span>
+                        ) : llmModelOptions.length > 0 ? (
+                          <span className="settings-status">
+                            已加载 {llmModelOptions.length} 个模型，可下拉选择或手动输入
+                          </span>
+                        ) : null}
+                        {llmCacheProbing ? (
+                          <span className="settings-status">正在检测 prompt cache…</span>
+                        ) : llmCacheProbeMsg ? (
+                          <span className="settings-status">{llmCacheProbeMsg}</span>
+                        ) : null}
                       </label>
                       <label>
                         上下文窗口 (tokens)
@@ -6171,6 +6796,44 @@ export default function App() {
           </div>
         </div>
       )}
+      <GroupMembersSettings
+        open={Boolean(groupMembersChannel)}
+        channel={groupMembersChannel}
+        agents={agents}
+        onClose={() => setGroupMembersChannel(null)}
+        onChanged={(ch) => {
+          setChannels((prev) => {
+            const i = prev.findIndex((c) => c.id === ch.id);
+            if (i < 0) return prev;
+            const next = prev.slice();
+            next[i] = { ...prev[i], ...ch, name: ch.name || prev[i].name };
+            return next;
+          });
+          setGroupMembersChannel((cur) =>
+            cur && cur.id === ch.id
+              ? { ...cur, ...ch, name: ch.name || cur.name }
+              : cur,
+          );
+          void refreshChannels().catch(() => {});
+        }}
+      />
+      <CloneAgentModal
+        agent={cloneTarget}
+        onClose={() => setCloneTarget(null)}
+        onCloned={(res) => {
+          const created = res.agent;
+          void refreshAgents()
+            .then(() => {
+              setShowSettings(false);
+              void onSelectAgentRef.current(created.id);
+            })
+            .catch(() => {});
+          const extras: string[] = [];
+          if (res.memories_copied) extras.push(`${res.memories_copied} 条记忆`);
+          if (res.routines_copied) extras.push(`${res.routines_copied} 个例行任务（已暂停）`);
+          toast.success(`已复制为「${created.name}」${extras.length ? `，含 ${extras.join("、")}` : ""}`);
+        }}
+      />
       <SecretPromptModal
         request={secretPrompt}
         onClose={() => setSecretPrompt(null)}

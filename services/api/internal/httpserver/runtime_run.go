@@ -98,12 +98,14 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 		"messages":        history,
 		"enabled_skills":  enabledSkills,
 		"request_id":      requestID,
+		"max_tool_rounds": s.effectiveMaxToolRounds(userID),
 	}
 	if llmPayload != nil {
 		payloadMap["llm"] = llmPayload
 	}
 	attachDecision(payloadMap, s.decisionRuntimePayload(userID))
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(userID))
+	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(userID))
 	s.attachPreferredMachine(payloadMap, userID, agentID)
 	payload, _ := json.Marshal(payloadMap)
 

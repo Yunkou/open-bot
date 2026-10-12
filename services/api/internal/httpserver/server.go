@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -87,6 +88,8 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/me", s.requireAuth(s.handleMe))
 	mux.HandleFunc("GET /v1/me/settings", s.requireAuth(s.handleGetUserSettings))
 	mux.HandleFunc("PUT /v1/me/settings", s.requireAuth(s.handlePutUserSettings))
+	mux.HandleFunc("GET /v1/me/tool-allowlist", s.requireAuth(s.handleListToolAllowlist))
+	mux.HandleFunc("DELETE /v1/me/tool-allowlist/{id}", s.requireAuth(s.handleDeleteToolAllowlist))
 
 	// Admin auth (dedicated; members get 403 — chat users use /v1/auth/login)
 	mux.HandleFunc("POST /v1/admin/auth/login", s.handleAdminLogin)
@@ -100,6 +103,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminGetLLM))
 	mux.HandleFunc("PUT /v1/admin/org/llm", s.requireOrgAdmin(s.handleAdminPutLLM))
 	mux.HandleFunc("POST /v1/admin/org/llm/probe-tools", s.requireOrgAdmin(s.handleAdminProbeLLMTools))
+	mux.HandleFunc("POST /v1/admin/org/llm/list-models", s.requireOrgAdmin(s.handleAdminListLLMModels))
+	mux.HandleFunc("POST /v1/admin/org/llm/probe-cache", s.requireOrgAdmin(s.handleAdminProbeLLMPromptCache))
+	mux.HandleFunc("POST /v1/admin/org/llm/probe-model", s.requireOrgAdmin(s.handleAdminProbeLLMModel))
 	mux.HandleFunc("GET /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminGetDecision))
 	mux.HandleFunc("PUT /v1/admin/org/decision", s.requireOrgAdmin(s.handleAdminPutDecision))
 	mux.HandleFunc("POST /v1/admin/org/decision/test", s.requireOrgAdmin(s.handleAdminTestDecision))
@@ -161,6 +167,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("DELETE /v1/llm-connections/{id}", s.requireAuth(s.handleDeleteLLM))
 	mux.HandleFunc("POST /v1/llm-connections/{id}/default", s.requireAuth(s.handleDefaultLLM))
 	mux.HandleFunc("POST /v1/llm/probe-tools", s.requireAuth(s.handleProbeLLMTools))
+	mux.HandleFunc("POST /v1/llm/list-models", s.requireAuth(s.handleListLLMModels))
+	mux.HandleFunc("POST /v1/llm/probe-cache", s.requireAuth(s.handleProbeLLMPromptCache))
+	mux.HandleFunc("POST /v1/llm/probe-model", s.requireAuth(s.handleProbeLLMModel))
 
 	mux.HandleFunc("GET /v1/agents", s.requireAuth(s.handleListAgents))
 	mux.HandleFunc("GET /v1/agents/{id}/conversation", s.requireAuth(s.handlePrimaryAgentConversation))
@@ -212,7 +221,9 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("GET /v1/channels", s.requireAuth(s.handleListChannels))
 	mux.HandleFunc("POST /v1/channels", s.requireAuth(s.handleCreateChannel))
 	mux.HandleFunc("DELETE /v1/channels/{id}", s.requireAuth(s.handleDeleteChannel))
+	mux.HandleFunc("PATCH /v1/channels/{id}", s.requireAuth(s.handlePatchChannel))
 	mux.HandleFunc("POST /v1/channels/{id}/members", s.requireAuth(s.handleAddChannelMember))
+	mux.HandleFunc("DELETE /v1/channels/{id}/members/{agentId}", s.requireAuth(s.handleRemoveChannelMember))
 	mux.HandleFunc("GET /v1/channels/{id}/conversation", s.requireAuth(s.handleChannelConversation))
 	mux.HandleFunc("POST /v1/agent-bus/messages", s.requireAuth(s.handlePostAgentBusMessage))
 	mux.HandleFunc("GET /v1/agent-bus/inbox", s.requireAuth(s.handleAgentBusInbox))
@@ -494,6 +505,32 @@ func (s *Server) handleListLLM(w http.ResponseWriter, r *http.Request) {
 		pub = append(pub, c.Public())
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"connections": pub})
+}
+
+const (
+	defaultMaxToolRounds = 24
+	hardMaxToolRounds    = 48
+)
+
+// effectiveMaxToolRounds returns the org-configured tool-round cap (admin LLM page),
+// falling back to defaultMaxToolRounds. Clamped to [1, hardMaxToolRounds].
+func (s *Server) effectiveMaxToolRounds(userID string) int {
+	n := defaultMaxToolRounds
+	u, err := s.db.GetUserByID(userID)
+	if err == nil && u != nil && strings.TrimSpace(u.OrgID) != "" {
+		if settings, serr := s.db.GetOrgSettings(u.OrgID); serr == nil && settings != nil {
+			if settings.LLMMaxToolRounds != nil && *settings.LLMMaxToolRounds > 0 {
+				n = *settings.LLMMaxToolRounds
+			}
+		}
+	}
+	if n < 1 {
+		return 1
+	}
+	if n > hardMaxToolRounds {
+		return hardMaxToolRounds
+	}
+	return n
 }
 
 func llmRuntimePayload(conn *db.LLMConnection) map[string]any {
@@ -1222,7 +1259,7 @@ type sendBody struct {
 	Content         string          `json:"content"`
 	LLMConnectionID string          `json:"llm_connection_id"`
 	Attachments     []AttachmentRef `json:"attachments"`
-	AgentIDs        []string        `json:"agent_ids"` // group candidates; empty = server resolves (@ / all members)
+	AgentIDs        []string        `json:"agent_ids"` // @ subset or UI pick; empty/full-members = server AutoPick
 	Client          map[string]any  `json:"client"`    // client environment envelope (platform/app/os/…)
 	// ReplyToID is set only when the user explicitly clicks「回复」(quote / mainline).
 	// Normal sends leave it empty. Bot assistant saves must never copy this onto reply_to_id;
@@ -1237,7 +1274,8 @@ type sendBody struct {
 	PersistOnly bool `json:"persist_only"`
 	// HandoffContext is injected into runtime history (not stored) when @-handing off from another bot thread.
 	HandoffContext []runtimeMsg `json:"handoff_context"`
-	// WhenBusy: follow_up (default) | steer | reject — used when a durable run is already active.
+	// WhenBusy: follow_up (default) | steer | reject | replace — used when a durable run is already active.
+	// replace = new-message supersede: abort old durable thread and start a fresh after_interrupt turn.
 	WhenBusy string `json:"when_busy"`
 }
 
@@ -1256,12 +1294,21 @@ func (s *Server) handleCancelConversationRun(w http.ResponseWriter, r *http.Requ
 	}
 	_ = s.runs.cancel(id)
 	_, _ = s.cancelTasksAndNotify(uid, conv, nil)
-	// Best-effort durable abort when client supplies request_id (LangGraph thread).
+	// Best-effort durable abort so harness_threads does not stay "running".
+	// Prefer client request_id; fall back to the newest busy harness row for
+	// this conversation (web/mobile historically omitted the body field).
 	var body struct {
 		RequestID string `json:"request_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if rid := strings.TrimSpace(body.RequestID); rid != "" && runtimeDurableEnabled() {
+	rid := strings.TrimSpace(body.RequestID)
+	if rid == "" && runtimeDurableEnabled() {
+		_, activeReq, _, _, aerr := s.db.ActiveHarnessThreadForConversation(id)
+		if aerr == nil {
+			rid = strings.TrimSpace(activeReq)
+		}
+	}
+	if rid != "" && runtimeDurableEnabled() {
 		_, _, _ = s.postRuntimeJSON(r.Context(), "/v1/runs/abort", map[string]any{
 			"conversation_id": id,
 			"request_id":      rid,
@@ -1400,13 +1447,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	targetAgents, terr := s.resolveSendTargets(uid, conv, body.AgentIDs, content, replyParent)
+	sendPlan, terr := s.planSendTargets(uid, conv, body.AgentIDs, content, replyParent)
 	if terr != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": terr.Error()})
 		return
 	}
+	targetAgents := sendPlan.Targets
 	if len(targetAgents) == 0 {
 		targetAgents = []string{conv.AgentID}
+	}
+	leadFallbackAgents := map[string]bool{}
+	if sendPlan.AutoPick != nil {
+		for id, v := range sendPlan.AutoPick.LeadFallback {
+			if v {
+				leadFallbackAgents[id] = true
+			}
+		}
 	}
 
 	var llmPayload map[string]any
@@ -1440,7 +1496,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// reconnect via GET .../events.
 	runCtx, runCancel := context.WithCancel(context.Background())
 	handle := newRunHandle(runCancel)
-	s.runs.register(conv.ID, handle)
+	replacedPrev := s.runs.register(conv.ID, handle)
 	defer func() {
 		runCancel()
 		s.runs.unregister(conv.ID, handle)
@@ -1455,6 +1511,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"agent_ids":  targetAgents,
 		"channel_id": conv.ChannelID,
 	})
+	// Debug「本轮将由谁回答」: names only, no agent_id; default off.
+	if sendPlan.ShowReplyCandidates && conv.ChannelID != "" {
+		emit("meta", map[string]any{
+			"phase": "reply_candidates",
+			"names": sendPlan.DebugNames,
+		})
+	}
 	// Replace optimistic local-user-* id with the real persisted id.
 	emit("meta", map[string]any{
 		"phase":           "user_saved",
@@ -1472,7 +1535,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// This request's agent is running until proxyRuntimeRun returns. Other
 	// devices follow that, not the wording of the reply.
 	if len(targetAgents) > 0 {
-		s.publishTaskStatus(uid, conv.ID, targetAgents[0], conv.ChannelID, "running", "正在做，做好会发在这里")
+		s.publishTaskStatus(uid, conv.ID, targetAgents[0], conv.ChannelID, "running", "正在做…")
 		defer func() {
 			open, err := s.db.OpenConversationTask(conv.ID)
 			if err == nil && open != nil {
@@ -1486,48 +1549,71 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// Group channels share one conversation_id — only steer when a single candidate
 	// owns the turn and matches the busy thread; multi-candidate group turns continue
 	// the loop (other members still get a chance) instead of short-circuiting everyone.
+	// resumeRequestID is set when the thread is only a stale checkpoint pause: the
+	// text is queued, then this same request continues that thread so the bot replies.
+	// New-message supersede (register replace or when_busy=replace): abort the old
+	// durable thread and start a fresh turn with after_interrupt so the model opens
+	// with one short natural next-step / plan for the NEW ask (not canned ack).
+	resumeRequestID := ""
+	// Supersede: in-process register replace, or client when_busy=replace (interrupt-and-send).
+	wantReplace := wantBusyReplace(replacedPrev, body.WhenBusy)
+	afterInterrupt := wantReplace
 	if runtimeDurableEnabled() && len(targetAgents) == 1 {
 		_, activeReq, activeStatus, activeAgentID, aerr := s.db.ActiveHarnessThreadForConversation(conv.ID)
 		if aerr == nil && strings.TrimSpace(activeReq) != "" && activeStatus != "" &&
 			shouldSteerBusyHarness(activeAgentID, targetAgents[0]) {
-			mode := strings.TrimSpace(body.WhenBusy)
-			if mode == "" {
-				mode = "follow_up"
-			}
-			if mode == "reject" {
-				emit("error", map[string]string{"message": "busy_rejected"})
-				emit("done", map[string]any{"ok": false, "error": "busy_rejected", "when_busy": "reject"})
-				return
-			}
-			out, code, serr := s.postRuntimeJSON(runCtx, "/v1/runs/steer", map[string]any{
-				"conversation_id": conv.ID,
-				"request_id":      activeReq,
-				"text":            storedContent,
-				"mode":            mode,
-				"when_busy":       mode,
-			})
-			if serr != nil {
-				emit("error", map[string]string{"message": serr.Error()})
-				emit("done", map[string]any{"ok": false})
-				return
-			}
-			if code < 200 || code >= 300 {
-				msg := "steer_failed"
-				if e, ok := out["error"].(string); ok && e != "" {
-					msg = e
+			if wantReplace {
+				// keep-partial-next-turn: do not steer into the superseded thread.
+				_, _, _ = s.postRuntimeJSON(runCtx, "/v1/runs/abort", map[string]any{
+					"conversation_id": conv.ID,
+					"request_id":      activeReq,
+				})
+				afterInterrupt = true
+			} else {
+				mode := strings.TrimSpace(body.WhenBusy)
+				if mode == "" {
+					mode = "follow_up"
 				}
-				emit("error", map[string]string{"message": msg})
-				emit("done", map[string]any{"ok": false, "when_busy": mode})
-				return
+				if mode == "reject" {
+					emit("error", map[string]string{"message": "busy_rejected"})
+					emit("done", map[string]any{"ok": false, "error": "busy_rejected", "when_busy": "reject"})
+					return
+				}
+				out, code, serr := s.postRuntimeJSON(runCtx, "/v1/runs/steer", map[string]any{
+					"conversation_id": conv.ID,
+					"request_id":      activeReq,
+					"text":            storedContent,
+					"mode":            mode,
+					"when_busy":       mode,
+				})
+				if serr != nil {
+					emit("error", map[string]string{"message": serr.Error()})
+					emit("done", map[string]any{"ok": false})
+					return
+				}
+				if code < 200 || code >= 300 {
+					msg := "steer_failed"
+					if e, ok := out["error"].(string); ok && e != "" {
+						msg = e
+					}
+					emit("error", map[string]string{"message": msg})
+					emit("done", map[string]any{"ok": false, "when_busy": mode})
+					return
+				}
+				approval, _ := out["approval"].(bool)
+				live, _ := out["live"].(bool)
+				if !shouldResumeStaleHarness(approval, live) {
+					emit("meta", map[string]any{
+						"phase":      "inbox_queued",
+						"when_busy":  mode,
+						"request_id": activeReq,
+					})
+					emit("inbox_updated", map[string]any{"when_busy": mode, "request_id": activeReq})
+					emit("done", map[string]any{"ok": true, "inbox": true, "when_busy": mode, "request_id": activeReq})
+					return
+				}
+				resumeRequestID = activeReq
 			}
-			emit("meta", map[string]any{
-				"phase":      "inbox_queued",
-				"when_busy":  mode,
-				"request_id": activeReq,
-			})
-			emit("inbox_updated", map[string]any{"when_busy": mode, "request_id": activeReq})
-			emit("done", map[string]any{"ok": true, "inbox": true, "when_busy": mode, "request_id": activeReq})
-			return
 		}
 	}
 
@@ -1568,13 +1654,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			systemPrompt = agent.SystemPrompt
 			agentName = agent.Name
 		}
-		// Group: each candidate may PASS when not specifically addressed.
-		if conv.ChannelID != "" && len(targetAgents) > 1 {
-			extra := groupParticipationExtraSystem(forcedAgents[agentID], selfAgent, channelMembers, channelAgents)
-			if strings.TrimSpace(systemPrompt) != "" {
-				systemPrompt = systemPrompt + "\n\n" + extra
-			} else {
-				systemPrompt = extra
+		// Group: @ / @everyone forced; AutoPick / lead-fallback may be single-candidate but still need prompts.
+		if conv.ChannelID != "" {
+			extra := groupParticipationExtraSystemMode(forcedAgents[agentID], leadFallbackAgents[agentID], selfAgent, channelMembers, channelAgents)
+			// Skip empty DM-style when forced solo historically had no prompt — still attach for channel.
+			if strings.TrimSpace(extra) != "" {
+				if strings.TrimSpace(systemPrompt) != "" {
+					systemPrompt = systemPrompt + "\n\n" + extra
+				} else {
+					systemPrompt = extra
+				}
 			}
 		}
 		var history []runtimeMsg
@@ -1596,6 +1685,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			enabledSkills = []string{}
 		}
 		requestID := uuid.NewString()
+		if resumeRequestID != "" {
+			requestID = resumeRequestID
+		}
 		payloadMap := map[string]any{
 			"conversation_id": id,
 			"content":         runtimeContent,
@@ -1606,6 +1698,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			"messages":        history,
 			"enabled_skills":  enabledSkills,
 			"request_id":      requestID,
+			"max_tool_rounds": s.effectiveMaxToolRounds(uid),
+		}
+		if afterInterrupt {
+			payloadMap["after_interrupt"] = true
 		}
 		if replyToID != "" {
 			payloadMap["reply_to_id"] = replyToID
@@ -1628,11 +1724,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			payloadMap["client"] = body.Client
 		}
 		attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+		attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
 		s.attachPreferredMachine(payloadMap, uid, agentID)
 		preps = append(preps, groupCandidatePrep{
-			index:     i,
-			agentID:   agentID,
-			agentName: agentName,
+			index:      i,
+			agentID:    agentID,
+			agentName:  agentName,
 			payloadMap: payloadMap,
 			recallCtx: &recallPersistContext{
 				UserID:         uid,
@@ -1646,114 +1743,115 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	if err := runCtx.Err(); err != nil {
 		cancelled = true
-		if len(targetAgents) > 0 {
-			// Cancelled before any candidate ran — keep a stop marker in history.
-			_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(targetAgents[0], threadRootID, ""))
-		}
+		// Empty cancel: never persist 「（已停止）」 (Stop or supersede).
 	} else {
 		// Multi-candidate group: run concurrently (goroutines). Single-candidate
 		// (DM / one @) still goes through the same path with wg size 1.
 		// On hard runErr for one agent: continue others (parallel usefulness);
 		// emit per-agent error + failure bubble, then a single terminal done.
-		var (
-			wg           sync.WaitGroup
-			cancelledMu  sync.Mutex
-			hardErrMu    sync.Mutex
-			firstHardErr error
-		)
-		for _, prep := range preps {
-			wg.Add(1)
-			go func(prep groupCandidatePrep) {
-				defer wg.Done()
-				if runCtx.Err() != nil {
-					cancelledMu.Lock()
-					cancelled = true
-					cancelledMu.Unlock()
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, ""))
-					return
-				}
-				agentEmit := stampEmitAgentID(emit, prep.agentID)
-				agentEmit("meta", map[string]any{
-					"phase":      "agent_start",
-					"agent_id":   prep.agentID,
-					"agent_name": prep.agentName,
-					"index":      prep.index,
-					"total":      len(targetAgents),
-					"forced":     forcedAgents[prep.agentID],
-				})
-				assistantText, pendingSummary, runID, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
-				if pendingSummary != "" {
-					sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
-						ThreadRootID: threadRootID,
-						At:           sumAt,
-					})
-				}
-				runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
-				// A failed run with empty tokens must NOT look like group PASS silence —
-				// that is the "直接无返回" path (bubble dropped as PASS / never persisted).
-				passed := conv.ChannelID != "" && !runCancelled && runErr == nil && isGroupPassReply(assistantText)
-				// Persist partial assistant text even when cancelled mid-stream.
-				// Empty cancel → keep a light UI/history marker so the next turn still
-				// sees the interrupted turn (keep-partial-next-turn).
-				// Group PASS / empty optional silence: do not persist a bubble.
-				if passed {
-					// Durable journal may have already projected PASS via commit_assistant(project=True).
-					// Remove that row so silence never survives refresh / listMessages.
-					s.dropProjectedGroupPass(conv.ID, runID)
+		runCandidateWave := func(wavePreps []groupCandidatePrep, waveTotal int) (replied int, ran []string, firstHardErr error) {
+			var (
+				wg          sync.WaitGroup
+				cancelledMu sync.Mutex
+				hardErrMu   sync.Mutex
+				outcomeMu   sync.Mutex
+			)
+			for _, prep := range wavePreps {
+				wg.Add(1)
+				go func(prep groupCandidatePrep) {
+					defer wg.Done()
+					if runCtx.Err() != nil {
+						cancelledMu.Lock()
+						cancelled = true
+						cancelledMu.Unlock()
+						return
+					}
+					agentEmit := stampEmitAgentID(emit, prep.agentID)
 					agentEmit("meta", map[string]any{
-						"phase":    "agent_skipped",
-						"agent_id": prep.agentID,
-						"reason":   "pass",
-						"index":    prep.index,
+						"phase":      "agent_start",
+						"agent_id":   prep.agentID,
+						"agent_name": prep.agentName,
+						"index":      prep.index,
+						"total":      waveTotal,
+						"forced":     forcedAgents[prep.agentID],
 					})
-				} else if strings.TrimSpace(assistantText) != "" {
-					// Empty reply_to_id: Bot answers are not quotes. Link via request_id (= runtime run_id).
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, agentEmit)
-				} else if runCancelled {
-					_, _ = s.db.AddMessageWithOpts(conv.ID, "assistant", "（已停止）", botAssistantMessageOpts(prep.agentID, threadRootID, runID))
-				} else if runErr != nil {
-					// Persist a visible failure bubble (same family as 「（已停止）」) so refresh
-					// and other clients still see the turn instead of silent empty.
-					s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, agentEmit)
-				}
-				if runErr != nil {
+					assistantText, pendingSummary, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
+					if pendingSummary != "" {
+						sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
+						_, _ = s.db.AddMessageWithOpts(conv.ID, "summary", pendingSummary, db.AddMessageOpts{
+							ThreadRootID: threadRootID,
+							At:           sumAt,
+						})
+					}
+					runCancelled := runCtx.Err() != nil || isCancelErr(runErr)
+					passed := conv.ChannelID != "" && !runCancelled && runErr == nil && isGroupPassReply(assistantText)
+					if passed {
+						s.dropProjectedGroupPass(conv.ID, runID)
+						agentEmit("meta", map[string]any{
+							"phase":    "agent_skipped",
+							"agent_id": prep.agentID,
+							"reason":   "pass",
+							"index":    prep.index,
+						})
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else if strings.TrimSpace(assistantText) != "" {
+						s.saveAssistantThreaded(uid, conv.ID, prep.agentID, assistantText, "", threadRootID, runID, runSources, agentEmit)
+						outcomeMu.Lock()
+						replied++
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else if runErr != nil && !runCancelled {
+						s.saveAssistantThreaded(uid, conv.ID, prep.agentID, formatAssistantRunFailure(runErr), "", threadRootID, runID, nil, agentEmit)
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					} else {
+						outcomeMu.Lock()
+						ran = append(ran, prep.agentID)
+						outcomeMu.Unlock()
+					}
+					if runErr != nil {
+						if runCancelled {
+							cancelledMu.Lock()
+							cancelled = true
+							cancelledMu.Unlock()
+							return
+						}
+						agentEmit("error", map[string]any{
+							"message":  runErr.Error(),
+							"agent_id": prep.agentID,
+						})
+						hardErrMu.Lock()
+						if firstHardErr == nil {
+							firstHardErr = runErr
+						}
+						hardErrMu.Unlock()
+						return
+					}
 					if runCancelled {
 						cancelledMu.Lock()
 						cancelled = true
 						cancelledMu.Unlock()
 						return
 					}
-					// Continue sibling candidates; do not emit terminal done here.
-					agentEmit("error", map[string]any{
-						"message":  runErr.Error(),
-						"agent_id": prep.agentID,
-					})
-					hardErrMu.Lock()
-					if firstHardErr == nil {
-						firstHardErr = runErr
+					if !passed {
+						agentEmit("meta", map[string]any{
+							"phase":    "agent_done",
+							"agent_id": prep.agentID,
+							"index":    prep.index,
+						})
 					}
-					hardErrMu.Unlock()
-					return
-				}
-				if runCancelled {
-					cancelledMu.Lock()
-					cancelled = true
-					cancelledMu.Unlock()
-					return
-				}
-				if !passed {
-					agentEmit("meta", map[string]any{
-						"phase":    "agent_done",
-						"agent_id": prep.agentID,
-						"index":    prep.index,
-					})
-				}
-				_ = s.db.RecordUsageRun("", uid, prep.agentID, conv.ID, "chat",
-					runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
-			}(prep)
+					_ = s.db.RecordUsageRun("", uid, prep.agentID, conv.ID, "chat",
+						runUsage.PromptTokens, runUsage.CompletionTokens, runUsage.TotalTokens)
+				}(prep)
+			}
+			wg.Wait()
+			return replied, ran, firstHardErr
 		}
-		wg.Wait()
+
+		replied, ranIDs, firstHardErr := runCandidateWave(preps, len(targetAgents))
 		if cancelled {
 			emit("meta", map[string]any{"phase": "cancelled"})
 			emit("done", map[string]any{"ok": false, "cancelled": true})
@@ -1762,6 +1860,120 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if firstHardErr != nil {
 			emit("done", map[string]any{"ok": false, "error": firstHardErr.Error(), "partial": true})
 			return
+		}
+
+		// Second fail-open: AutoPick (or lead-fallback) candidates all PASS → run lead (or all).
+		// User-visible bubbles must not leak 「Auto 选人」/「PASS」.
+		allowSecond := sendPlan.AutoPick != nil && sendPlan.AutoPick.AllowSecondFailOpen
+		if allowSecond && replied == 0 && conv.ChannelID != "" && len(channelMembers) > 0 {
+			secondTargets, secondLeadFB, fb := secondFailOpenTargets(channelMembers, ranIDs, conv.AgentID)
+			if len(secondTargets) > 0 {
+				method := "heuristic"
+				if sendPlan.AutoPick != nil && sendPlan.AutoPick.Method != "" {
+					method = sendPlan.AutoPick.Method
+				}
+				log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=%s", method, secondTargets, fb)
+				leadFallbackAgents = secondLeadFB
+				if sendPlan.ShowReplyCandidates {
+					emit("meta", map[string]any{
+						"phase": "reply_candidates",
+						"names": displayNamesForAgents(secondTargets, channelAgents),
+					})
+				}
+				secondPreps := make([]groupCandidatePrep, 0, len(secondTargets))
+				for i, agentID := range secondTargets {
+					systemPrompt := ""
+					agentName := agentID
+					var selfAgent *db.Agent
+					if agent, aerr := s.db.GetAgent(uid, agentID); aerr == nil {
+						selfAgent = agent
+						systemPrompt = agent.SystemPrompt
+						agentName = agent.Name
+					}
+					extra := groupParticipationExtraSystemMode(false, leadFallbackAgents[agentID], selfAgent, channelMembers, channelAgents)
+					if strings.TrimSpace(extra) != "" {
+						if strings.TrimSpace(systemPrompt) != "" {
+							systemPrompt = systemPrompt + "\n\n" + extra
+						} else {
+							systemPrompt = extra
+						}
+					}
+					var history []runtimeMsg
+					runtimeContent := storedContent
+					agentNames := speakerNamesForHistory(s.db, msgs, agentID, agentName)
+					if threadRootID != "" {
+						history = historyForThreadRuntime(msgs, threadRootID, agentID, agentNames)
+					} else {
+						history = historyForRuntime(msgs, agentID, agentNames)
+					}
+					if len(body.HandoffContext) > 0 {
+						history = mergeHandoffContext(history, body.HandoffContext)
+					}
+					enabledSkills, _ := s.db.ListEnabledSkillNamesForAgent(uid, agentID)
+					if enabledSkills == nil {
+						enabledSkills = []string{}
+					}
+					payloadMap := map[string]any{
+						"conversation_id": id,
+						"content":         runtimeContent,
+						"agent_id":        agentID,
+						"user_id":         uid,
+						"channel_id":      conv.ChannelID,
+						"system_prompt":   systemPrompt,
+						"messages":        history,
+						"enabled_skills":  enabledSkills,
+						"request_id":      uuid.NewString(),
+						"max_tool_rounds": s.effectiveMaxToolRounds(uid),
+					}
+					if afterInterrupt {
+						payloadMap["after_interrupt"] = true
+					}
+					if replyToID != "" {
+						payloadMap["reply_to_id"] = replyToID
+					}
+					if replyQuote != "" {
+						payloadMap["reply_to_content"] = replyQuote
+					}
+					if threadRootID != "" {
+						payloadMap["thread_root_id"] = threadRootID
+						threadMsgs := filterThreadMessages(msgs, threadRootID)
+						payloadMap["reply_context"] = threadRecallQuery(storedContent, replyParent, threadMsgs)
+					}
+					if llmPayload != nil {
+						payloadMap["llm"] = llmPayload
+					}
+					attachDecision(payloadMap, s.decisionRuntimePayload(uid))
+					if body.Client != nil {
+						payloadMap["client"] = body.Client
+					}
+					attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
+					attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
+					s.attachPreferredMachine(payloadMap, uid, agentID)
+					secondPreps = append(secondPreps, groupCandidatePrep{
+						index:      i,
+						agentID:    agentID,
+						agentName:  agentName,
+						payloadMap: payloadMap,
+						recallCtx: &recallPersistContext{
+							UserID:         uid,
+							AgentID:        agentID,
+							ConversationID: conv.ID,
+							MessageID:      userMsg.ID,
+							Source:         "chat",
+						},
+					})
+				}
+				_, _, secondHard := runCandidateWave(secondPreps, len(secondTargets))
+				if cancelled {
+					emit("meta", map[string]any{"phase": "cancelled"})
+					emit("done", map[string]any{"ok": false, "cancelled": true})
+					return
+				}
+				if secondHard != nil {
+					emit("done", map[string]any{"ok": false, "error": secondHard.Error(), "partial": true})
+					return
+				}
+			}
 		}
 	}
 	if cancelled {
@@ -1812,13 +2024,30 @@ func stampEmitAgentID(emit func(event string, data any), agentID string) func(ev
 	}
 }
 
+// groupSendPlan is the resolved candidate set for one user turn (DM or group).
+type groupSendPlan struct {
+	Targets             []string
+	AutoPick            *groupAutoPickResult // nil when AutoPick not applied (@ / off / DM)
+	ShowReplyCandidates bool
+	DebugNames          []string // display names only when ShowReplyCandidates
+}
+
 // resolveSendTargets picks which agents should answer this turn.
 // DM: always the conversation's agent.
-// Group: see resolveGroupSendTargets — candidates are @mentions, @everyone→all, or
-// all members when no @; each optional candidate may PASS (see groupParticipationExtraSystem).
+// Group: @ / @everyone forced; no @ → AutoPick mode (off|heuristic|decision) or all members when off.
 func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) ([]string, error) {
+	plan, err := s.planSendTargets(uid, conv, explicit, content, replyParent)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Targets, nil
+}
+
+// planSendTargets resolves targets and optional AutoPick metadata for the send pipeline.
+func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []string, content string, replyParent *db.Message) (*groupSendPlan, error) {
+	plan := &groupSendPlan{Targets: []string{conv.AgentID}}
 	if conv.ChannelID == "" {
-		return []string{conv.AgentID}, nil
+		return plan, nil
 	}
 	ch, err := s.db.GetChannel(uid, conv.ChannelID)
 	if err != nil {
@@ -1826,10 +2055,50 @@ func (s *Server) resolveSendTargets(uid string, conv *db.Conversation, explicit 
 	}
 	members := ch.Members
 	if len(members) == 0 {
-		return []string{conv.AgentID}, nil
+		return plan, nil
 	}
 	agents, _ := s.db.ListAgents(uid)
-	return resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID), nil
+	base := resolveGroupSendTargets(members, agents, explicit, content, replyParent, conv.AgentID)
+	plan.ShowReplyCandidates = ch.Settings.ShowReplyCandidates
+
+	// Mode from org feature_flags only (Admin 功能开关). Channel settings.auto_pick ignored.
+	orgMode := db.AutoPickHeuristic
+	if u, uerr := s.db.GetUserByID(uid); uerr == nil && u != nil && u.OrgID != "" {
+		if settings, serr := s.db.GetOrgSettings(u.OrgID); serr == nil && settings != nil {
+			orgMode = orgAutoPickMode(settings.FeatureFlagsJSON)
+		}
+	}
+	mode := ch.Settings.EffectiveAutoPickMode(orgMode)
+
+	// Never replace @ / @everyone / subset agent_ids. Full-member agent_ids is legacy (AutoPick still runs).
+	// Mode off → all members (status quo).
+	if groupHasExplicitAddressing(content, explicit, members, agents) || mode == db.AutoPickOff {
+		plan.Targets = base
+		if plan.ShowReplyCandidates {
+			plan.DebugNames = displayNamesForAgents(plan.Targets, agents)
+		}
+		return plan, nil
+	}
+
+	synopsis := ""
+	if msgs, lerr := s.db.ListMessages(uid, conv.ID); lerr == nil {
+		// Exclude the user message just saved if present as last; still useful as soft signal.
+		synopsis = recentMessagesSynopsis(msgs, 2)
+	}
+	var decisionDeps *autoPickDecisionDeps
+	if mode == db.AutoPickDecision {
+		decisionDeps = s.decisionDepsForUser(uid)
+	}
+	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis, decisionDeps)
+	plan.AutoPick = &pick
+	plan.Targets = pick.AgentIDs
+	if len(plan.Targets) == 0 {
+		plan.Targets = []string{conv.AgentID}
+	}
+	if plan.ShowReplyCandidates {
+		plan.DebugNames = displayNamesForAgents(plan.Targets, agents)
+	}
+	return plan, nil
 }
 
 type runtimeUsage struct {
@@ -1878,8 +2147,9 @@ func usageFromDonePayload(payload map[string]any) runtimeUsage {
 }
 
 // proxyRuntimeRun streams one runtime /v1/runs call via emit, returning assistant text,
-// optional summary, and the runtime run_id (exposed to clients as message.request_id).
-func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (_ string, _ string, _ string, _ runtimeUsage, runErr error) {
+// optional summary, the runtime run_id (exposed to clients as message.request_id),
+// and citation sources collected from retrieval tools (may be empty).
+func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, data any), payloadMap map[string]any, recallCtx *recallPersistContext) (_ string, _ string, _ string, _ []db.MessageSource, _ runtimeUsage, runErr error) {
 	presConv, _ := payloadMap["conversation_id"].(string)
 	presAgent, _ := payloadMap["agent_id"].(string)
 	presUser, _ := payloadMap["user_id"].(string)
@@ -1889,31 +2159,33 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 	payload, _ := json.Marshal(payloadMap)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))
 	if err != nil {
-		return "", "", "", runtimeUsage{}, err
+		return "", "", "", nil, runtimeUsage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return "", "", "", runtimeUsage{}, fmt.Errorf("runtime unreachable: %v", err)
+		return "", "", "", nil, runtimeUsage{}, fmt.Errorf("runtime unreachable: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return "", "", "", runtimeUsage{}, fmt.Errorf("runtime error: %s", string(b))
+		return "", "", "", nil, runtimeUsage{}, fmt.Errorf("runtime error: %s", string(b))
 	}
 
 	var assistant strings.Builder
 	var eventName string
 	var pendingSummary string
 	var runID string
+	var sources []db.MessageSource
 	var usage runtimeUsage
 	var streamErr error
 	reader := bufio.NewReader(resp.Body)
 	for {
 		if err := ctx.Err(); err != nil {
-			return stripThinkTags(assistant.String()), pendingSummary, runID, usage, err
+			text := stripThinkTags(assistant.String())
+			return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, err
 		}
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -1945,6 +2217,9 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 						if rid := runIDFromRuntimeMeta(payload); rid != "" {
 							runID = rid
 						}
+						if got := db.ParseMessageSourcesAny(payload["sources"]); len(got) > 0 {
+							sources = db.NormalizeMessageSources(append(sources, got...))
+						}
 						if recallCtx != nil {
 							s.persistMemoryRecallFromMeta(payload, *recallCtx)
 						}
@@ -1968,6 +2243,9 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 						if rid := runIDFromRuntimeMeta(payload); rid != "" {
 							runID = rid
 						}
+						if got := db.ParseMessageSourcesAny(payload["sources"]); len(got) > 0 {
+							sources = db.NormalizeMessageSources(append(sources, got...))
+						}
 						// Per-agent done is swallowed for the client, but ok=false must
 						// still become runErr or handleSendMessage thinks the turn succeeded.
 						if derr := runtimeDoneFailure(payload); derr != nil && streamErr == nil {
@@ -1986,14 +2264,17 @@ func (s *Server) proxyRuntimeRun(ctx context.Context, emit func(event string, da
 		if err != nil {
 			if err != io.EOF {
 				if ctx.Err() != nil {
-					return stripThinkTags(assistant.String()), pendingSummary, runID, usage, ctx.Err()
+					text := stripThinkTags(assistant.String())
+					return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, ctx.Err()
 				}
-				return stripThinkTags(assistant.String()), pendingSummary, runID, usage, err
+				text := stripThinkTags(assistant.String())
+				return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, err
 			}
 			break
 		}
 	}
-	return stripThinkTags(assistant.String()), pendingSummary, runID, usage, streamErr
+	text := stripThinkTags(assistant.String())
+	return text, pendingSummary, runID, db.FilterMessageSourcesCited(sources, text, nil), usage, streamErr
 }
 
 // runIDFromRuntimeMeta pulls the runtime run id from a meta/done payload
@@ -2019,7 +2300,16 @@ func isCancelErr(err error) bool {
 		return true
 	}
 	// net/http often wraps disconnect as url.Error / OpError with context canceled.
+	// Do NOT treat upstream LLM gateway bodies (e.g. HTTP 502 "downstream request
+	// canceled before upstream response headers: context canceled") as *our* run
+	// cancel — those are proxy/gateway errors and should surface as failures (or be
+	// filtered in runtime retries), not as 「（已停止）」.
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "upstream http") ||
+		strings.Contains(msg, "downstream request canceled") ||
+		strings.Contains(msg, "downstream request cancelled") {
+		return false
+	}
 	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "request canceled")
 }
 
@@ -2045,6 +2335,13 @@ func runtimeDoneFailure(payload map[string]any) error {
 		errMsg = "runtime run failed"
 	}
 	return fmt.Errorf("%s", errMsg)
+}
+
+// shouldPersistStopMarker is always false: neither explicit Stop nor supersede
+// may leave a visible 「（已停止）」 bubble. Kept for tests / call-site clarity.
+func shouldPersistStopMarker(h *runHandle) bool {
+	_ = h
+	return false
 }
 
 // formatAssistantRunFailure builds the persisted / client-visible failure bubble text.
@@ -2215,6 +2512,70 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handlePatchChannel updates channel settings (auto_pick / auto_pick_k / show_reply_candidates).
+// auto_pick is accepted for back-compat storage but planning ignores it (org feature_flags only).
+// auto_pick: "off" | "heuristic" | "decision" (legacy bool true→heuristic, false→off still accepted).
+// auto_pick_k: optional; 0→default 1. show_reply_candidates: debug「本轮将由谁回答」(default off).
+func (s *Server) handlePatchChannel(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	var body struct {
+		AutoPick            json.RawMessage `json:"auto_pick"`
+		AutoPickK           *int            `json:"auto_pick_k"`
+		ShowReplyCandidates *bool           `json:"show_reply_candidates"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	patch := db.ChannelSettings{}
+	setAuto, setK, setShow := false, false, false
+	if len(body.AutoPick) > 0 && string(body.AutoPick) != "null" {
+		var anyVal any
+		if err := json.Unmarshal(body.AutoPick, &anyVal); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid auto_pick"})
+			return
+		}
+		mode, err := db.ParseAutoPickMode(anyVal)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if mode == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "auto_pick must be off|heuristic|decision"})
+			return
+		}
+		patch.AutoPick = mode
+		setAuto = true
+	}
+	if body.AutoPickK != nil {
+		patch.AutoPickK = *body.AutoPickK
+		setK = true
+	}
+	if body.ShowReplyCandidates != nil {
+		patch.ShowReplyCandidates = *body.ShowReplyCandidates
+		setShow = true
+	}
+	if !setAuto && !setK && !setShow {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no settings fields"})
+		return
+	}
+	c, err := s.db.UpdateChannelSettings(uid, id, patch, setAuto, setK, setShow)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if conv, e := s.db.GetConversationByChannel(uid, c.ID); e == nil && conv != nil {
+		c.ConversationID = conv.ID
+	}
+	s.enrichChannelOnline(uid, c)
+	writeJSON(w, http.StatusOK, c)
+}
+
 func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) {
 	uid := userIDFrom(r.Context())
 	id := r.PathValue("id")
@@ -2249,6 +2610,30 @@ func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) 
 		if conv, e := s.db.EnsureChannelConversation(uid, c.ID, agentID, c.Name); e == nil {
 			c.ConversationID = conv.ID
 		}
+	}
+	s.enrichChannelOnline(uid, c)
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleRemoveChannelMember(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	agentID := r.PathValue("agentId")
+	if err := s.db.RemoveChannelMember(uid, id, agentID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	c, err := s.db.GetChannel(uid, id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if conv, e := s.db.GetConversationByChannel(uid, c.ID); e == nil && conv != nil {
+		c.ConversationID = conv.ID
 	}
 	s.enrichChannelOnline(uid, c)
 	writeJSON(w, http.StatusOK, c)

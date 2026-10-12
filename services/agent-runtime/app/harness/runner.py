@@ -25,6 +25,8 @@ from .frames import (
 )
 from .graph import get_compiled_graph
 from .journal import JournalSession
+from .live import mark_live, release_live
+from .pause import is_approval_pause
 from .sse import (
     compaction_event,
     inbox_updated,
@@ -37,6 +39,7 @@ from .sse import (
 )
 from .state import initial_state
 from . import tracing
+from ..citation_sources import filter_sources_cited, inject_citation_markers
 
 logger = logging.getLogger("open-bot.harness.runner")
 
@@ -51,7 +54,7 @@ async def run_durable_events(
     request_id: str | None = None,
     langfuse_trace_id: str = "",
     root_obs: Any = None,
-    max_tool_rounds: int = 12,
+    max_tool_rounds: int = 24,
     configurable_extra: dict[str, Any] | None = None,
     resume_command: Command | None = None,
 ) -> AsyncIterator[str]:
@@ -105,7 +108,10 @@ async def run_durable_events(
             yield frame
         return
 
-    if resume_command is None and getattr(snap, "tasks", None):
+    tasks = getattr(snap, "tasks", None) or ()
+    # Only interrupt() payloads are an approval gate. A scheduled next node
+    # (llm/tools/…) also shows up in tasks after a crash between steps.
+    if resume_command is None and is_approval_pause(tasks):
         tracing.mark_interrupt(root_obs, "waiting_approval")
         await journal.set_status("waiting_approval")
         meta = dict(values.get("meta") or {})
@@ -130,10 +136,13 @@ async def run_durable_events(
     config["configurable"]["body"] = body
     config["configurable"]["root_obs"] = root_obs
 
+    paused_next = bool(getattr(snap, "next", None))
     if resume_command is not None:
         inp: Any = resume_command
         tracing.mark_resumed(root_obs)
-    elif values.get("prepared") or values.get("skip_recall"):
+    elif paused_next or values.get("prepared") or values.get("skip_recall"):
+        # None continues the checkpoint. A fresh initial_state would drop the
+        # in-progress tool round and the follow-ups queued onto it.
         inp = None
     else:
         inp = initial_state(
@@ -172,6 +181,7 @@ async def run_durable_events(
             else:
                 yield sse(name, payload)
 
+    mark_live(tid)
     try:
         async for update in graph.astream(inp, config, stream_mode="updates"):
             async for frame in _drain_side():
@@ -207,7 +217,7 @@ async def run_durable_events(
 
         snap = await graph.aget_state(config)
         values = getattr(snap, "values", None) or {}
-        if getattr(snap, "tasks", None):
+        if is_approval_pause(getattr(snap, "tasks", None)):
             tracing.mark_interrupt(root_obs, "waiting_approval")
             await journal.set_status("waiting_approval")
             meta = None
@@ -227,12 +237,29 @@ async def run_durable_events(
 
         final_text = str(values.get("final_text") or final_text or "")
         used = list(values.get("tools_used") or [])
-        if used:
-            yield sse("meta", {"tools_used": used})
+        meta_vals = values.get("meta") if isinstance(values.get("meta"), dict) else {}
+        sources = filter_sources_cited(
+            list(values.get("sources") or []),
+            final_text,
+            structured_citations=(
+                meta_vals.get("citations") or meta_vals.get("structured_citations")
+            ),
+        )
+        if sources:
+            final_text = inject_citation_markers(final_text, sources)
+        if used or sources:
+            payload: dict[str, Any] = {}
+            if used:
+                payload["tools_used"] = used
+            if sources:
+                payload["sources"] = sources
+            yield sse("meta", payload)
         if not meta_sent and values.get("meta"):
             meta = dict(values["meta"])
             meta["thread_id"] = tid
             meta["durable"] = True
+            if sources and "sources" not in meta:
+                meta["sources"] = sources
             yield sse("meta", meta)
         if final_text and not message_started:
             yield message_start()
@@ -261,6 +288,18 @@ async def run_durable_events(
             meta=meta, rid=rid, tid=tid, detail=str(gi)
         ):
             yield frame
+    except asyncio.CancelledError:
+        # Explicit Stop cancels the Go→runtime HTTP request (ASGI). Mark the
+        # harness thread aborted so it does not stay "running" if /v1/runs/abort
+        # raced or the client omitted request_id.
+        logger.info("durable run cancelled thread=%s", tid)
+        try:
+            await journal.set_status("aborted")
+        except Exception:  # noqa: BLE001
+            logger.exception("durable cancel: set_status aborted failed thread=%s", tid)
+        if root_obs is not None:
+            lf.update_obs(root_obs, metadata={"cancelled": True})
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("durable run failed thread=%s", tid)
         await journal.set_status("failed")
@@ -268,3 +307,5 @@ async def run_durable_events(
             lf.update_obs(root_obs, level="ERROR", status_message=str(exc)[:500])
         for frame in failed_done_frames(rid=rid, tid=tid, error=str(exc)):
             yield frame
+    finally:
+        release_live(tid)

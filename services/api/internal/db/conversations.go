@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,27 +22,561 @@ type Conversation struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// LastMachineID is the desktop host for the latest user message (session host).
 	// Empty for browser-only / never-desktop sessions. Not required on every SELECT.
-	LastMachineID string `json:"last_machine_id,omitempty"`
-	Messages  []Message `json:"messages,omitempty"`
+	LastMachineID string    `json:"last_machine_id,omitempty"`
+	Messages      []Message `json:"messages,omitempty"`
 	// Participants carries agent avatar + online for the primary bot (DM) or channel members.
 	// Online is stamped by the API; not stored.
 	Participants []ChannelMemberProfile `json:"participants,omitempty"`
 }
 
+// MessageSource is a clickable citation URL shown under a Bot reply.
+type MessageSource struct {
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+}
+
 type Message struct {
-	ID             string               `json:"id"`
-	ConversationID string               `json:"conversation_id,omitempty"`
-	Role           string               `json:"role"`
-	Content        string               `json:"content"`
-	AgentID        string               `json:"agent_id,omitempty"`
-	ReplyToID      string               `json:"reply_to_id,omitempty"`
-	ThreadRootID   string               `json:"thread_root_id,omitempty"`
-	CreatedAt      time.Time            `json:"created_at"`
-	Reactions      []ReactionSummary    `json:"reactions"`
-	Attachments    []MessageAttachment  `json:"attachments,omitempty"`
-	AgentMessageID string               `json:"agent_message_id,omitempty"`
-	RequestID      string               `json:"request_id,omitempty"`
-	Handoff        *HandoffPayload      `json:"handoff,omitempty"`
+	ID             string              `json:"id"`
+	ConversationID string              `json:"conversation_id,omitempty"`
+	Role           string              `json:"role"`
+	Content        string              `json:"content"`
+	AgentID        string              `json:"agent_id,omitempty"`
+	ReplyToID      string              `json:"reply_to_id,omitempty"`
+	ThreadRootID   string              `json:"thread_root_id,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	Reactions      []ReactionSummary   `json:"reactions"`
+	Attachments    []MessageAttachment `json:"attachments,omitempty"`
+	AgentMessageID string              `json:"agent_message_id,omitempty"`
+	RequestID      string              `json:"request_id,omitempty"`
+	Sources        []MessageSource     `json:"sources,omitempty"`
+	Handoff        *HandoffPayload     `json:"handoff,omitempty"`
+}
+
+func NormalizeMessageSources(in []MessageSource) []MessageSource {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]MessageSource, 0, len(in))
+	for _, s := range in {
+		url := strings.TrimSpace(s.URL)
+		if url == "" {
+			continue
+		}
+		lower := strings.ToLower(url)
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			continue
+		}
+		key := strings.TrimRight(lower, "/")
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		item := MessageSource{URL: url}
+		if t := strings.TrimSpace(s.Title); t != "" {
+			if len(t) > 200 {
+				t = t[:200]
+			}
+			item.Title = t
+		}
+		out = append(out, item)
+		if len(out) >= 20 {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+var messageSourceURLRe = regexp.MustCompile(`(?i)https?://[^\s<>"')\]]+`)
+var messageSourceHostRe = regexp.MustCompile(`(?i)\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b`)
+
+func normalizeSourceURLKey(url string) string {
+	u := strings.TrimSpace(url)
+	u = strings.TrimRight(u, `/.,;:)]}>"'`)
+	return strings.TrimRight(strings.ToLower(u), "/")
+}
+
+func citeMatchKeys(url string) map[string]struct{} {
+	keys := make(map[string]struct{})
+	raw := strings.TrimSpace(url)
+	if raw == "" {
+		return keys
+	}
+	full := normalizeSourceURLKey(raw)
+	if full != "" {
+		keys[full] = struct{}{}
+	}
+	// Drop query for loose match (answers often omit tracking params).
+	if i := strings.Index(full, "?"); i >= 0 {
+		keys[strings.TrimRight(full[:i], "/")] = struct{}{}
+	}
+	return keys
+}
+
+func urlsCitedInAnswer(answer string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if strings.TrimSpace(answer) == "" {
+		return out
+	}
+	for _, m := range messageSourceURLRe.FindAllString(answer, -1) {
+		for k := range citeMatchKeys(m) {
+			out[k] = struct{}{}
+		}
+	}
+	return out
+}
+
+func sourceHost(url string) string {
+	u := strings.TrimSpace(url)
+	if u == "" {
+		return ""
+	}
+	// Strip scheme
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[i+3:]
+	}
+	if i := strings.IndexAny(u, "/?#"); i >= 0 {
+		u = u[:i]
+	}
+	if i := strings.Index(u, "@"); i >= 0 {
+		u = u[i+1:]
+	}
+	host := strings.ToLower(strings.TrimSpace(u))
+	if i := strings.Index(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.TrimPrefix(host, "www.")
+	return host
+}
+
+func isNoisyCitationURL(url string) bool {
+	raw := strings.ToLower(strings.TrimSpace(url))
+	host := sourceHost(raw)
+	if host == "" {
+		return true
+	}
+	switch host {
+	case "duckduckgo.com", "lite.duckduckgo.com", "html.duckduckgo.com",
+		"google.com", "bing.com", "cn.bing.com",
+		"so.com", "sogou.com", "baidu.com", "mojeek.com",
+		"purl.org", "w3.org", "xmlns.com", "schemas.live.com", "microsoft.com":
+		return true
+	}
+	if strings.HasPrefix(host, "api.") || strings.HasPrefix(host, "search.") {
+		return true
+	}
+	for _, suf := range []string{
+		".bing.com", ".duckduckgo.com", ".google.com", ".baidu.com",
+		".sogou.com", ".microsoft.com", ".live.com", ".w3.org",
+		".360tres.com", ".bdstatic.com", ".googleusercontent.com",
+		".gstatic.com", ".ytimg.com", ".ggpht.com",
+	} {
+		if strings.HasSuffix(host, suf) {
+			return true
+		}
+	}
+	path := raw
+	if i := strings.Index(raw, "://"); i >= 0 {
+		path = raw[i+3:]
+	}
+	if i := strings.Index(path, "/"); i >= 0 {
+		path = path[i:]
+	} else {
+		path = "/"
+	}
+	if q := strings.Index(path, "?"); q >= 0 {
+		path = path[:q]
+	}
+	if strings.Contains(path, "/api/") || strings.HasPrefix(path, "/api") {
+		return true
+	}
+	if strings.Contains(path, "/rss") || strings.Contains(path, "/feed") || strings.Contains(path, "/atom") ||
+		strings.HasSuffix(path, ".xml") || strings.Contains(path, "outboundfeeds") {
+		return true
+	}
+	base := strings.TrimRight(path, "/")
+	if base == "/robots.txt" || base == "/favicon.ico" || strings.HasSuffix(base, "/robots.txt") {
+		return true
+	}
+	if strings.Contains(base, "sitemap") && (strings.HasSuffix(base, ".xml") || strings.HasSuffix(base, ".txt") || strings.HasSuffix(base, "/sitemap")) {
+		return true
+	}
+	q := ""
+	if i := strings.Index(raw, "?"); i >= 0 {
+		q = raw[i+1:]
+	}
+	pathTrim := strings.TrimRight(path, "/")
+	if pathTrim == "/search" || pathTrim == "/web" || pathTrim == "/s" || pathTrim == "/html" || pathTrim == "/lite" || strings.HasPrefix(path, "/search") {
+		if strings.Contains(q, "q=") || strings.Contains(q, "query=") || strings.Contains(q, "wd=") || strings.Contains(q, "p=") {
+			return true
+		}
+	}
+	if strings.Contains(q, "format=rss") {
+		return true
+	}
+	return false
+}
+
+func hostsMentionedInAnswer(answer string) map[string]struct{} {
+	out := make(map[string]struct{})
+	if strings.TrimSpace(answer) == "" {
+		return out
+	}
+	for _, m := range messageSourceHostRe.FindAllString(answer, -1) {
+		h := strings.ToLower(strings.Trim(m, "."))
+		h = strings.TrimPrefix(h, "www.")
+		if strings.Contains(h, ".") {
+			out[h] = struct{}{}
+		}
+	}
+	return out
+}
+
+func hostSoftMatch(sourceHost string, mentioned map[string]struct{}) bool {
+	if sourceHost == "" || len(mentioned) == 0 {
+		return false
+	}
+	if _, ok := mentioned[sourceHost]; ok {
+		return true
+	}
+	for m := range mentioned {
+		if strings.HasSuffix(sourceHost, "."+m) {
+			return true
+		}
+	}
+	return false
+}
+
+func answerMentionsHostLabel(answerL, sourceHostName string) bool {
+	label := sourceHostName
+	if i := strings.Index(label, "."); i >= 0 {
+		label = label[:i]
+	}
+	label = strings.ToLower(strings.TrimSpace(label))
+	if len(label) < 5 {
+		return false
+	}
+	for _, r := range label {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	// Case-insensitive whole-label match (ThingJS ← thingjs.com).
+	al := answerL
+	ll := label
+	for i := 0; i+len(ll) <= len(al); i++ {
+		if !strings.EqualFold(al[i:i+len(ll)], ll) {
+			continue
+		}
+		leftOK := i == 0 || !isASCIIAlphaNum(al[i-1])
+		rightOK := i+len(ll) == len(al) || !isASCIIAlphaNum(al[i+len(ll)])
+		if leftOK && rightOK {
+			return true
+		}
+	}
+	return false
+}
+
+func isASCIIAlphaNum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+func answerMentionsTitle(answerL, title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if len(t) < 6 {
+		return false
+	}
+	return strings.Contains(answerL, t)
+}
+
+func sourceSoftHit(url, title, answerL string, mentioned map[string]struct{}) bool {
+	host := sourceHost(url)
+	return hostSoftMatch(host, mentioned) || answerMentionsHostLabel(answerL, host) || answerMentionsTitle(answerL, title)
+}
+
+func fallbackRetrievalSources(sources []MessageSource, limit int) []MessageSource {
+	if limit <= 0 {
+		limit = 8
+	}
+	var out []MessageSource
+	seenHost := make(map[string]struct{})
+	seenURL := make(map[string]struct{})
+	for _, s := range NormalizeMessageSources(sources) {
+		if isNoisyCitationURL(s.URL) {
+			continue
+		}
+		host := sourceHost(s.URL)
+		if host == "" {
+			continue
+		}
+		if _, ok := seenHost[host]; ok {
+			continue
+		}
+		key := normalizeSourceURLKey(s.URL)
+		if _, ok := seenURL[key]; ok {
+			continue
+		}
+		seenHost[host] = struct{}{}
+		seenURL[key] = struct{}{}
+		out = append(out, s)
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// FilterMessageSourcesCited keeps sources the assistant answer actually used.
+// Prefer URLs cited in the answer (or structured citations); also soft-match
+// host/title mentioned in the text; if the model paraphrased with no links but
+// retrieval sources exist, fall back to a curated readable subset (no API/RSS).
+func FilterMessageSourcesCited(sources []MessageSource, answer string, structured []MessageSource) []MessageSource {
+	if len(sources) == 0 {
+		return nil
+	}
+	cited := urlsCitedInAnswer(answer)
+	for _, s := range structured {
+		for k := range citeMatchKeys(s.URL) {
+			cited[k] = struct{}{}
+		}
+	}
+	answerL := strings.ToLower(answer)
+	mentioned := hostsMentionedInAnswer(answer)
+	var out []MessageSource
+	seen := make(map[string]struct{})
+	appendSrc := func(s MessageSource) {
+		key := normalizeSourceURLKey(s.URL)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+
+	norm := NormalizeMessageSources(sources)
+	for _, s := range norm {
+		keys := citeMatchKeys(s.URL)
+		hit := false
+		for k := range keys {
+			if _, ok := cited[k]; ok {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			appendSrc(s)
+		}
+	}
+	// Soft host/title only augments when the answer already has URL cites.
+	if len(cited) > 0 && len(out) < 20 && strings.TrimSpace(answerL) != "" {
+		for _, s := range norm {
+			if isNoisyCitationURL(s.URL) {
+				continue
+			}
+			if sourceSoftHit(s.URL, s.Title, answerL, mentioned) {
+				appendSrc(s)
+			}
+		}
+	}
+	if len(out) > 0 {
+		if len(out) > 20 {
+			out = out[:20]
+		}
+		return out
+	}
+	// No raw URL cites: paraphrase path — soft host/title first, then curated fallback.
+	if strings.TrimSpace(answer) != "" && len(cited) == 0 {
+		var soft []MessageSource
+		softSeen := make(map[string]struct{})
+		softHosts := make(map[string]struct{})
+		for _, s := range norm {
+			if isNoisyCitationURL(s.URL) {
+				continue
+			}
+			if !sourceSoftHit(s.URL, s.Title, answerL, mentioned) {
+				continue
+			}
+			host := sourceHost(s.URL)
+			if host != "" {
+				if _, ok := softHosts[host]; ok {
+					continue
+				}
+			}
+			key := normalizeSourceURLKey(s.URL)
+			if _, ok := softSeen[key]; ok {
+				continue
+			}
+			softSeen[key] = struct{}{}
+			if host != "" {
+				softHosts[host] = struct{}{}
+			}
+			soft = append(soft, s)
+		}
+		fbLimit := 8
+		if len(soft) > 0 {
+			if len(soft) > fbLimit {
+				return soft[:fbLimit]
+			}
+			return soft
+		}
+		return fallbackRetrievalSources(sources, fbLimit)
+	}
+	return nil
+}
+
+
+// InjectCitationMarkers inserts [1][2]… after the first host/title mention for each source.
+// Idempotent when markers already exist. Skips code fences / inline code spans.
+func InjectCitationMarkers(answer string, sources []MessageSource) string {
+	sources = NormalizeMessageSources(sources)
+	if strings.TrimSpace(answer) == "" || len(sources) == 0 {
+		return answer
+	}
+	existing := map[int]struct{}{}
+	for _, m := range regexp.MustCompile(`\[(\d+)\]`).FindAllStringSubmatch(answer, -1) {
+		var n int
+		if _, err := fmt.Sscanf(m[1], "%d", &n); err == nil && n > 0 {
+			existing[n] = struct{}{}
+		}
+	}
+	text := answer
+	for i, s := range sources {
+		n := i + 1
+		if _, ok := existing[n]; ok {
+			continue
+		}
+		marker := fmt.Sprintf("[%d]", n)
+		if strings.Contains(text, marker) {
+			continue
+		}
+		masked := maskCodeSpans(text)
+		insertAt := -1
+		host := sourceHost(s.URL)
+		if host != "" {
+			hostCandidates := []string{host}
+			if parts := strings.Split(host, "."); len(parts) >= 2 {
+				parent := strings.Join(parts[len(parts)-2:], ".")
+				if parent != host {
+					hostCandidates = append(hostCandidates, parent)
+				}
+			}
+			for _, hc := range hostCandidates {
+				pat := regexp.MustCompile(`(?i)(?:https?://)?(?:www\.)?` + regexp.QuoteMeta(hc) + `\b`)
+				if loc := pat.FindStringIndex(masked); loc != nil {
+					insertAt = loc[1]
+					break
+				}
+			}
+			if insertAt < 0 {
+				label := host
+				if dot := strings.Index(label, "."); dot >= 0 {
+					label = label[:dot]
+				}
+				if answerMentionsHostLabel(strings.ToLower(masked), host) {
+					ll := strings.ToLower(label)
+					ml := strings.ToLower(masked)
+					for j := 0; j+len(ll) <= len(ml); j++ {
+						if ml[j:j+len(ll)] != ll {
+							continue
+						}
+						leftOK := j == 0 || !isASCIIAlphaNum(masked[j-1])
+						rightOK := j+len(ll) == len(masked) || !isASCIIAlphaNum(masked[j+len(ll)])
+						if leftOK && rightOK {
+							insertAt = j + len(label)
+							break
+						}
+					}
+				}
+			}
+		}
+		if insertAt < 0 {
+			t := strings.TrimSpace(s.Title)
+			if len(t) >= 6 {
+				idx := strings.Index(strings.ToLower(masked), strings.ToLower(t))
+				if idx >= 0 {
+					insertAt = idx + len(t)
+				}
+			}
+		}
+		if insertAt < 0 || insertAt > len(text) {
+			continue
+		}
+		after := strings.TrimLeft(text[insertAt:], " \t")
+		if strings.HasPrefix(after, "[") {
+			continue
+		}
+		text = text[:insertAt] + marker + text[insertAt:]
+		existing[n] = struct{}{}
+	}
+	return text
+}
+
+func maskCodeSpans(text string) string {
+	blank := func(s string) string { return strings.Repeat(" ", len(s)) }
+	fenced := regexp.MustCompile("(?s)```.*?```")
+	out := fenced.ReplaceAllStringFunc(text, blank)
+	inline := regexp.MustCompile("`[^`]+`")
+	return inline.ReplaceAllStringFunc(out, blank)
+}
+
+func EncodeMessageSources(in []MessageSource) string {
+	norm := NormalizeMessageSources(in)
+	if len(norm) == 0 {
+		return "[]"
+	}
+	b, err := json.Marshal(norm)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+func DecodeMessageSources(raw string) []MessageSource {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	var out []MessageSource
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return NormalizeMessageSources(out)
+}
+
+func ParseMessageSourcesAny(v any) []MessageSource {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case []MessageSource:
+		return NormalizeMessageSources(t)
+	case []any:
+		out := make([]MessageSource, 0, len(t))
+		for _, el := range t {
+			m, ok := el.(map[string]any)
+			if !ok {
+				continue
+			}
+			url, _ := m["url"].(string)
+			title, _ := m["title"].(string)
+			out = append(out, MessageSource{URL: url, Title: title})
+		}
+		return NormalizeMessageSources(out)
+	case string:
+		return DecodeMessageSources(t)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		return DecodeMessageSources(string(b))
+	}
 }
 
 // HandoffPayload is the visible Bot↔Bot projection card (not sent to the model).
@@ -59,6 +595,7 @@ type AddMessageOpts struct {
 	ThreadRootID string
 	RequestID    string
 	At           time.Time
+	Sources      []MessageSource
 }
 
 // AgentThreadPreview is sidebar metadata for one bot's primary thread.
@@ -216,6 +753,7 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 		ReplyToID:      strings.TrimSpace(opts.ReplyToID),
 		ThreadRootID:   strings.TrimSpace(opts.ThreadRootID),
 		RequestID:      strings.TrimSpace(opts.RequestID),
+		Sources:        NormalizeMessageSources(opts.Sources),
 		CreatedAt:      at,
 	}
 	tx, err := d.SQL.Begin()
@@ -231,10 +769,11 @@ func (d *DB) AddMessageWithOpts(conversationID, role, content string, opts AddMe
 	if m.ThreadRootID != "" {
 		rootAny = m.ThreadRootID
 	}
+	sourcesJSON := EncodeMessageSources(m.Sources)
 	if _, err := tx.Exec(
-		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, request_id, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.RequestID, m.CreatedAt,
+		`INSERT INTO messages (id, conversation_id, role, content, agent_id, reply_to_id, thread_root_id, request_id, sources_json, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		m.ID, m.ConversationID, m.Role, m.Content, m.AgentID, replyAny, rootAny, m.RequestID, sourcesJSON, m.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -257,17 +796,20 @@ func (d *DB) GetMessage(userID, conversationID, messageID string) (*Message, err
 	}
 	row := d.SQL.QueryRow(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
-		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at
+		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
+		        COALESCE(sources_json, '[]')
 		 FROM messages WHERE id = $1 AND conversation_id = $2`,
 		messageID, conversationID,
 	)
 	var m Message
-	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt); err != nil {
+	var sourcesRaw string
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &sourcesRaw); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	m.Sources = DecodeMessageSources(sourcesRaw)
 	return &m, nil
 }
 
@@ -284,7 +826,8 @@ func (d *DB) FindAssistantByRequestID(conversationID, requestID string) (*Messag
 	row := d.SQL.QueryRow(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
 		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
-		        COALESCE(agent_message_id, ''), COALESCE(request_id, '')
+		        COALESCE(agent_message_id, ''), COALESCE(request_id, ''),
+		        COALESCE(sources_json, '[]')
 		 FROM messages
 		 WHERE conversation_id = $1 AND request_id = $2 AND role = 'assistant'
 		 ORDER BY created_at DESC
@@ -292,15 +835,17 @@ func (d *DB) FindAssistantByRequestID(conversationID, requestID string) (*Messag
 		conversationID, requestID,
 	)
 	var m Message
+	var sourcesRaw string
 	if err := row.Scan(
 		&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID,
-		&m.CreatedAt, &m.AgentMessageID, &m.RequestID,
+		&m.CreatedAt, &m.AgentMessageID, &m.RequestID, &sourcesRaw,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
+	m.Sources = DecodeMessageSources(sourcesRaw)
 	return &m, nil
 }
 
@@ -327,8 +872,9 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	rows, err := d.SQL.Query(
 		`SELECT id, conversation_id, role, content, COALESCE(agent_id,''),
 		        COALESCE(reply_to_id,''), COALESCE(thread_root_id,''), created_at,
-		        COALESCE(agent_message_id, ''), COALESCE(request_id, '')
-		 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC`,
+		        COALESCE(agent_message_id, ''), COALESCE(request_id, ''),
+		        COALESCE(sources_json, '[]')
+		 FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC, id ASC`,
 		conversationID,
 	)
 	if err != nil {
@@ -338,9 +884,11 @@ func (d *DB) ListMessages(userID, conversationID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID, &m.RequestID); err != nil {
+		var sourcesRaw string
+		if err := rows.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID, &m.CreatedAt, &m.AgentMessageID, &m.RequestID, &sourcesRaw); err != nil {
 			return nil, err
 		}
+		m.Sources = DecodeMessageSources(sourcesRaw)
 		if m.Role == "handoff" {
 			if hp, herr := ParseHandoffContent(m.Content); herr == nil {
 				m.Handoff = hp
@@ -414,6 +962,29 @@ func (d *DB) DeleteMessage(conversationID, messageID string) error {
 	res, err := d.SQL.Exec(
 		`DELETE FROM messages WHERE id = $1 AND conversation_id = $2`,
 		messageID, conversationID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetMessageSources replaces citation sources on an existing message (e.g. after
+// harness projection, when the HTTP finish path learns retrieval URLs).
+func (d *DB) SetMessageSources(conversationID, messageID string, sources []MessageSource) error {
+	conversationID = strings.TrimSpace(conversationID)
+	messageID = strings.TrimSpace(messageID)
+	if conversationID == "" || messageID == "" {
+		return errors.New("conversation_id and message_id required")
+	}
+	raw := EncodeMessageSources(sources)
+	res, err := d.SQL.Exec(
+		`UPDATE messages SET sources_json = $1 WHERE id = $2 AND conversation_id = $3`,
+		raw, messageID, conversationID,
 	)
 	if err != nil {
 		return err
@@ -621,7 +1192,6 @@ func (d *DB) GetAgentThreadPreview(userID, agentID string) (*AgentThreadPreview,
 	return &p, nil
 }
 
-
 func ParseHandoffContent(content string) (*HandoffPayload, error) {
 	var hp HandoffPayload
 	if err := json.Unmarshal([]byte(content), &hp); err != nil {
@@ -713,7 +1283,6 @@ func (d *DB) AddHandoffNote(conversationID, threadRootID string, hp HandoffPaylo
 	}
 	return m, true, nil
 }
-
 
 // ListConversationIDsForAgent returns conversation ids where agent_id is the primary bot
 // (DM thread or channel conversation whose agent_id points at this agent).

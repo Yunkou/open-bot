@@ -8,6 +8,7 @@ from langchain_core.runnables import RunnableConfig
 
 from ... import dream
 from ... import mem0_store
+from ...citation_sources import filter_sources_cited, inject_citation_markers
 from ..state import AgentState
 
 
@@ -49,7 +50,18 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
 
     meta = dict(state.get("meta") or {})
     meta["tools_used"] = list(state.get("tools_used") or [])
+    sources = filter_sources_cited(
+        list(state.get("sources") or []),
+        final,
+        structured_citations=(meta.get("citations") or meta.get("structured_citations")),
+    )
+    if sources:
+        meta["sources"] = sources
+        final = inject_citation_markers(final, sources)
     meta["durable"] = True
+    out: dict[str, Any] = {"status": "done", "meta": meta}
+    if sources and final != str(state.get("final_text") or "").strip():
+        out["final_text"] = final
     if journal is not None:
         await journal.set_status("done")
         await journal.put_usage(
@@ -57,7 +69,11 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
         )
         await journal.append(
             "finish",
-            {"status": "done", "tools_used": meta["tools_used"]},
+            {
+                "status": "done",
+                "tools_used": meta["tools_used"],
+                "sources": sources,
+            },
             project=False,
         )
         # Drain follow-ups: signal inbox so next submit can start a new run.
@@ -66,4 +82,4 @@ async def finish_node(state: AgentState, config: RunnableConfig) -> dict[str, An
             await journal.put_inbox(
                 [{"text": t, "when_busy": "follow_up", "pending_next_run": True} for t in follow]
             )
-    return {"status": "done", "meta": meta}
+    return out

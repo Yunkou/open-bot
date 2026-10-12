@@ -33,11 +33,12 @@ test.describe("web chat", () => {
     await sendChatMessage(page, "[long] please stream forever-ish");
     await clickStop(page);
 
-    // Stop control goes away; optional partial assistant text or stopped marker
+    // Stop control goes away; never leave a visible 「（已停止）」 bubble.
     await expect(page.locator('button.composer-stop[aria-label="停止生成"]')).toHaveCount(0, {
       timeout: 15_000,
     });
     await expect(page.locator(".composer-send:not(.composer-stop)")).toBeVisible();
+    await expect(page.getByText("已停止", { exact: false })).toHaveCount(0);
   });
 
   test("interrupt-and-send keeps partial then starts next turn", async ({ page }) => {
@@ -55,6 +56,8 @@ test.describe("web chat", () => {
     await sendChatMessage(page, "[short] second turn");
     await waitForUserText(page, "second turn");
     await waitForAssistantText(page, "E2E_MOCK_OK");
+    // Supersede by new message must not leave a visible 「（已停止）」 bubble.
+    await expect(page.getByText("已停止", { exact: false })).toHaveCount(0);
   });
 
   test("refresh while run_active resumes stream", async ({ page }) => {

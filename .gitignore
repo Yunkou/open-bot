@@ -63,3 +63,6 @@ e2e/.mock-llm.pid
 .merge-packs/
 services/api/.merge-packs/
 e2e/smoke-shots/
+
+# approval pack staging (local only)
+.pack-stack/

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from "react";
-import type { AttachmentMeta, HandoffPayload, ReactionSummary } from "../api";
+import type { AttachmentMeta, HandoffPayload, MessageSource, ReactionSummary } from "../api";
 import {
   NEGATIVE_REACTION_EMOJIS,
   attachmentDisplayUrl,
@@ -9,11 +9,12 @@ import { ImageDiagramCard } from "./ImageDiagramCard";
 import { MessageReactions } from "./MessageReactions";
 import { stripThinkTags } from "../lib/stripThink";
 import { ResultOrientedMessage } from "./ArtifactCards";
-import { HostConfirmCard, parseHostConfirm } from "./HostConfirmCard";
+import { HostConfirmCard, parseHostConfirm, type ApprovalDecision } from "./HostConfirmCard";
 import { HandoffCard } from "./HandoffCard";
 import { MessageActionSheet } from "./MessageActionSheet";
 import { MessageHoverBar } from "./MessageHoverBar";
 import { useIsTouchUi } from "./useIsTouchUi";
+import { MessageSourcesFooter } from "./MessageSourcesFooter";
 
 export type ChatMessageData = {
   id: string;
@@ -29,6 +30,8 @@ export type ChatMessageData = {
   agent_message_id?: string;
   /** Runtime run id on Bot replies (More → 复制请求 ID); absent on historical messages. */
   request_id?: string;
+  /** Citation links when retrieval was used; omitted otherwise. */
+  sources?: MessageSource[];
   reactions?: ReactionSummary[];
   handoff?: HandoffPayload;
 };
@@ -42,7 +45,9 @@ type Props = {
    * Omit in DM / single-bot so chrome stays unchanged.
    */
   speakerName?: string;
-  onHostDecide?: (ok: boolean) => void;
+  onHostDecide?: (decision: ApprovalDecision) => void;
+  /** When false, hide Always allow (machine exec_policy=ask). Default true. */
+  alwaysAllowEnabled?: boolean;
   /** Quoted parent preview when rendering a reply. */
   replyQuote?: { who: string; text: string } | null;
   /** Number of replies in this message's thread (main timeline roots). */
@@ -111,6 +116,7 @@ export function ChatMessage({
   agentId,
   speakerName,
   onHostDecide,
+  alwaysAllowEnabled = true,
   replyQuote,
   replyCount = 0,
   onReply,
@@ -151,7 +157,11 @@ export function ChatMessage({
     if (!item) return null;
     return (
       <div className="chat-row chat-row-assistant" data-msg-id={message.id}>
-        <HostConfirmCard item={item} onDecide={item.status === "pending" ? onHostDecide : undefined} />
+        <HostConfirmCard
+          item={item}
+          onDecide={item.status === "pending" ? onHostDecide : undefined}
+          alwaysAllowEnabled={alwaysAllowEnabled}
+        />
         {timeEl}
       </div>
     );
@@ -426,7 +436,12 @@ export function ChatMessage({
             content={visible}
             streaming={message.streaming}
             agentId={speakerId}
+            messageId={message.id}
+            sources={message.sources}
           />
+          {!message.streaming ? (
+            <MessageSourcesFooter sources={message.sources} messageId={message.id} />
+          ) : null}
         </div>
         {desktopBar}
       </div>

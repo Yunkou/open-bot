@@ -141,11 +141,11 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-http-"+uid[:8], org.ID, db.RoleMember
 	t.Cleanup(func() { _, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid) })
 
 	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
-	a1, err := d.CreateAgentWithAvatar(uid, "BotA", "", "", "cloud", "#118ab2")
+	a1, err := d.CreateAgentWithAvatar(uid, "BotA", "", "", "circle", "#118ab2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a2, err := d.CreateAgentWithAvatar(uid, "BotB", "", "", "drop", "#9b5de5")
+	a2, err := d.CreateAgentWithAvatar(uid, "BotB", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,11 +267,11 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sse-"+uid[:8], org.ID, db.RoleMember,
 	s.hosts.onChange = func(userID, machineID string, _ bool) {
 		s.publishAgentsOnlineForMachine(userID, machineID)
 	}
-	aBound, err := d.CreateAgentWithAvatar(uid, "BoundBot", "", "", "drop", "#9b5de5")
+	aBound, err := d.CreateAgentWithAvatar(uid, "BoundBot", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aOther, err := d.CreateAgentWithAvatar(uid, "OtherBot", "", "", "cloud", "#118ab2")
+	aOther, err := d.CreateAgentWithAvatar(uid, "OtherBot", "", "", "circle", "#118ab2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,11 +365,11 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-stale-"+uid[:8], org.ID, db.RoleMembe
 	})
 
 	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
-	aStale, err := d.CreateAgentWithAvatar(uid, "StaleBot", "", "", "drop", "#9b5de5")
+	aStale, err := d.CreateAgentWithAvatar(uid, "StaleBot", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}
-	aFresh, err := d.CreateAgentWithAvatar(uid, "FreshBot", "", "", "cloud", "#118ab2")
+	aFresh, err := d.CreateAgentWithAvatar(uid, "FreshBot", "", "", "circle", "#118ab2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +490,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-unseen-"+uid[:8], org.ID, db.RoleMemb
 		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
 	})
 	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
-	a, err := d.CreateAgentWithAvatar(uid, "UnseenBot", "", "", "drop", "#9b5de5")
+	a, err := d.CreateAgentWithAvatar(uid, "UnseenBot", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +552,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "online-sess-"+uid[:8], org.ID, db.RoleMember
 	t.Cleanup(func() { _, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid) })
 
 	s := &Server{db: d, events: newChatHub(), convEvents: newConversationEventHub(), hosts: newHostHub()}
-	a, err := d.CreateAgentWithAvatar(uid, "SessBot", "", "", "drop", "#9b5de5")
+	a, err := d.CreateAgentWithAvatar(uid, "SessBot", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +672,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "pref-mobile-"+uid[:8], org.ID, db.RoleMember
 		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
 		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
 	})
-	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "cloud", "#118ab2")
+	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "circle", "#118ab2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,7 +708,7 @@ VALUES ($1,$2,'x',$3,$4,$5)`, uid, "pref-omit-"+uid[:8], org.ID, db.RoleMember, 
 		_, _ = d.SQL.Exec(`DELETE FROM user_machines WHERE user_id=$1`, uid)
 		_, _ = d.SQL.Exec(`DELETE FROM users WHERE id=$1`, uid)
 	})
-	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "drop", "#9b5de5")
+	a, err := d.CreateAgentWithAvatar(uid, "Bot", "", "", "square", "#9b5de5")
 	if err != nil {
 		t.Fatal(err)
 	}

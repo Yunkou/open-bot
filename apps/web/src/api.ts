@@ -1,4 +1,5 @@
-export const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
+/** Build-time default (Vite). Runtime override lives in localStorage — see getApiBase / setApiBase. */
+export const DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:18080").replace(
   /\/$/,
   "",
 );
@@ -8,8 +9,151 @@ export const ADMIN_URL = (import.meta.env.VITE_ADMIN_URL || "http://127.0.0.1:51
   "",
 );
 
+const API_BASE_KEY = "openbot_api_base";
 const TOKEN_KEY = "openbot_token";
 const USER_KEY = "openbot_user";
+
+function normalizeApiBase(url: string): string {
+  return url.trim().replace(/\/$/, "");
+}
+
+function readStoredApiBase(): string | null {
+  try {
+    const v = localStorage.getItem(API_BASE_KEY);
+    if (!v) return null;
+    const n = normalizeApiBase(v);
+    return n || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Active API origin. Live-binding: setApiBase() updates this and all importers see it.
+ * Prefer getApiBase() in new code; keep exporting API_BASE for existing call sites.
+ */
+export let API_BASE = readStoredApiBase() || DEFAULT_API_BASE;
+
+export function getApiBase(): string {
+  return API_BASE;
+}
+
+export function getDefaultApiBase(): string {
+  return DEFAULT_API_BASE;
+}
+
+/** Persist override (empty / same as default → clear override). Does not clear auth. */
+export function setApiBase(url: string): string {
+  const cleaned = normalizeApiBase(url);
+  const next = cleaned || DEFAULT_API_BASE;
+  API_BASE = next;
+  try {
+    if (cleaned && cleaned !== DEFAULT_API_BASE) {
+      localStorage.setItem(API_BASE_KEY, cleaned);
+    } else {
+      localStorage.removeItem(API_BASE_KEY);
+    }
+  } catch {
+    /* private mode */
+  }
+  return API_BASE;
+}
+
+export function clearApiBaseOverride(): string {
+  try {
+    localStorage.removeItem(API_BASE_KEY);
+  } catch {
+    /* ignore */
+  }
+  API_BASE = DEFAULT_API_BASE;
+  return API_BASE;
+}
+
+export type ApiHealthProbeResult = {
+  ok: boolean;
+  detail: string;
+  service?: string;
+  latency_ms?: number;
+  error?: string;
+  http_status?: number;
+};
+
+/** Probe GET {base}/healthz — same UX shape as list-models / probe-tools. */
+export async function probeApiHealth(baseUrl?: string): Promise<ApiHealthProbeResult> {
+  const base = normalizeApiBase(baseUrl ?? API_BASE) || DEFAULT_API_BASE;
+  if (!/^https?:\/\//i.test(base)) {
+    return {
+      ok: false,
+      detail: "地址需以 http:// 或 https:// 开头",
+      error: "invalid_url",
+    };
+  }
+  const started = performance.now();
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const headers: HeadersInit = {};
+    if (/ngrok/i.test(base)) {
+      headers["ngrok-skip-browser-warning"] = "1";
+    }
+    const res = await fetch(`${base}/healthz`, { method: "GET", headers, signal: ctrl.signal });
+    const latency = Math.round(performance.now() - started);
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await res.json()) as Record<string, unknown>;
+    } catch {
+      body = null;
+    }
+    if (!res.ok) {
+      return {
+        ok: false,
+        detail: `HTTP ${res.status}`,
+        http_status: res.status,
+        latency_ms: latency,
+        error: "http_error",
+      };
+    }
+    const service = typeof body?.service === "string" ? body.service : undefined;
+    const markedOk = body?.ok === true || body?.ok === "true" || body == null;
+    if (!markedOk && body) {
+      return {
+        ok: false,
+        detail: `健康检查未通过${service ? `（${service}）` : ""}`,
+        service,
+        latency_ms: latency,
+        http_status: res.status,
+        error: "not_ok",
+      };
+    }
+    return {
+      ok: true,
+      detail: service ? `连接正常（${service} · ${latency}ms）` : `连接正常（${latency}ms）`,
+      service,
+      latency_ms: latency,
+      http_status: res.status,
+    };
+  } catch (err) {
+    const latency = Math.round(performance.now() - started);
+    const aborted = err instanceof DOMException && err.name === "AbortError";
+    const msg = aborted
+      ? "超时（8s）——检查地址、局域网或 ngrok 是否可达"
+      : err instanceof Error
+        ? err.message
+        : String(err);
+    return {
+      ok: false,
+      detail: `连不上：${msg}`,
+      latency_ms: latency,
+      error: aborted ? "timeout" : "network",
+    };
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export function formatApiHealthProbe(result: ApiHealthProbeResult): string {
+  return result.detail;
+}
 
 export type User = {
   id: string;
@@ -164,6 +308,31 @@ export type ReactionUpdatedEvent = {
   action: "add" | "remove" | string;
 };
 
+/** Clickable citation from retrieval tools (http_fetch, MCP search, etc.). */
+export type MessageSource = {
+  url: string;
+  title?: string;
+};
+
+/** Keep only real http(s) URLs; dedupe by lowercase URL without trailing slash. */
+export function normalizeMessageSources(raw: unknown): MessageSource[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: MessageSource[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const url = String((item as MessageSource).url || "").trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const key = url.toLowerCase().replace(/\/+$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const title = String((item as MessageSource).title || "").trim().slice(0, 200);
+    out.push(title ? { url, title } : { url });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
 export type Message = {
   id: string;
   role: "user" | "assistant" | "handoff" | string;
@@ -179,6 +348,8 @@ export type Message = {
   agent_message_id?: string;
   /** Runtime run id for Bot replies (omitted on historical / non-run messages). */
   request_id?: string;
+  /** Citation links when this reply used retrieval; omitted when none. */
+  sources?: MessageSource[];
   handoff?: HandoffPayload;
 };
 
@@ -752,6 +923,28 @@ export async function probeLLMTools(body: {
   return res.json();
 }
 
+export type LLMListModelsResult = {
+  ok: boolean;
+  models: string[];
+  detail?: string;
+  error?: string;
+  http_status?: number;
+};
+
+export async function listLLMModels(body: {
+  base_url?: string;
+  api_key?: string;
+  connection_id?: string;
+}): Promise<LLMListModelsResult> {
+  const res = await fetch(`${API_BASE}/v1/llm/list-models`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
 export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   const modeLabel: Record<string, string> = {
     native: "原生 function calling",
@@ -762,6 +955,48 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   };
   const label = modeLabel[result.mode] || result.mode;
   const head = result.can_enable_tools ? `可用（${label}）` : `不可用（${label}）`;
+  const bits = [head, result.detail];
+  if (result.hint) bits.push(result.hint);
+  return bits.filter(Boolean).join(" ");
+}
+
+export type LLMPromptCacheProbeResult = {
+  ok: boolean;
+  supports_prompt_cache: boolean;
+  mode: "blocks" | "key" | "none" | "error" | string;
+  detail: string;
+  hint?: string;
+  error?: string;
+  http_status?: number;
+  heuristic_mode?: string;
+};
+
+export async function probeLLMPromptCache(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  connection_id?: string;
+}): Promise<LLMPromptCacheProbeResult> {
+  const res = await fetch(`${API_BASE}/v1/llm/probe-cache`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export function formatLLMPromptCacheProbe(result: LLMPromptCacheProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    blocks: "cache_control 内容块",
+    key: "prompt_cache_key",
+    none: "不支持",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.supports_prompt_cache
+    ? `Prompt cache：支持（${label}）`
+    : `Prompt cache：不支持（${label}）`;
   const bits = [head, result.detail];
   if (result.hint) bits.push(result.hint);
   return bits.filter(Boolean).join(" ");
@@ -907,10 +1142,18 @@ export async function uploadConversationAttachment(
   return res.json();
 }
 
-export async function cancelConversationRun(conversationId: string): Promise<void> {
+export async function cancelConversationRun(
+  conversationId: string,
+  opts?: { requestId?: string },
+): Promise<void> {
+  const rid = (opts?.requestId || "").trim();
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/cancel`, {
     method: "POST",
-    headers: authHeaders(),
+    headers: {
+      ...authHeaders(),
+      ...(rid ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(rid ? { body: JSON.stringify({ request_id: rid }) } : {}),
   });
   // Idempotent: 204 even when no run is active; ignore 404 for older servers.
   if (!res.ok && res.status !== 204 && res.status !== 404) {
@@ -934,20 +1177,78 @@ export async function steerConversationRun(
   return res.json();
 }
 
-/** Resume a waiting_approval interrupt. */
+/** HITL 审批三态 — shared by /approve and host-confirms. */
+export type ApprovalDecision = "allow_once" | "always_allow" | "deny";
+
+export type ApproveScope = {
+  tool?: string;
+  tool_group?: string;
+};
+
+export type ToolAllowlistEntry = {
+  id?: string;
+  tool?: string;
+  tool_group: string;
+  label?: string;
+  granted_at?: string;
+};
+
+function approveBoolFromDecision(decision: ApprovalDecision): boolean {
+  return decision !== "deny";
+}
+
+/**
+ * POST /v1/conversations/{id}/approve — resume tool approval interrupt (三态).
+ * Sends both `decision` (new) and `approve` bool (legacy servers).
+ */
+export async function approveConversation(
+  conversationId: string,
+  body: {
+    request_id: string;
+    decision: ApprovalDecision;
+    approve?: boolean;
+    reason?: string;
+    scope?: ApproveScope;
+  },
+): Promise<unknown> {
+  const decision = body.decision;
+  const approve = body.approve ?? approveBoolFromDecision(decision);
+  const payload: Record<string, unknown> = {
+    request_id: body.request_id,
+    decision,
+    approve,
+    reason: body.reason || "",
+  };
+  if (body.scope) payload.scope = body.scope;
+  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/approve`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return res.json();
+  return null;
+}
+
+/** Resume a waiting_approval interrupt (legacy signature + optional decision/scope). */
 export async function approveConversationRun(
   conversationId: string,
   requestId: string,
   approve: boolean,
   reason = "",
+  opts?: { decision?: ApprovalDecision; scope?: ApproveScope },
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/approve`, {
-    method: "POST",
-    headers: { ...authHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ request_id: requestId, approve, reason }),
+  const decision: ApprovalDecision =
+    opts?.decision ?? (approve ? "allow_once" : "deny");
+  const result = await approveConversation(conversationId, {
+    request_id: requestId,
+    decision,
+    approve,
+    reason,
+    scope: opts?.scope,
   });
-  if (!res.ok) throw new Error(await readError(res));
-  return res.json();
+  return (result ?? {}) as Record<string, unknown>;
 }
 
 async function readSSEStream(
@@ -1041,6 +1342,8 @@ export async function sendMessageStream(
   replyToId?: string,
   /** Sidebar thread post only (thread panel open). Mainline 「回复」 must omit this. */
   threadRootId?: string,
+  /** follow_up | steer | reject | replace — replace = interrupt supersede. */
+  whenBusy?: string,
 ): Promise<void> {
   const body: Record<string, unknown> = { content };
   if (attachments && attachments.length > 0) {
@@ -1060,6 +1363,9 @@ export async function sendMessageStream(
   }
   if (threadRootId) {
     body.thread_root_id = threadRootId;
+  }
+  if (whenBusy) {
+    body.when_busy = whenBusy;
   }
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/messages`, {
     method: "POST",
@@ -1235,6 +1541,33 @@ export async function addChannelMember(channelId: string, agentId: string): Prom
   return res.json();
 }
 
+/**
+ * Remove a member from a channel.
+ * DELETE /v1/channels/{id}/members/{agentId}
+ * 404 channel/member missing; 400 群里至少保留一位成员 / 不能移除主助理;
+ * success returns updated Channel (same shape as add).
+ */
+export async function removeChannelMember(channelId: string, agentId: string): Promise<Channel> {
+  const res = await fetch(
+    `${API_BASE}/v1/channels/${encodeURIComponent(channelId)}/members/${encodeURIComponent(agentId)}`,
+    {
+      method: "DELETE",
+      headers: authHeaders(),
+    },
+  );
+  if (!res.ok) throw new Error(await readError(res));
+  // 204 / empty body → stub without members so UI can patch locally then refresh.
+  if (res.status === 204) {
+    return { id: channelId, user_id: "", name: "", created_at: "" };
+  }
+  const text = await res.text();
+  if (!text.trim()) {
+    return { id: channelId, user_id: "", name: "", created_at: "" };
+  }
+  return JSON.parse(text) as Channel;
+}
+
+
 export async function postAgentBusMessage(body: {
   from_agent_id?: string;
   to_agent_id?: string;
@@ -1320,21 +1653,111 @@ export async function createHostConfirm(
   return (await res.json()) as Message;
 }
 
+/**
+ * Decide a host_confirm card. Sends `status` (legacy) plus `decision` / `approve`
+ * so backends that grow 三态 on host-confirms need no second client change.
+ */
 export async function decideHostConfirm(
   conversationId: string,
   messageId: string,
   status: "allowed" | "denied",
+  opts?: { decision?: ApprovalDecision; scope?: ApproveScope; reason?: string },
 ): Promise<Message> {
+  const decision: ApprovalDecision =
+    opts?.decision ?? (status === "allowed" ? "allow_once" : "deny");
+  const payload: Record<string, unknown> = {
+    status,
+    decision,
+    approve: approveBoolFromDecision(decision),
+  };
+  if (opts?.scope) payload.scope = opts.scope;
+  if (opts?.reason) payload.reason = opts.reason;
   const res = await fetch(`${API_BASE}/v1/conversations/${conversationId}/host-confirms/${messageId}`, {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ status }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await readError(res));
   return (await res.json()) as Message;
 }
 
-/** Content the client / server uses to mark an interrupted Bot turn (「（已停止）」 and variants). */
+const TOOL_ALLOWLIST_GET_CANDIDATES = [
+  "/v1/me/tool-allowlist",
+  "/v1/settings/tool-allowlist",
+  "/v1/user/tool-allowlist",
+];
+
+/**
+ * List Always-allow entries. Tries known paths; returns [] if none exist yet
+ * (backend may still be shipping). Callers may merge an optimistic local cache.
+ */
+export async function listToolAllowlist(): Promise<ToolAllowlistEntry[]> {
+  for (const path of TOOL_ALLOWLIST_GET_CANDIDATES) {
+    try {
+      const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
+      if (res.status === 404) continue;
+      if (!res.ok) continue;
+      const data = (await res.json()) as
+        | ToolAllowlistEntry[]
+        | { items?: ToolAllowlistEntry[]; entries?: ToolAllowlistEntry[] };
+      const items = Array.isArray(data)
+        ? data
+        : Array.isArray(data.items)
+          ? data.items
+          : Array.isArray(data.entries)
+            ? data.entries
+            : [];
+      return items.filter((e) => e && typeof (e.tool_group || e.tool) === "string");
+    } catch {
+      /* try next */
+    }
+  }
+  return [];
+}
+
+/**
+ * Revoke one Always-allow entry. Tries DELETE by id, then by tool_group query/body.
+ * Returns true if a server accepted the revoke; false if no endpoint yet.
+ */
+export async function revokeToolAllowlistEntry(entry: {
+  id?: string;
+  tool_group: string;
+}): Promise<boolean> {
+  const group = encodeURIComponent(entry.tool_group);
+  const attempts: Array<() => Promise<Response>> = [];
+  if (entry.id) {
+    const id = encodeURIComponent(entry.id);
+    for (const base of ["/v1/me/tool-allowlist", "/v1/settings/tool-allowlist", "/v1/user/tool-allowlist"]) {
+      attempts.push(() =>
+        fetch(`${API_BASE}${base}/${id}`, { method: "DELETE", headers: authHeaders() }),
+      );
+    }
+  }
+  for (const base of ["/v1/me/tool-allowlist", "/v1/settings/tool-allowlist", "/v1/user/tool-allowlist"]) {
+    attempts.push(() =>
+      fetch(`${API_BASE}${base}?tool_group=${group}`, { method: "DELETE", headers: authHeaders() }),
+    );
+    attempts.push(() =>
+      fetch(`${API_BASE}${base}`, {
+        method: "DELETE",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ tool_group: entry.tool_group }),
+      }),
+    );
+  }
+  for (const run of attempts) {
+    try {
+      const res = await run();
+      if (res.status === 404) continue;
+      if (res.ok || res.status === 204) return true;
+    } catch {
+      /* try next */
+    }
+  }
+  return false;
+}
+
+/** Legacy stop-marker text; no longer persisted or stamped. Kept for history filtering. */
 export const STOP_MARKER_TEXT = "（已停止）";
 export function isStopMarkerContent(content: string | undefined | null): boolean {
   const t = (content ?? "").trim();
@@ -1346,13 +1769,13 @@ type MergeableMessage = Message & { streaming?: boolean; stopped?: boolean };
 /**
  * Fold a server message into the local list.
  * - Same id updates in place.
- * - A server stop marker (「已停止」) adopts the earliest still-local sealed stop bubble
- *   (the one stopCurrentRun stamped), never the next turn's empty streaming placeholder.
+ * - Legacy server stop markers (「已停止」) are dropped (never shown).
  * - Otherwise a local bubble with the same / prefix text takes the server id.
  * - Empty *streaming* assistant placeholders never fuzzy-match incoming messages: they belong to
  *   the run that is streaming into them, and only that run's `message_saved` (stampSavedMessage)
- *   gives them a server id. Letting them absorb arbitrary messages made an interrupted turn's
- *   stop marker land on the next turn's placeholder → two 「已停止」 in the UI, one in the DB.
+ *   gives them a server id.
+ * - New rows insert before trailing streaming assistants and by created_at among sealed rows so
+ *   mid-turn projected acks/stage updates stay before the final reply (not appended after it).
  */
 export function mergeIncomingMessage<T extends MergeableMessage>(
   prev: T[],
@@ -1362,33 +1785,61 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
   if (prev.some((m) => m.id === msg.id)) {
     return prev.map((m) => (m.id === msg.id ? ({ ...m, ...msg, streaming: false } as T) : m));
   }
-  // Insert point that keeps trailing streaming assistant placeholders last.
+  // Keep trailing streaming assistant placeholders last (tokens / stampSavedMessage own them).
   const beforeTrailingStreaming = () => {
     let at = prev.length;
     while (at > 0 && prev[at - 1].streaming && prev[at - 1].role === "assistant") at -= 1;
     return at;
   };
+  // Mid-turn journal projections (assistant_partial) arrive over WS while the final
+  // reply still streams into a trailing placeholder. Appending would put early ack /
+  // stage updates AFTER the final once that placeholder is stamped. Insert before
+  // trailing streams, and among sealed rows by created_at so late WS deliveries
+  // still keep chronological order (early ack → stage → final).
+  const insertKeepingStreamLast = (row: T): T[] => {
+    const streamAt = beforeTrailingStreaming();
+    const sealed = prev.slice(0, streamAt);
+    const trailing = prev.slice(streamAt);
+    const incomingAt = msg.created_at ? Date.parse(msg.created_at) : Number.NaN;
+    let insertAt = sealed.length;
+    if (!Number.isNaN(incomingAt)) {
+      for (let i = 0; i < sealed.length; i++) {
+        const raw = sealed[i].created_at;
+        const t = raw ? Date.parse(String(raw)) : Number.NaN;
+        if (!Number.isNaN(t) && t > incomingAt) {
+          insertAt = i;
+          break;
+        }
+      }
+    }
+    const next = sealed.slice();
+    next.splice(insertAt, 0, row);
+    return trailing.length ? next.concat(trailing) : next;
+  };
   if (msg.role === "host_confirm") {
-    const at = beforeTrailingStreaming();
-    const next = prev.slice();
-    next.splice(at, 0, { ...msg, streaming: false } as T);
-    return next;
+    return insertKeepingStreamLast({ ...msg, streaming: false } as T);
   }
   const adopt = (i: number) =>
     prev.map((item, j) =>
       j === i ? ({ ...item, ...msg, streaming: false } as T) : item,
     );
-  const incomingStop = msg.role === "assistant" && isStopMarkerContent(msg.content);
-  if (incomingStop) {
-    // Earliest first: with several interrupted turns, server stop rows arrive in order.
-    const i = prev.findIndex(
-      (m) =>
-        m.role === "assistant" &&
-        !m.streaming &&
-        m.id.startsWith("local-") &&
-        (m.stopped || isStopMarkerContent(m.content)),
-    );
-    if (i >= 0) return adopt(i);
+  // Legacy 「（已停止）」 rows: drop rather than adopt or insert.
+  if (msg.role === "assistant" && isStopMarkerContent(msg.content)) {
+    return prev;
+  }
+  // Parallel group: prefer the in-flight bubble for the same agent_id (WS projection
+  // must not sit beside the streaming tokens as a duplicate).
+  const incomingAgent = (msg.agent_id || "").trim();
+  if (msg.role === "assistant" && incomingAgent) {
+    for (let i = prev.length - 1; i >= 0; i--) {
+      const m = prev[i];
+      if (m.role !== "assistant") continue;
+      const local = Boolean(m.streaming) || m.id.startsWith("local-");
+      if (!local) continue;
+      if ((m.agent_id || "").trim() === incomingAgent) {
+        return adopt(i);
+      }
+    }
   }
   for (let i = prev.length - 1; i >= 0; i--) {
     const m = prev[i];
@@ -1401,17 +1852,15 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
       m.content === msg.content ||
       (m.content === "" && !m.streaming) ||
       (m.content !== "" && msg.content.startsWith(m.content));
-    if (!same) break;
+    if (!same) {
+      // Another agent's in-flight bubble — keep scanning (do not stop the walk).
+      const localAgent = (m.agent_id || "").trim();
+      if (incomingAgent && localAgent && localAgent !== incomingAgent) continue;
+      break;
+    }
     return adopt(i);
   }
-  if (incomingStop) {
-    // No local stop bubble (e.g. stopped from another tab): keep it above the live placeholder.
-    const at = beforeTrailingStreaming();
-    const next = prev.slice();
-    next.splice(at, 0, { ...msg, streaming: false } as T);
-    return next;
-  }
-  return [...prev, { ...msg, streaming: false } as T];
+  return insertKeepingStreamLast({ ...msg, streaming: false } as T);
 }
 
 export type AgentBusWSEvent = {

@@ -9,6 +9,9 @@ func TestNormalizeDecisionProvider(t *testing.T) {
 	if got := NormalizeDecisionProvider("LAYA"); got != "laya" {
 		t.Fatalf("laya: %s", got)
 	}
+	if got := NormalizeDecisionProvider("Unsloth"); got != "unsloth" {
+		t.Fatalf("unsloth: %s", got)
+	}
 	if got := NormalizeDecisionProvider(""); got != "off" {
 		t.Fatalf("empty: %s", got)
 	}
@@ -37,5 +40,13 @@ func TestApplyDecisionDefaults(t *testing.T) {
 	_, base, _ = ApplyDecisionDefaults("laya", "http://127.0.0.1:8081/", "")
 	if base != "http://127.0.0.1:8081" {
 		t.Fatalf("laya http base: %s", base)
+	}
+	p, base, model = ApplyDecisionDefaults("unsloth", "", "")
+	if p != "unsloth" || base != "http://localhost:8888" || model != "laya" {
+		t.Fatalf("unsloth defaults: %s %s %s", p, base, model)
+	}
+	p, base, model = ApplyDecisionDefaults("unsloth", "http://127.0.0.1:9999/", "jev-latest")
+	if base != "http://127.0.0.1:9999" || model != "jev-latest" {
+		t.Fatalf("unsloth custom: %s %s", base, model)
 	}
 }

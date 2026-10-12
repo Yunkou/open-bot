@@ -2,6 +2,19 @@ package httpserver
 
 import "testing"
 
+func TestShouldResumeStaleHarness(t *testing.T) {
+	t.Parallel()
+	if !shouldResumeStaleHarness(false, false) {
+		t.Fatal("stale pause should resume on this request")
+	}
+	if shouldResumeStaleHarness(true, false) {
+		t.Fatal("approval interrupt must stay queued")
+	}
+	if shouldResumeStaleHarness(false, true) {
+		t.Fatal("live executor must stay queued")
+	}
+}
+
 func TestShouldSteerBusyHarness(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -24,5 +37,23 @@ func TestShouldSteerBusyHarness(t *testing.T) {
 				t.Fatalf("shouldSteerBusyHarness(%q,%q)=%v want %v", tc.active, tc.target, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWantBusyReplace(t *testing.T) {
+	if wantBusyReplace(false, "") {
+		t.Fatal("idle must not replace")
+	}
+	if !wantBusyReplace(true, "") {
+		t.Fatal("register replace must supersede")
+	}
+	if !wantBusyReplace(false, "replace") {
+		t.Fatal("when_busy=replace must supersede")
+	}
+	if !wantBusyReplace(false, "Replace") {
+		t.Fatal("when_busy case-insensitive")
+	}
+	if wantBusyReplace(false, "follow_up") {
+		t.Fatal("follow_up must not supersede")
 	}
 }

@@ -217,6 +217,25 @@ export type LLMToolsProbeResult = {
   http_status?: number;
 };
 
+export type LLMListModelsResult = {
+  ok: boolean;
+  models: string[];
+  detail?: string;
+  error?: string;
+  http_status?: number;
+};
+
+export type LLMPromptCacheProbeResult = {
+  ok: boolean;
+  supports_prompt_cache: boolean;
+  mode: "blocks" | "key" | "none" | "error" | string;
+  detail: string;
+  hint?: string;
+  error?: string;
+  http_status?: number;
+  heuristic_mode?: string;
+};
+
 export type AttachmentMeta = {
   id: string;
   name: string;

@@ -26,6 +26,8 @@ import type {
   InboundHook,
   LLMConnection,
   LLMInput,
+  LLMListModelsResult,
+  LLMPromptCacheProbeResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,
@@ -190,10 +192,22 @@ export async function getConversationRunStatus(
   return { active: Boolean(data.active) };
 }
 
-export async function cancelConversationRun(conversationId: string): Promise<void> {
+export async function cancelConversationRun(
+  conversationId: string,
+  opts?: { requestId?: string },
+): Promise<void> {
   // 幂等：无活跃 run 时后端也返回 204，旧版本服务器可能 404
+  const rid = (opts?.requestId || "").trim();
   try {
-    await request(`/v1/conversations/${conversationId}/cancel`, { method: "POST" });
+    await request(`/v1/conversations/${conversationId}/cancel`, {
+      method: "POST",
+      ...(rid
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ request_id: rid }),
+          }
+        : {}),
+    });
   } catch (err) {
     if (err instanceof ApiError && (err.status === 204 || err.status === 404)) return;
     throw err;
@@ -805,6 +819,18 @@ export async function probeLLMTools(body: {
   });
 }
 
+export async function listLLMModels(body: {
+  base_url?: string;
+  api_key?: string;
+  connection_id?: string;
+}): Promise<LLMListModelsResult> {
+  return request("/v1/llm/list-models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   const modeLabel: Record<string, string> = {
     native: "原生 function calling",
@@ -815,6 +841,33 @@ export function formatLLMToolsProbe(result: LLMToolsProbeResult): string {
   };
   const label = modeLabel[result.mode] || result.mode;
   const head = result.can_enable_tools ? `可用（${label}）` : `不可用（${label}）`;
+  return [head, result.detail, result.hint].filter(Boolean).join(" ");
+}
+
+export async function probeLLMPromptCache(body: {
+  base_url?: string;
+  api_key?: string;
+  model?: string;
+  connection_id?: string;
+}): Promise<LLMPromptCacheProbeResult> {
+  return request("/v1/llm/probe-cache", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function formatLLMPromptCacheProbe(result: LLMPromptCacheProbeResult): string {
+  const modeLabel: Record<string, string> = {
+    blocks: "cache_control 内容块",
+    key: "prompt_cache_key",
+    none: "不支持",
+    error: "检测失败",
+  };
+  const label = modeLabel[result.mode] || result.mode;
+  const head = result.supports_prompt_cache
+    ? `Prompt cache：支持（${label}）`
+    : `Prompt cache：不支持（${label}）`;
   return [head, result.detail, result.hint].filter(Boolean).join(" ");
 }
 
@@ -1101,6 +1154,8 @@ export type {
   CreateFeedbackInput,
   HostConfirmPayload,
   InboundHook,
+  LLMListModelsResult,
+  LLMPromptCacheProbeResult,
   LLMToolsProbeResult,
   LessonPatch,
   LessonStatus,

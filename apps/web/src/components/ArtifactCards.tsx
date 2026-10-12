@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { downloadSandboxFile, readSandboxFile } from "../api";
 import { HtmlPreviewModal, friendlyFileError, friendlyOpenError, looksLikeHtml, normalizeWorkspacePath, previewTitleFromPath } from "./HtmlPreviewModal";
 import { MarkdownMessage } from "./MarkdownMessage";
+import type { MessageSource } from "../api";
+import { prepareCitedMarkdown } from "../lib/citationMarkers";
 
 /** Friendly label for artifact cards (hide internal /workspace prefix). */
 export function artifactDisplayName(path: string): string {
@@ -179,15 +181,24 @@ export function ResultOrientedMessage({
   content,
   streaming,
   agentId,
+  messageId,
+  sources,
 }: {
   content: string;
   streaming?: boolean;
   agentId?: string;
+  messageId?: string;
+  sources?: MessageSource[] | null;
 }) {
   const { display, artifacts, collapsedJson } = useMemo(() => splitResultOriented(content), [content]);
+  const md = useMemo(() => {
+    const base = display.trim();
+    if (streaming || !sources?.length || !messageId) return base;
+    return prepareCitedMarkdown(base, messageId, sources);
+  }, [display, streaming, messageId, sources]);
   return (
     <>
-      <MarkdownMessage content={display.trim()} streaming={streaming} agentId={agentId} />
+      <MarkdownMessage content={md} streaming={streaming} agentId={agentId} />
       {!streaming ? (
         <ArtifactCards artifacts={artifacts} collapsedJson={collapsedJson} agentId={agentId} />
       ) : null}

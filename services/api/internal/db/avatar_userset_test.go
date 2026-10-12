@@ -54,8 +54,18 @@ func TestAvatarUserSetAndReadOnlyListAndBackfill(t *testing.T) {
 	if !explicit.AvatarUserSet || !userSetOf(explicit.ID) {
 		t.Fatal("explicit create avatar: user_set must be true")
 	}
-	if _, err := d.CreateAgentWithAvatar(userID, "legacy-in", "", "", "circle", ""); err == nil {
-		t.Fatal("legacy v1 shape id must be rejected on create (whitelist is v2 only)")
+	if explicit.AvatarShape != "square" {
+		t.Fatalf("organic petal must normalize to square on write, got %q", explicit.AvatarShape)
+	}
+	circIn, err := d.CreateAgentWithAvatar(userID, "legacy-in", "", "", "circle", "#e85d4c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if circIn.AvatarShape != "circle" {
+		t.Fatalf("library circle must be accepted, got %q", circIn.AvatarShape)
+	}
+	if _, err := d.CreateAgentWithAvatar(userID, "bad-shape", "", "", "star", ""); err == nil {
+		t.Fatal("unknown shape id must be rejected on create")
 	}
 	clone, err := d.CloneAgent(userID, explicit.ID, CloneAgentOptions{})
 	if err != nil {
@@ -78,13 +88,16 @@ func TestAvatarUserSetAndReadOnlyListAndBackfill(t *testing.T) {
 	if !patched.AvatarUserSet || !userSetOf(auto.ID) {
 		t.Fatal("PATCH avatar: user_set must be true")
 	}
+	if patched.AvatarShape != "circle" {
+		t.Fatalf("organic cloud must normalize to circle on patch, got %q", patched.AvatarShape)
+	}
 
 	// Legacy empty row + colliding user pick (same pair as explicit, user_set=true).
 	emptyID, dupID := uuid.NewString(), uuid.NewString()
 	if _, err := d.SQL.Exec(
 		`INSERT INTO agents (id, user_id, name, description, system_prompt, computer_mode, avatar_shape, avatar_color, avatar_user_set, created_at, updated_at)
 		 VALUES ($1,$2,'empty','','','team','','',FALSE,NOW(),NOW()),
-		        ($3,$2,'dup','','','team','petal','#118ab2',TRUE,NOW(),NOW())`,
+		        ($3,$2,'dup','','','team','petal','#118ab2',TRUE,NOW(),NOW())`, // organic; migrate → square
 		emptyID, userID, dupID,
 	); err != nil {
 		t.Fatal(err)
@@ -138,8 +151,8 @@ func TestAvatarUserSetAndReadOnlyListAndBackfill(t *testing.T) {
 				t.Fatal("backfilled avatar must stay user_set=false")
 			}
 		case dupID:
-			if !us || sh != "petal" || co != "#118ab2" {
-				t.Fatalf("user-set colliding avatar must be kept: %s|%s us=%v", sh, co, us)
+			if !us || sh != "square" || co != "#118ab2" {
+				t.Fatalf("user-set colliding avatar must be kept (petal→square): %s|%s us=%v", sh, co, us)
 			}
 		case clone.Agent.ID, admin.ID:
 			if us {
@@ -150,7 +163,7 @@ func TestAvatarUserSetAndReadOnlyListAndBackfill(t *testing.T) {
 	if len(pairs[emptyPair]) != 1 {
 		t.Fatalf("backfill picked a taken pair %s: %v", emptyPair, pairs[emptyPair])
 	}
-	if len(pairs["petal|#118ab2"]) != 2 {
-		t.Fatalf("expected kept collision on petal|#118ab2, got %v", pairs["petal|#118ab2"])
+	if len(pairs["square|#118ab2"]) != 2 {
+		t.Fatalf("expected kept collision on square|#118ab2 (petal→square), got %v", pairs["square|#118ab2"])
 	}
 }

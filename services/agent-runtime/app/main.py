@@ -16,11 +16,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import compact as compact_mod
+from .model_compat import profile_for, resolve_prompt_cache_mode
 from .llm import (
     LLMOverride,
     TOOL_DEFS,
     assemble_llm_messages,
     build_system_prompt,
+    build_system_prompt_parts,
     chat_text,
     normalize_messages,
     openai_config,
@@ -31,6 +33,7 @@ from .llm import (
     strip_think,
     tools_enabled,
 )
+from .harness.long_task import apply_after_interrupt_hint
 from .tool_markup import strip_tool_markup
 from .memory import (
     MemoryStore,
@@ -43,6 +46,7 @@ from .memory import (
 from . import mem0_store
 from . import thread_context
 from . import dream
+from .citation_sources import filter_sources_cited
 from . import mcp_client
 from . import builtin_tools
 from .decision import DecisionSettings, bind_decision, build_client, reset_decision
@@ -115,6 +119,9 @@ class RunRequest(BaseModel):
     background: bool = False
     owner_task: str | None = None
     owner_thread_id: str | None = None
+    # True when this turn supersedes an in-flight run (interrupt-and-send).
+    # Soft system hint: one short natural next-step/plan for the NEW ask, then work.
+    after_interrupt: bool = False
 
 
 class MemoryCreate(BaseModel):
@@ -259,20 +266,73 @@ class DecisionTestRequest(DecisionSettings):
     questions: dict[str, Any] | None = None
 
 
-@app.post("/v1/decision/test")
-def decision_test(body: DecisionTestRequest) -> dict:
-    """Probe the org's decision provider without touching the chat loop."""
+def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
+    """Shared path for admin probe and group Auto-pick (SystemOne factory).
+
+    Emits a Langfuse generation ``open-bot.decision`` when tracing is enabled
+    (same soft-fail helpers as LLM). Covers admin 检测模型 (/v1/decision/test)
+    and auto_pick=decision (/v1/decision/decide).
+    """
     client = build_client(body)
     if not client.enabled:
         return {"enabled": False, "provider": "off", "answers": {}}
-    questions = body.questions or {
-        "ok": {"type": "noul", "instructions": "Is the state non-empty?"}
+    questions = body.questions
+    if not questions:
+        if default_probe:
+            questions = {"ok": {"type": "noul", "instructions": "Is the state non-empty?"}}
+        else:
+            raise HTTPException(status_code=400, detail="questions 不能为空")
+    provider = str(getattr(client, "provider", "") or body.provider or "")
+    model = str(getattr(client, "model", "") or body.model or "") or None
+    meta = {
+        "provider": provider,
+        "endpoint": "test" if default_probe else "decide",
+        "probe": bool(default_probe),
     }
-    try:
-        result = client.decide(body.state, questions)
-    except DecisionError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return result.to_dict()
+    with lf.observation_decision(
+        model=model,
+        provider=provider,
+        state=body.state,
+        questions=questions,
+        metadata=meta,
+    ) as obs:
+        try:
+            result = client.decide(body.state, questions)
+        except DecisionError as exc:
+            lf.update_obs(
+                obs,
+                level="ERROR",
+                status_message=str(exc)[:500],
+                output=lf.truncate({"error": str(exc)[:500]}),
+            )
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        out = result.to_dict()
+        usage = lf.parse_usage_details(getattr(result, "usage", None))
+        update: dict[str, Any] = {
+            "output": lf.truncate(out.get("answers") or out),
+            "model": result.model or model,
+            "metadata": {
+                **meta,
+                "decision_model": result.model or model or "",
+            },
+        }
+        if usage:
+            update["usage_details"] = usage
+        lf.update_obs(obs, **update)
+    lf.flush()
+    return out
+
+
+@app.post("/v1/decision/test")
+def decision_test(body: DecisionTestRequest) -> dict:
+    """Probe the org's decision provider without touching the chat loop."""
+    return _run_decision(body, default_probe=True)
+
+
+@app.post("/v1/decision/decide")
+def decision_decide(body: DecisionTestRequest) -> dict:
+    """Run one SystemOne decision (Jev / Laya / Unsloth) for callers like group Auto-pick."""
+    return _run_decision(body, default_probe=False)
 
 @app.get("/v1/mcp/example")
 async def mcp_example() -> dict:
@@ -617,16 +677,8 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 recall_payload["langfuse_trace_id"] = langfuse_trace_id
             memory_snippets = [r["snippet"] for r in recall_payload["items"]]
             active_skills = skill_reg.filter_meta(enabled)
-            system = build_system_prompt(
-                agent_id=body.agent_id,
-                skills_catalog=skill_reg.catalog_for_prompt(enabled),
-                memory_snippets=memory_snippets,
-                tools_enabled=tools_on,
-                available_tool_names=available_tool_names,
-                client=client_ctx,
-                machines=host_machines,
-            )
             injected_lessons: list[dict[str, Any]] = []
+            lesson_block = ""
             try:
                 from . import lessons as lessons_mod
 
@@ -634,12 +686,31 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                     str(body.user_id or ""),
                     str(body.agent_id or "open-bot"),
                 )
-                if lesson_block:
-                    system = system + "\n\n" + lesson_block
             except Exception:  # noqa: BLE001
                 injected_lessons = []
-            if body.system_prompt and body.system_prompt.strip():
-                system = body.system_prompt.strip() + "\n\n" + system
+                lesson_block = ""
+            persona_override = (
+                body.system_prompt.strip()
+                if body.system_prompt and body.system_prompt.strip()
+                else ""
+            )
+            static_system, dynamic_system = build_system_prompt_parts(
+                agent_id=body.agent_id,
+                skills_catalog=skill_reg.catalog_for_prompt(enabled),
+                memory_snippets=memory_snippets,
+                tools_enabled=tools_on,
+                available_tool_names=available_tool_names,
+                client=client_ctx,
+                machines=host_machines,
+                persona_override=persona_override or None,
+                lessons_block=lesson_block or None,
+            )
+            system = "\n\n".join(p for p in (static_system, dynamic_system) if p)
+            system, dynamic_system = apply_after_interrupt_hint(
+                system,
+                dynamic_system,
+                after_interrupt=bool(getattr(body, "after_interrupt", False)),
+            )
 
             dialog = [m for m in history if m["role"] in ("user", "assistant", "summary")]
 
@@ -653,7 +724,18 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 context_window=llm_cw,
                 model=llm_model,
             )
-            llm_messages: list[dict[str, Any]] = assemble_llm_messages(system, compacted)
+            cache_mode = resolve_prompt_cache_mode(
+                str(llm_model or ""),
+                str(base or ""),
+                profile=profile_for(str(llm_model or ""), str(base or "")),
+            )
+            llm_messages: list[dict[str, Any]] = assemble_llm_messages(
+                system,
+                compacted,
+                static_system=static_system,
+                dynamic_system=dynamic_system,
+                prompt_cache_mode=cache_mode,
+            )
             meta = {
                 "conversation_id": body.conversation_id,
                 "agent_id": body.agent_id,
@@ -812,7 +894,7 @@ async def openai_path(
     mcp_extra_tools: list[dict[str, Any]] | None = None,
     root_obs: Any | None = None,
     request: Request | None = None,
-    max_tool_rounds: int = 12,
+    max_tool_rounds: int = 24,
     client: ClientContext | None = None,
     preferred_machine_id: str = "",
     mem_store: MemoryStore | None = None,
@@ -1377,8 +1459,13 @@ async def openai_path(
                     else "",
                 },
             ):
+                # Desktop/Tauri SSE drop (app background, AbortController on the
+                # initiating POST) must not cancel durable work. Go already keeps
+                # runCtx alive; draining without CancelledError lets journal finish
+                # and clients rejoin via GET .../events. Explicit Stop still aborts
+                # the Go→runtime HTTP request (ASGI cancel).
                 if request is not None and await request.is_disconnected():
-                    raise asyncio.CancelledError()
+                    continue
                 yield chunk
         finally:
             reset_tool_handler(token)
@@ -1414,6 +1501,7 @@ async def openai_path(
             input_messages=llm_messages,
             metadata={"tools_enabled": tools_on},
         ) as gen_obs:
+            sources_acc: list[dict[str, str]] = []
             loop_task = asyncio.create_task(
                 run_tool_loop(
                     llm_messages,
@@ -1423,22 +1511,26 @@ async def openai_path(
                     override=override,
                     extra_tools=mcp_extra_tools or None,
                     on_status=on_status,
+                    sources_out=sources_acc,
                 )
             )
             try:
+                client_gone = False
                 while not loop_task.done():
                     if request is not None and await request.is_disconnected():
-                        loop_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await loop_task
-                        raise asyncio.CancelledError()
+                        # Match Go policy: client hangup ≠ cancel. Keep the tool
+                        # loop alive; only stop writing SSE frames.
+                        client_gone = True
                     try:
                         payload = await asyncio.wait_for(status_q.get(), timeout=0.08)
-                        yield sse("status", payload)
+                        if not client_gone:
+                            yield sse("status", payload)
                     except asyncio.TimeoutError:
                         await asyncio.sleep(0)
                 while not status_q.empty():
-                    yield sse("status", status_q.get_nowait())
+                    payload = status_q.get_nowait()
+                    if not client_gone:
+                        yield sse("status", payload)
                 final, used_tools, usage_details = await loop_task
             except asyncio.CancelledError:
                 if not loop_task.done():
@@ -1463,8 +1555,7 @@ async def openai_path(
                 async for text in stream_chat_tokens(
                     llm_messages, api_key=api_key, override=override
                 ):
-                    if request is not None and await request.is_disconnected():
-                        raise asyncio.CancelledError()
+                    # Client disconnect does not cancel; tokens still accumulate for persist.
                     assistant_parts.append(text)
                 streamed = "".join(assistant_parts)
                 streamed = strip_think(strip_tool_markup(streamed))
@@ -1525,11 +1616,19 @@ async def openai_path(
                 mem0_store.add_conversation_bg(str(user_id).strip(), turn, metadata=meta)
             if user_id and assistant_reply.strip():
                 dream.maybe_consolidate_user_bg(str(user_id).strip())
+            cited_sources = filter_sources_cited(
+                sources_acc,
+                assistant_reply,
+            )
+            if cited_sources:
+                yield sse("meta", {"sources": cited_sources})
             done_payload: dict[str, Any] = {
                 "ok": True,
                 "mode": "openai",
                 "tools_used": used_tools,
             }
+            if cited_sources:
+                done_payload["sources"] = cited_sources
             if usage_details:
                 done_payload["usage"] = usage_details
             yield sse("done", done_payload)

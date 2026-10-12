@@ -85,12 +85,25 @@ func (s *Server) handleInternalHarnessEntry(w http.ResponseWriter, r *http.Reque
 		if strings.TrimSpace(content) != "" && strings.TrimSpace(body.ConversationID) != "" {
 			// Journal entry is kept; do not project PASS/silence into the chat timeline.
 			if !(strings.EqualFold(role, "assistant") && isGroupPassReply(content)) {
+				// Mid-turn assistant_partial is a progress bubble, not the turn's final reply.
+				// Leave request_id empty so saveAssistantThreaded / FindAssistantByRequestID
+				// dedupe only the final assistant projection for this run.
+				reqID := body.RequestID
+				if strings.EqualFold(strings.TrimSpace(body.Kind), "assistant_partial") {
+					reqID = ""
+				}
 				msgID, err = s.db.ProjectHarnessEntryToMessage(
-					entry.ID, body.ConversationID, role, content, body.AgentID, body.RequestID,
+					entry.ID, body.ConversationID, role, content, body.AgentID, reqID,
 				)
 				if err != nil {
 					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 					return
+				}
+				// Live-notify so early projected acks (assistant_partial) appear soon.
+				if msgID != "" && strings.TrimSpace(body.UserID) != "" {
+					if msg, gerr := s.db.GetMessage(body.UserID, body.ConversationID, msgID); gerr == nil && msg != nil {
+						s.publishConversationMessage(body.UserID, msg)
+					}
 				}
 			}
 		}

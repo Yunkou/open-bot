@@ -190,3 +190,91 @@ func TestActiveRunsParallelAgentCatchup(t *testing.T) {
 		t.Fatalf("expected per-agent tokens, got %#v", tokens)
 	}
 }
+
+
+func TestActiveRunsCancelReason(t *testing.T) {
+	ar := newActiveRuns()
+
+	ctxStop, cancelStop := context.WithCancel(context.Background())
+	hStop := newRunHandle(cancelStop)
+	ar.register("c-stop", hStop)
+	go func() {
+		<-ctxStop.Done()
+		hStop.finish()
+	}()
+	if !ar.cancel("c-stop") {
+		t.Fatal("expected cancel")
+	}
+	if hStop.superseded() {
+		t.Fatal("explicit Stop must not be superseded")
+	}
+	if got := hStop.cancelReason; got != cancelReasonStop {
+		t.Fatalf("stop reason=%q", got)
+	}
+
+	ctxPrev, cancelPrev := context.WithCancel(context.Background())
+	hPrev := newRunHandle(cancelPrev)
+	ar.register("c-rep", hPrev)
+	go func() {
+		<-ctxPrev.Done()
+		hPrev.finish()
+	}()
+	ctxNext, cancelNext := context.WithCancel(context.Background())
+	defer cancelNext()
+	hNext := newRunHandle(cancelNext)
+	ar.register("c-rep", hNext) // replaces prev
+	if ctxNext.Err() != nil {
+		t.Fatal("new run ctx must stay active after register")
+	}
+	if !hPrev.superseded() {
+		t.Fatal("register replace must mark superseded")
+	}
+	if got := hPrev.cancelReason; got != cancelReasonReplace {
+		t.Fatalf("replace reason=%q", got)
+	}
+	if hNext.superseded() {
+		t.Fatal("new handle must not be superseded")
+	}
+}
+
+func TestShouldPersistStopMarker(t *testing.T) {
+	// Never persist 「（已停止）」 — Stop and supersede alike.
+	if shouldPersistStopMarker(nil) {
+		t.Fatal("nil handle: must not persist")
+	}
+	h := newRunHandle(func() {})
+	if shouldPersistStopMarker(h) {
+		t.Fatal("unset reason: must not persist")
+	}
+	h.markCancelReason(cancelReasonStop)
+	if shouldPersistStopMarker(h) {
+		t.Fatal("stop: must not persist")
+	}
+	h2 := newRunHandle(func() {})
+	h2.markCancelReason(cancelReasonReplace)
+	if shouldPersistStopMarker(h2) {
+		t.Fatal("replace/supersede: must not persist")
+	}
+}
+
+func TestActiveRunsRegisterReturnsReplaced(t *testing.T) {
+	ar := newActiveRuns()
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	h1 := newRunHandle(cancel1)
+	if ar.register("c1", h1) {
+		t.Fatal("first register must not report replaced")
+	}
+	go func() {
+		<-ctx1.Done()
+		h1.finish()
+	}()
+	_, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	h2 := newRunHandle(cancel2)
+	if !ar.register("c1", h2) {
+		t.Fatal("second register must report replaced")
+	}
+	if !h1.superseded() {
+		t.Fatal("prev must be superseded")
+	}
+}

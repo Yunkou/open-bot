@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import json
 import os
@@ -23,10 +24,14 @@ from .client_env import (
 )
 from .model_compat import (
     adapt_chat_payload,
+    is_prompt_cache_reject,
+    mark_prompt_cache_unsupported,
     postprocess_text,
     profile_for,
+    resolve_prompt_cache_mode,
     strip_think_tags,
 )
+from .citation_sources import extract_from_tool, merge_sources
 from .tool_markup import (
     content_has_tool_markup,
     parse_tool_markup,
@@ -176,12 +181,12 @@ _TOOL_CONTEXT_HEAD = 7_000
 _TOOL_CONTEXT_TAIL = 3_500
 _CONTEXT_OVERFLOW_RETRIES = 2
 
-# Interactive turns need room for a real lookup (list_machines → query → follow-ups).
-# Background tasks may still request a higher clamped cap.
-DEFAULT_TOOL_ROUNDS = 12
-MAX_TOOL_ROUNDS = 24
+# Interactive turns need room for multi-step host lookups (list → query → follow-ups).
+# Org admin may raise further via llm_max_tool_rounds (clamped by MAX_TOOL_ROUNDS).
+DEFAULT_TOOL_ROUNDS = 24
+MAX_TOOL_ROUNDS = 48
 
-DEFER_ON_EXHAUST_REPLY = "还在做，做好会发在这里。"
+DEFER_ON_EXHAUST_REPLY = "还在做，好了发这里。"
 
 
 def truncate_tool_result_for_context(
@@ -202,6 +207,55 @@ def truncate_tool_result_for_context(
     if tail_n <= 0:
         return raw[:head_n] + note.rstrip() + "\n"
     return raw[:head_n] + note + raw[-tail_n:]
+
+
+def fold_tool_results_in_messages(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int = _TOOL_CONTEXT_LIMIT,
+    head: int = _TOOL_CONTEXT_HEAD,
+    tail: int = _TOOL_CONTEXT_TAIL,
+    keep_recent_full: int = 2,
+) -> list[dict[str, Any]]:
+    """Truncate oversized tool observations before the next LLM round.
+
+    Newest ``keep_recent_full`` tool messages use the normal limit; older ones
+    use a tighter cap so multi-tool threads stay prefix-friendly.
+    Idempotent when content is already under the limit.
+    """
+    if not messages:
+        return messages
+    tool_idxs = [i for i, m in enumerate(messages) if str(m.get("role") or "") == "tool"]
+    if not tool_idxs:
+        return messages
+    recent = set(tool_idxs[-max(0, keep_recent_full) :]) if keep_recent_full else set()
+    tight_limit = max(2_000, limit // 3)
+    tight_head = max(1_000, head // 3)
+    tight_tail = max(500, tail // 3)
+    out: list[dict[str, Any]] = []
+    for i, m in enumerate(messages):
+        if i not in tool_idxs:
+            out.append(m)
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            out.append(m)
+            continue
+        if i in recent:
+            folded = truncate_tool_result_for_context(
+                content, limit=limit, head=head, tail=tail
+            )
+        else:
+            folded = truncate_tool_result_for_context(
+                content, limit=tight_limit, head=tight_head, tail=tight_tail
+            )
+        if folded == content:
+            out.append(m)
+        else:
+            nm = dict(m)
+            nm["content"] = folded
+            out.append(nm)
+    return out
 
 
 def is_context_length_error(message: str) -> bool:
@@ -479,7 +533,8 @@ SYSTEM_PERSONA_BASE = (
     "工具失败时根据错误换一条再调，不要重复同一条命令；不要编造工具结果或文件名。"
     "需要操作电脑、SSH 或查本机文件时，先 load_skill 加载对应技能，再按说明执行。"
     "结果若在等待则尚未执行；denied 即用户拒绝——不要声称已跑完。"
-    "给用户的回复用中文，短，只讲结果；不要提 sandbox/Docker/容器或内部路径，不要假装调用工具。"
+    "给用户的回复用中文，短；不要提 sandbox/Docker/容器或内部路径，不要假装调用工具。"
+    "调用工具时正文默认可空或一句短进展，勿逐步解说每一步；阶段性进展可偶发短句；完成后再给结果。"
 )
 
 # Never leak internal mechanism words into user-visible reply text.
@@ -1052,6 +1107,95 @@ def openai_config(override: LLMOverride | None = None) -> tuple[str, str, str]:
     return api_key, base, model
 
 
+def build_system_prompt_parts(
+    *,
+    agent_id: str,
+    skills_catalog: str,
+    memory_snippets: list[str],
+    tools_enabled: bool = False,
+    available_tool_names: list[str] | None = None,
+    client: ClientContext | None = None,
+    machines: list[dict[str, Any]] | None = None,
+    persona_override: str | None = None,
+    lessons_block: str | None = None,
+) -> tuple[str, str]:
+    """Split system prompt into (static_prefix, dynamic_suffix) for prompt caching.
+
+    Static stays byte-stable across tool rounds (persona, rules, routing).
+    Dynamic holds per-turn / per-session bits (agent id, env, skills, memory).
+    Redundant per-tool name lists are omitted — TOOL_DEFS already advertise them.
+    """
+    static_parts = [
+        SYSTEM_PERSONA_BASE,
+        USER_FACING_INTERNAL_HIDE,
+        DIAGRAM_SKILL_TRIGGER,
+    ]
+    if tools_enabled:
+        names = [n for n in (available_tool_names or []) if n]
+        tool_bits = [
+            "当前会话已启用真实的 OpenAI function-calling 工具；"
+            "请**仅**通过 API 的 tool_calls / function calling 调用工具，"
+            "禁止在正文里写 <tool_call>、<function= 或任何 XML/Hermes 风格伪调用（那些不会自动执行且会泄漏给用户）。"
+            "具体工具名与参数以 tools 列表为准，勿在正文罗列。"
+        ]
+        # Long-task hint for host-only and sandbox turns (not sandbox_* alone).
+        if (
+            "defer_work" in names
+            or any(n.startswith(("sandbox_", "host_")) for n in names)
+            or "list_machines" in names
+        ):
+            tool_bits.append(
+                "长任务：首句确认限一句；调工具时正文默认可空或一句阶段性进展，"
+                "勿逐步解说每一步；完成后再给结果。"
+                "需要后台时 defer_work(goal=…) 同一会话交付；"
+                "例行用 create/update/pause/resume/delete/list_routines。"
+            )
+        if any(n.startswith("sandbox_") for n in names):
+            tool_bits.append(
+                "重要：sandbox_* 仅在内部执行环境操作，不是用户本机 Downloads/Desktop。"
+                "对用户完全透明：禁止提及 sandbox / Docker / 容器 / /workspace，"
+                "禁止把内部环境说成用户的另一台电脑；只谈结果（已生成、可预览、可下载）。"
+                "若用户要看「我的电脑 / Downloads / 桌面」，先 list_machines；"
+                "没有在线主机时如实说明要打开桌面应用，不要用 sandbox_ls 假装那是用户的 Downloads，"
+                "也不要凭记忆编造文件名或大小。"
+            )
+        static_parts.append("".join(tool_bits))
+        routing = format_tools_routing_block(
+            tools_enabled=True, available_tool_names=available_tool_names
+        )
+        if routing:
+            static_parts.append(routing)
+        skills_header = "## 可用技能（仅目录；需要全文时调用 load_skill）"
+    else:
+        static_parts.append(TOOLS_DISABLED_RULE)
+        skills_header = "## 可用技能（仅目录；当前未启用工具，勿调用 load_skill）"
+
+    persona = (persona_override or "").strip()
+    if persona:
+        static_parts.append(persona)
+
+    dynamic_parts = [
+        f"当前 agent_id: {agent_id or 'open-bot'}。",
+        format_environment_block(client, machines),
+        skills_header,
+        skills_catalog or "（无）",
+    ]
+    if memory_snippets:
+        dynamic_parts.append("## 相关记忆（自动召回）")
+        dynamic_parts.append(
+            "更具体的记忆档优先于更泛的档。"
+            "本会话近期消息和压缩摘要优先于长期记忆；冲突时以本会话为准。"
+        )
+        dynamic_parts.extend(f"- {s}" for s in memory_snippets)
+    lessons = (lessons_block or "").strip()
+    if lessons:
+        dynamic_parts.append(lessons)
+
+    static = "\n".join(p for p in static_parts if p)
+    dynamic = "\n".join(p for p in dynamic_parts if p)
+    return static, dynamic
+
+
 def build_system_prompt(
     *,
     agent_id: str,
@@ -1061,61 +1205,21 @@ def build_system_prompt(
     available_tool_names: list[str] | None = None,
     client: ClientContext | None = None,
     machines: list[dict[str, Any]] | None = None,
+    persona_override: str | None = None,
+    lessons_block: str | None = None,
 ) -> str:
-    parts = [
-        SYSTEM_PERSONA_BASE,
-        USER_FACING_INTERNAL_HIDE,
-        DIAGRAM_SKILL_TRIGGER,
-        f"当前 agent_id: {agent_id or 'open-bot'}。",
-        format_environment_block(client, machines),
-    ]
-    if tools_enabled:
-        names = [n for n in (available_tool_names or []) if n]
-        builtin = [n for n in names if not n.startswith("mcp__")]
-        mcp_names = [n for n in names if n.startswith("mcp__")]
-        tool_bits = [
-            "当前会话已启用真实的 OpenAI function-calling 工具；"
-            "请**仅**通过 API 的 tool_calls / function calling 调用工具，"
-            "禁止在正文里写 <tool_call>、<function= 或任何 XML/Hermes 风格伪调用（那些不会自动执行且会泄漏给用户）。"
-        ]
-        if builtin:
-            tool_bits.append("内置工具：" + "、".join(builtin) + "。")
-        if mcp_names:
-            tool_bits.append("可用 MCP 工具：" + "、".join(mcp_names) + "。")
-        if any(n.startswith("sandbox_") for n in names):
-            tool_bits.append(
-                "长任务：优先调用 defer_work(goal=…) 先确认再后台做完，同一会话交付；"
-                "例行任务用 create_routine/update_routine/pause_routine/resume_routine/delete_routine/list_routines"
-                "（可设 cron 与 Slack/GitHub triggers）。"
-            )
-            tool_bits.append(
-                "重要：sandbox_* 仅在内部执行环境操作，不是用户本机 Downloads/Desktop。"
-                "对用户完全透明：禁止提及 sandbox / Docker / 容器 / /workspace，"
-                "禁止把内部环境说成用户的另一台电脑；只谈结果（已生成、可预览、可下载）。"
-                "若用户要看「我的电脑 / Downloads / 桌面」，先 list_machines；"
-                "没有在线主机时如实说明要打开桌面应用，不要用 sandbox_ls 假装那是用户的 Downloads，"
-                "也不要凭记忆编造文件名或大小。"
-            )
-        parts.append("".join(tool_bits))
-        routing = format_tools_routing_block(
-            tools_enabled=True, available_tool_names=available_tool_names
-        )
-        if routing:
-            parts.append(routing)
-        skills_header = "## 可用技能（仅目录；需要全文时调用 load_skill）"
-    else:
-        parts.append(TOOLS_DISABLED_RULE)
-        skills_header = "## 可用技能（仅目录；当前未启用工具，勿调用 load_skill）"
-    parts.append(skills_header)
-    parts.append(skills_catalog or "（无）")
-    if memory_snippets:
-        parts.append("## 相关记忆（自动召回）")
-        parts.append(
-            "更具体的记忆档优先于更泛的档。"
-            "本会话近期消息和压缩摘要优先于长期记忆；冲突时以本会话为准。"
-        )
-        parts.extend(f"- {s}" for s in memory_snippets)
-    return "\n".join(parts)
+    static, dynamic = build_system_prompt_parts(
+        agent_id=agent_id,
+        skills_catalog=skills_catalog,
+        memory_snippets=memory_snippets,
+        tools_enabled=tools_enabled,
+        available_tool_names=available_tool_names,
+        client=client,
+        machines=machines,
+        persona_override=persona_override,
+        lessons_block=lessons_block,
+    )
+    return "\n\n".join(p for p in (static, dynamic) if p)
 
 
 _FAKE_TOOL_LINE = re.compile(
@@ -1179,15 +1283,47 @@ def normalize_messages(
 
 
 
+def _system_content_for_cache(
+    static: str,
+    dynamic: str,
+    *,
+    cache_mode: str,
+) -> str | list[dict[str, Any]]:
+    """Build system message content; use Anthropic-style parts when cache_mode=blocks."""
+    static = (static or "").strip()
+    dynamic = (dynamic or "").strip()
+    if cache_mode == "blocks" and static:
+        parts: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": static,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        if dynamic:
+            parts.append({"type": "text", "text": dynamic})
+        return parts
+    return "\n\n".join(p for p in (static, dynamic) if p)
+
+
 def assemble_llm_messages(
     system: str,
     compacted: list[dict[str, Any]] | None,
+    *,
+    static_system: str | None = None,
+    dynamic_system: str | None = None,
+    prompt_cache_mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Final LLM messages with **one** leading system turn.
 
     ``compact_messages`` may prepend ``role=system`` conversation summaries.
     Merging those into the persona / tools / memory / client_env system prompt
     avoids dual system messages (confusing in Langfuse and some gateways).
+
+    When ``static_system`` / ``dynamic_system`` are provided, the static prefix
+    is kept first (stable for prompt caching). Summaries append to the dynamic
+    half. ``prompt_cache_mode`` of ``blocks`` emits content parts with
+    ``cache_control``; otherwise a plain string (gateway-safe default).
     """
     summary_bits: list[str] = []
     dialog: list[dict[str, Any]] = []
@@ -1200,19 +1336,46 @@ def assemble_llm_messages(
             continue
         dialog.append(m)
 
-    sys_text = (system or "").strip()
+    mode = (prompt_cache_mode or "off").strip().lower()
+    if static_system is not None or dynamic_system is not None:
+        static = (static_system or "").strip()
+        dynamic = (dynamic_system or "").strip()
+    else:
+        static = ""
+        dynamic = (system or "").strip()
+
     if summary_bits:
         block = "\n\n".join(summary_bits)
-        if sys_text:
-            sys_text = f"{sys_text}\n\n## 对话摘要（更早轮次）\n{block}"
-        else:
-            sys_text = block
+        summary_section = f"## 对话摘要（更早轮次）\n{block}"
+        dynamic = f"{dynamic}\n\n{summary_section}".strip() if dynamic else summary_section
 
     out: list[dict[str, Any]] = []
-    if sys_text:
-        out.append({"role": "system", "content": sys_text})
+    if static or dynamic:
+        content = _system_content_for_cache(static, dynamic, cache_mode=mode)
+        if content:
+            out.append({"role": "system", "content": content})
     out.extend(dialog)
     return out
+
+
+def message_payload_chars(messages: list[dict[str, Any]] | None) -> int:
+    """Approximate serialized size of message contents (for before/after metrics)."""
+    total = 0
+    for m in messages or []:
+        c = m.get("content")
+        if isinstance(c, str):
+            total += len(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    total += len(str(part.get("text") or ""))
+                else:
+                    total += len(str(part))
+        elif c is not None:
+            total += len(str(c))
+        for tc in m.get("tool_calls") or []:
+            total += len(str(tc))
+    return total
 
 
 def _raw_usage_from_response(data: dict[str, Any] | None) -> Any | None:
@@ -1270,12 +1433,30 @@ def _upstream_http_status(message: str) -> int | None:
         return None
 
 
+def _is_cancel_flavored_upstream(message: str) -> bool:
+    """True when an upstream/gateway body is client-cancel noise, not a transient 5xx.
+
+    Gateways (Caddy/Go reverse proxies in front of model APIs) often answer 502 with
+    "downstream request canceled … context canceled" when *their* downstream aborted
+    before upstream headers. Retrying that burns another canceled attempt.
+    """
+    folded = (message or "").lower()
+    if "context canceled" in folded or "context cancelled" in folded:
+        return True
+    if "downstream request canceled" in folded or "downstream request cancelled" in folded:
+        return True
+    if "request canceled" in folded or "request cancelled" in folded:
+        return True
+    return False
+
+
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """True for transient LLM/transport failures worth another attempt.
 
     Retries: timeout, connection reset/network, 429, 5xx, empty choices.
-    Does not retry: CancelledError, auth/bad-request 4xx, AutoToolChoiceUnsupported,
-    context-length overflow (compaction owns that path).
+    Does not retry: CancelledError, cancel-flavored upstream 5xx bodies,
+    auth/bad-request 4xx, AutoToolChoiceUnsupported, context-length overflow
+    (compaction owns that path).
     """
     if isinstance(exc, asyncio.CancelledError):
         return False
@@ -1294,6 +1475,8 @@ def is_retryable_llm_error(exc: BaseException) -> bool:
         return False
     msg = str(exc)
     if is_context_length_error(msg):
+        return False
+    if _is_cancel_flavored_upstream(msg):
         return False
     if "LLM request timed out" in msg or "LLM connection error" in msg:
         return True
@@ -1316,7 +1499,7 @@ async def _chat_completion_once(
 ) -> dict[str, Any]:
     """One HTTP POST (plus optional reasoning_effort payload tweak). May mutate payload."""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code >= 300:
                 body = resp.text[:2000]
@@ -1365,6 +1548,51 @@ async def _chat_completion_once(
         raise RuntimeError(f"LLM connection error: {exc}") from exc
 
 
+def _strip_prompt_cache_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove cache_control from message content parts (fallback after reject)."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        content = m.get("content")
+        if isinstance(content, list):
+            texts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    texts.append(str(part.get("text") or ""))
+                else:
+                    texts.append(str(part))
+            nm = dict(m)
+            nm["content"] = "\n\n".join(t for t in texts if t)
+            out.append(nm)
+        else:
+            out.append(m)
+    return out
+
+
+def _prompt_cache_key_for_messages(messages: list[dict[str, Any]]) -> str | None:
+    """Stable key from the leading system prefix (first ~4k chars)."""
+    if not messages:
+        return None
+    first = messages[0]
+    if str(first.get("role") or "") != "system":
+        return None
+    content = first.get("content")
+    if isinstance(content, list):
+        bits = []
+        for part in content:
+            if isinstance(part, dict):
+                bits.append(str(part.get("text") or ""))
+            else:
+                bits.append(str(part))
+        blob = "\n".join(bits)
+    else:
+        blob = str(content or "")
+    blob = blob[:4096]
+    if not blob.strip():
+        return None
+    return "ob-" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:24]
+
+
+
 async def chat_completion(
     messages: list[dict[str, Any]],
     *,
@@ -1376,22 +1604,35 @@ async def chat_completion(
     _, base, model = openai_config(override)
     profile = profile_for(model, base)
     url = f"{base}/chat/completions"
+    cache_mode = resolve_prompt_cache_mode(model, base, profile=profile)
+    work_messages = list(messages)
+    # If caller already attached cache_control blocks, keep them unless mode is off.
+    if cache_mode == "off":
+        work_messages = _strip_prompt_cache_from_messages(work_messages)
     payload: dict[str, Any] = {
         "model": model,
         "stream": False,
-        "messages": messages,
+        "messages": work_messages,
     }
     if tools:
         payload["tools"] = tools
         if tool_choice is not None:
             payload["tool_choice"] = tool_choice
+    if cache_mode == "key":
+        pck = _prompt_cache_key_for_messages(work_messages)
+        if pck:
+            payload["prompt_cache_key"] = pck
     payload = adapt_chat_payload(payload, has_tools=bool(tools), profile=profile)
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    # Optional documented header some gateways accept; ignored if unknown.
+    if cache_mode == "blocks":
+        headers["x-prompt-cache"] = "ephemeral"
     max_attempts = _llm_max_attempts()
     last_err: BaseException | None = None
+    cache_stripped = False
     for attempt in range(1, max_attempts + 1):
         try:
             data = await _chat_completion_once(
@@ -1413,6 +1654,32 @@ async def chat_completion(
         except AutoToolChoiceUnsupported:
             raise
         except Exception as exc:
+            err_s = str(exc)
+            if (
+                not cache_stripped
+                and is_prompt_cache_reject(err_s)
+                and (
+                    "prompt_cache_key" in payload
+                    or headers.get("x-prompt-cache")
+                    or any(
+                        isinstance((m or {}).get("content"), list)
+                        for m in (payload.get("messages") or [])
+                    )
+                )
+            ):
+                mark_prompt_cache_unsupported()
+                cache_stripped = True
+                payload = dict(payload)
+                payload.pop("prompt_cache_key", None)
+                payload["messages"] = _strip_prompt_cache_from_messages(
+                    list(payload.get("messages") or [])
+                )
+                headers = {k: v for k, v in headers.items() if k.lower() != "x-prompt-cache"}
+                logger.info(
+                    "LLM prompt-cache unsupported; retrying without cache fields model=%s",
+                    model,
+                )
+                continue
             if not is_retryable_llm_error(exc):
                 raise
             last_err = exc
@@ -1527,6 +1794,7 @@ async def run_tool_loop(
         overflow_tries = 0
         while True:
             try:
+                msgs[:] = fold_tool_results_in_messages(msgs)
                 data = await chat_completion(
                     msgs,
                     api_key=api_key,
@@ -1695,6 +1963,12 @@ async def run_tool_loop(
                     )
                 result = guide_tool_result(name, result)
                 result = truncate_tool_result_for_context(result)
+                if sources_out is not None:
+                    merged = merge_sources(
+                        sources_out, extract_from_tool(name, args, result)
+                    )
+                    sources_out.clear()
+                    sources_out.extend(merged)
                 if on_status is not None:
                     await on_status(
                         {
@@ -1722,7 +1996,7 @@ async def run_tool_loop(
                 await on_status(
                     {
                         "phase": "thinking",
-                        "label": "正在做，做好会发在这里",
+                        "label": "正在做…",
                     }
                 )
             msgs.append({"role": "assistant", "content": final or ""})
@@ -1737,7 +2011,7 @@ async def run_tool_loop(
                 await on_status(
                     {
                         "phase": "thinking",
-                        "label": "需要先访问本机…",
+                        "label": "先访问本机…",
                     }
                 )
             msgs.append({"role": "assistant", "content": final or ""})
@@ -1798,7 +2072,7 @@ async def run_tool_loop(
             await on_status(
                 {
                     "phase": "thinking",
-                    "label": "回合用尽，转到后台继续",
+                    "label": "后台继续…",
                 }
             )
         try:
@@ -1844,6 +2118,7 @@ async def stream_chat_tokens(
     *,
     api_key: str,
     override: LLMOverride | None = None,
+    sources_out: list[dict[str, str]] | None = None,
 ):
     """Yield text deltas from streaming completions (no tools)."""
     _, base, model = openai_config(override)
@@ -1856,7 +2131,7 @@ async def stream_chat_tokens(
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
     }
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
         async with client.stream("POST", url, headers=headers, json=payload) as resp:
             if resp.status_code >= 300:
                 err = (await resp.aread()).decode("utf-8", errors="replace")

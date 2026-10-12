@@ -6,7 +6,13 @@ import logging
 from contextvars import ContextVar, Token
 from typing import Any
 
-from .http_client import JEV_DEFAULT_BASE, JEV_DEFAULT_MODEL, SystemOneHTTPClient
+from .http_client import (
+    JEV_DEFAULT_BASE,
+    JEV_DEFAULT_MODEL,
+    UNSLOTH_DEFAULT_BASE,
+    UNSLOTH_DEFAULT_MODEL,
+    SystemOneHTTPClient,
+)
 from .laya_local import LAYA_DEFAULT_MODEL, LayaLocalClient
 from .protocol import DecisionDisabled, DecisionError, DecisionResult, DecisionSettings, normalize_provider
 
@@ -41,14 +47,23 @@ def build_client(settings: DecisionSettings | None):
             api_key,
             model or JEV_DEFAULT_MODEL,
         )
-    if base_url:
+    if provider == "unsloth":
         return SystemOneHTTPClient(
-            "laya",
-            base_url,
+            "unsloth",
+            base_url or UNSLOTH_DEFAULT_BASE,
             api_key,
-            model or LAYA_DEFAULT_MODEL,
+            model or UNSLOTH_DEFAULT_MODEL,
         )
-    return LayaLocalClient(model or LAYA_DEFAULT_MODEL)
+    if provider == "laya":
+        if base_url:
+            return SystemOneHTTPClient(
+                "laya",
+                base_url,
+                api_key,
+                model or LAYA_DEFAULT_MODEL,
+            )
+        return LayaLocalClient(model or LAYA_DEFAULT_MODEL)
+    return _disabled
 
 
 def bind_decision(settings: DecisionSettings | None) -> Token:
@@ -67,15 +82,49 @@ def try_decide(state: Any, questions: dict[str, Any], client: Any | None = None)
     """Return a decision dict, or None when the layer is off or the call fails.
 
     Failures are logged and swallowed so a decision outage does not stop the chat turn.
+    When Langfuse is enabled, emits ``open-bot.decision`` (nests under the run
+    trace if one is current).
     """
+    from .. import langfuse_trace as lf
+
     active = client if client is not None else current_decision()
     if not getattr(active, "enabled", False):
         return None
-    try:
-        result = active.decide(state, questions)
-    except DecisionError as exc:
-        logger.warning("decision skipped: %s", exc)
-        return None
-    if not isinstance(result, DecisionResult):
-        return None
-    return result.to_dict()
+    provider = str(getattr(active, "provider", "") or "")
+    model = str(getattr(active, "model", "") or "") or None
+    with lf.observation_decision(
+        model=model,
+        provider=provider,
+        state=state,
+        questions=questions,
+        metadata={"provider": provider, "endpoint": "try_decide"},
+    ) as obs:
+        try:
+            result = active.decide(state, questions)
+        except DecisionError as exc:
+            logger.warning("decision skipped: %s", exc)
+            lf.update_obs(
+                obs,
+                level="ERROR",
+                status_message=str(exc)[:500],
+                output=lf.truncate({"error": str(exc)[:500]}),
+            )
+            return None
+        if not isinstance(result, DecisionResult):
+            lf.update_obs(obs, level="ERROR", status_message="invalid DecisionResult")
+            return None
+        out = result.to_dict()
+        usage = lf.parse_usage_details(result.usage)
+        update: dict[str, Any] = {
+            "output": lf.truncate(out.get("answers") or out),
+            "model": result.model or model,
+            "metadata": {
+                "provider": provider,
+                "endpoint": "try_decide",
+                "decision_model": result.model or model or "",
+            },
+        }
+        if usage:
+            update["usage_details"] = usage
+        lf.update_obs(obs, **update)
+        return out

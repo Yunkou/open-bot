@@ -19,6 +19,7 @@ class AgentState(TypedDict):
     messages: list[dict[str, Any]]
     pending_tool_calls: list[dict[str, Any]]
     tools_used: list[str]
+    sources: list[dict[str, str]]  # citation URLs from retrieval tools
     final_text: str
     status: RunStatus
     prepared: bool
@@ -39,6 +40,11 @@ class AgentState(TypedDict):
     system_prompt: str
     replay_results: dict[str, str]  # tool_call_id -> prior result (safe replay)
     needs_compaction: bool
+    needs_finalize: bool
+    needs_continue: bool  # inject CONTINUE_WORK / host nudge then re-llm
+    work_continued: bool  # one-shot continue nudge already applied
+    early_ack_projected: bool  # first mid-task ack already shown in chat
+    tool_llm_rounds: int  # LLM turns that emitted tool_calls (for stage throttle)
     reset_seq: int  # model context starts after this journal seq (0 = none)
     compaction_retries: int
     extension_names: list[str]
@@ -47,7 +53,7 @@ class AgentState(TypedDict):
 def initial_state(
     *,
     messages: list[dict[str, Any]] | None = None,
-    max_rounds: int = 12,
+    max_rounds: int = 24,
     langfuse_trace_id: str = "",
     skip_recall: bool = False,
 ) -> AgentState:
@@ -55,6 +61,7 @@ def initial_state(
         "messages": list(messages or []),
         "pending_tool_calls": [],
         "tools_used": [],
+        "sources": [],
         "final_text": "",
         "status": "pending",
         "prepared": False,
@@ -74,6 +81,11 @@ def initial_state(
         "system_prompt": "",
         "replay_results": {},
         "needs_compaction": False,
+        "needs_finalize": False,
+        "needs_continue": False,
+        "work_continued": False,
+        "early_ack_projected": False,
+        "tool_llm_rounds": 0,
         "reset_seq": 0,
         "compaction_retries": 0,
         "extension_names": [],

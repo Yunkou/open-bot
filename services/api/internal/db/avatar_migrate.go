@@ -3,14 +3,15 @@ package db
 // avatarV2UserSetMarker gates the one-time "mark existing avatars as user_set" step.
 const avatarV2UserSetMarker = "avatar_v2_user_set"
 
-// migrateAvatarV2 runs at startup (after the avatar_user_set column + legacy shape map in schema).
+// migrateAvatarV2 runs at startup (after the avatar_user_set column + robot-heads shape map in schema).
 //
 //  1. ONE TIME (guarded by app_migrations): rows that already had shape+color are marked
 //     avatar_user_set=true so they are kept as-is, even if their pair collides.
 //     Later auto-assigned rows (create/clone/admin → avatar_user_set=false) are never flipped.
-//  2. Every startup (idempotent): legacy shape ids are canonicalized, and only empty/invalid
-//     avatars are backfilled via assignAvatarUnderLock (same per-user advisory lock as
-//     create/clone/admin), avoiding pairs already taken. Backfilled rows stay user_set=false.
+//  2. Every startup (idempotent): legacy/organic shape ids are canonicalized to library four
+//     (circle|square|hexagon|rectangle), and only empty/invalid avatars are backfilled via
+//     assignAvatarUnderLock (same per-user advisory lock as create/clone/admin), avoiding pairs
+//     already taken. Backfilled rows stay user_set=false.
 //
 // List/Get never write avatars; this is the only backfill path.
 func (d *DB) migrateAvatarV2() error {

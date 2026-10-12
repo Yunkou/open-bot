@@ -1,3 +1,10 @@
+import {
+  isGitWriteRisk,
+  toolFamilyForHostOp,
+  toolLabelForHostOp,
+  type ApprovalDecision,
+} from "../lib/toolAllowlist";
+
 export type HostConfirmPayload = {
   req_id: string;
   op: string;
@@ -9,6 +16,8 @@ export type HostConfirmPayload = {
   reason?: string;
   review_tier?: string;
 };
+
+export type { ApprovalDecision };
 
 export function parseHostConfirm(content: string): HostConfirmPayload | null {
   try {
@@ -31,89 +40,133 @@ function pathList(path: string): string[] {
     .filter(Boolean);
 }
 
-function actionCopy(item: HostConfirmPayload): { title: string; detail: string; danger: boolean } {
+function commandSnippet(item: HostConfirmPayload): string {
+  if (item.op === "shell" || item.op === "ssh_exec") {
+    const cmd = (item.path || "").trim();
+    if (!cmd) return item.dest === "terminal" ? "打开终端" : "（空命令）";
+    return cmd.length > 72 ? `${cmd.slice(0, 72)}…` : cmd;
+  }
+  if (item.op === "move") {
+    return item.dest ? `${item.path} → ${item.dest}` : item.path;
+  }
+  if (item.op === "ssh_write" || item.op === "ssh_delete") {
+    return item.dest ? `${item.dest} ${item.path}` : item.path;
+  }
+  const n = pathList(item.path).length;
+  if ((item.op === "delete" || item.op === "ssh_delete") && n > 1) {
+    return `${n} 个路径`;
+  }
+  return item.path || "";
+}
+
+function actionCopy(item: HostConfirmPayload): { detail: string; danger: boolean } {
   if (item.op === "shell") {
-    return {
-      title: item.dest === "terminal" ? "在终端里运行？" : "运行这条命令？",
-      detail: item.path,
-      danger: true,
-    };
+    return { detail: item.path, danger: true };
   }
   if (item.op === "ssh_exec") {
     return {
-      title: "在远程主机上运行？",
       detail: item.dest ? `${item.dest}\n${item.path}` : item.path,
       danger: true,
     };
   }
   if (item.op === "ssh_delete") {
-    const n = pathList(item.path).length;
-    const files = n > 1 ? `删除这 ${n} 个远程文件？` : "删除远程文件？";
     return {
-      title: files,
       detail: item.dest ? `${item.dest}\n${item.path}` : item.path,
       danger: true,
     };
   }
   if (item.op === "ssh_write") {
     return {
-      title: "写入远程文件？",
       detail: item.dest ? `${item.dest} ${item.path}` : item.path,
       danger: false,
     };
   }
   if (item.op === "write") {
-    return { title: "写入这个文件？", detail: item.path, danger: false };
+    return { detail: item.path, danger: false };
   }
   if (item.op === "delete") {
-    const n = pathList(item.path).length;
-    return {
-      title: n > 1 ? `删除这 ${n} 个文件？` : "删除这个文件？",
-      detail: item.path,
-      danger: true,
-    };
+    return { detail: item.path, danger: true };
   }
   if (item.op === "move") {
     return {
-      title: "移动或重命名？",
       detail: item.dest ? `${item.path} → ${item.dest}` : item.path,
       danger: true,
     };
   }
-  return { title: "确认这次操作？", detail: item.path, danger: false };
+  return { detail: item.path, danger: false };
 }
 
+/**
+ * HITL approval card — 审批三态 (Allow once / Always allow / Deny).
+ * UE: narrow = primary full-width + second row; wide = three right-aligned.
+ * MVP: no 「始终拒绝」 on main card.
+ */
 export function HostConfirmCard({
   item,
   onDecide,
+  alwaysAllowEnabled = true,
 }: {
   item: HostConfirmPayload;
-  onDecide?: (ok: boolean) => void;
+  onDecide?: (decision: ApprovalDecision) => void;
+  /** When false (e.g. machine exec_policy=ask), hide Always — degrades to once-only. */
+  alwaysAllowEnabled?: boolean;
 }) {
-  const { title, detail, danger } = actionCopy(item);
+  const { detail } = actionCopy(item);
   const pending = item.status === "pending";
   const settled = item.status === "allowed" ? "已允许" : item.status === "denied" ? "已拒绝" : "";
+  const tool = toolLabelForHostOp(item.op, item.path);
+  const snippet = commandSnippet(item);
+  const titleLine = snippet ? `${tool} · ${snippet}` : tool;
+  const gitWriteHint =
+    alwaysAllowEnabled && isGitWriteRisk(item.op, item.path)
+      ? "始终允许将覆盖同类 Git 写操作（含 push），请确认风险"
+      : "";
+  const reason = item.reason || "";
+  const family = toolFamilyForHostOp(item.op, item.path);
 
   return (
-    <div className="host-confirm-card" role="region" aria-label={title}>
-      <div className="host-confirm-kicker">需要你确认 · Auto-review</div>
-      <div className="host-confirm-title">{title}</div>
-      {item.reason ? <div className="host-confirm-reason">{item.reason}</div> : null}
-      {detail ? <div className="host-confirm-path">{detail}</div> : null}
-      {item.preview && (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec") ? (
+    <div
+      className="host-confirm-card approval-gate-card"
+      role="region"
+      aria-label="工具需要确认"
+      data-tool-family={family}
+      data-tool={tool}
+    >
+      <div className="host-confirm-kicker">工具需要确认</div>
+      <div className="host-confirm-title">{titleLine}</div>
+      {reason ? <div className="host-confirm-reason">{reason}</div> : null}
+      {gitWriteHint ? (
+        <div className="host-confirm-reason host-confirm-risk-hint">{gitWriteHint}</div>
+      ) : null}
+      {detail && detail !== snippet ? <div className="host-confirm-path">{detail}</div> : null}
+      {item.preview &&
+      (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec") ? (
         <pre className="host-confirm-preview">{item.preview}</pre>
       ) : null}
       {pending && onDecide ? (
-        <div className="host-confirm-actions">
-          <button type="button" className="ghost" onClick={() => onDecide(false)}>
-            拒绝
-          </button>
+        <div className={`host-confirm-actions${alwaysAllowEnabled ? " host-confirm-actions-tri" : ""}`}>
           <button
             type="button"
-            className={danger ? "host-confirm-allow danger" : "primary"}
-            onClick={() => onDecide(true)}
+            className="host-confirm-allow-once primary"
+            onClick={() => onDecide("allow_once")}
           >
-            允许
+            允许一次
+          </button>
+          {alwaysAllowEnabled ? (
+            <button
+              type="button"
+              className="host-confirm-always ghost"
+              onClick={() => onDecide("always_allow")}
+            >
+              始终允许
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="host-confirm-deny ghost danger-outline"
+            onClick={() => onDecide("deny")}
+          >
+            拒绝
           </button>
         </div>
       ) : pending ? (
