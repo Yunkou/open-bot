@@ -553,15 +553,11 @@ TOOLS_DISABLED_RULE = (
     "用已有知识直接完整回答；若缺实时信息请如实说明无法获取。"
 )
 
-# Diagram asks: load on-demand skill「画图」; keep prompt thin.
+# Diagram asks: load on-demand skill「画图」; keep prompt thin (syntax/rules live in the skill).
 DIAGRAM_SKILL_TRIGGER = (
     "当用户要求画图、流程图、架构图、时序图、关系图、人物关系图、状态图、组织图、对比表或同类示意图时："
     "若可用函数调用且目录含「画图」，先内部加载「画图」全文再按其规则输出；"
     "若无法加载：静默按已知规则直接画，不要向用户解释加载失败；"
-    "结构类图默认 ```mermaid ；用户点名 HTML/对比表/卡片墙时用 ```html （禁脚本、内联 CSS、无外联）；"
-    "本轮不能生成位图，禁止假装出图片 URL；"
-    "边标签 |\"...\"| 引号必须成对；箭头只用 --> / ==> / -.-> ，禁止 === 与 ===| ；"
-    "禁止用空格/符号/emoji 拼字符画或伪表格代替图；"
     "对用户只说「我画一张图」之类，不要提内部加载过程。"
 )
 
@@ -1145,19 +1141,16 @@ def build_system_prompt_parts(
             or "list_machines" in names
         ):
             tool_bits.append(
-                "长任务：首句确认限一句；调工具时正文默认可空或一句阶段性进展，"
-                "勿逐步解说每一步；完成后再给结果。"
-                "需要后台时 defer_work(goal=…) 同一会话交付；"
+                # Empty-body / 勿逐步解说 already in SYSTEM_PERSONA_BASE; keep defer/routines only.
+                "长任务：首句确认限一句；需要后台时 defer_work(goal=…) 同一会话交付；"
                 "例行用 create/update/pause/resume/delete/list_routines。"
             )
         if any(n.startswith("sandbox_") for n in names):
             tool_bits.append(
+                # Full sandbox opacity lives in format_environment_block; keep the anti-confusion bit here.
                 "重要：sandbox_* 仅在内部执行环境操作，不是用户本机 Downloads/Desktop。"
-                "对用户完全透明：禁止提及 sandbox / Docker / 容器 / /workspace，"
-                "禁止把内部环境说成用户的另一台电脑；只谈结果（已生成、可预览、可下载）。"
                 "若用户要看「我的电脑 / Downloads / 桌面」，先 list_machines；"
-                "没有在线主机时如实说明要打开桌面应用，不要用 sandbox_ls 假装那是用户的 Downloads，"
-                "也不要凭记忆编造文件名或大小。"
+                "没有在线主机时如实说明要打开桌面应用，不要用 sandbox_ls 假装那是用户的 Downloads。"
             )
         static_parts.append("".join(tool_bits))
         routing = format_tools_routing_block(

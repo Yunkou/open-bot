@@ -312,7 +312,13 @@ class SkillRegistry:
             items = [s for s in items if s.name in allow]
         if not items:
             return "（当前未发现可用技能）"
-        lines = [f"- {s.name}: {s.description}" for s in items]
+        # Catalog is name+short desc only; full body via load_skill. Cap desc to curb prompt bloat.
+        lines = []
+        for s in items:
+            desc = (s.description or "").strip()
+            if len(desc) > 160:
+                desc = desc[:157].rstrip() + "…"
+            lines.append(f"- {s.name}: {desc}")
         return "\n".join(lines)
 
     def filter_meta(self, enabled: set[str] | list[str] | None) -> list[SkillMeta]:
