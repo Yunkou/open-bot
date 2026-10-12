@@ -125,7 +125,9 @@ func (d *DB) CreateAgent(userID, name, description, systemPrompt string) (*Agent
 	return d.CreateAgentWithAvatar(userID, name, description, systemPrompt, "", "")
 }
 
-// CreateAgentWithAvatar creates an agent with optional whitelisted avatar_shape / avatar_color.
+// CreateAgentWithAvatar creates an agent with optional avatar_shape / avatar_color.
+// Shape must be library four (circle|square|hexagon|rectangle) or a legacy/organic id
+// that CanonicalAvatarShape maps onto those; unknown ids are rejected.
 // Empty values are auto-assigned (agent_id hash, avoiding the user's used shape+color pairs).
 // Any client-provided shape or color marks avatar_user_set=true.
 func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shape, color string) (*Agent, error) {
@@ -134,8 +136,12 @@ func (d *DB) CreateAgentWithAvatar(userID, name, description, systemPrompt, shap
 		return nil, errors.New("name required")
 	}
 	shape = strings.TrimSpace(shape)
-	if shape != "" && !IsAllowedAvatarShape(shape) {
-		return nil, ErrAvatarNotAllowed("avatar_shape not allowed")
+	if shape != "" {
+		if canon := CanonicalAvatarShape(shape); canon != "" {
+			shape = canon
+		} else {
+			return nil, ErrAvatarNotAllowed("avatar_shape not allowed")
+		}
 	}
 	if c := strings.TrimSpace(color); c != "" {
 		color = NormalizeAvatarColor(c)
@@ -284,13 +290,18 @@ func (d *DB) SetAgentComputerMode(userID, id, mode string) (*Agent, error) {
 	return a, nil
 }
 
-// UpdateAgentAvatar sets avatar_shape / avatar_color (whitelisted). Empty values keep current.
+// UpdateAgentAvatar sets avatar_shape / avatar_color (library four, or legacy/organic mapped
+// via CanonicalAvatarShape). Empty values keep current.
 // Always marks avatar_user_set=true (manual choice; migrate will not reassign).
 func (d *DB) UpdateAgentAvatar(userID, id, shape, color string) (*Agent, error) {
 	shape = strings.TrimSpace(shape)
 	colorRaw := strings.TrimSpace(color)
-	if shape != "" && !IsAllowedAvatarShape(shape) {
-		return nil, ErrAvatarNotAllowed("avatar_shape not allowed")
+	if shape != "" {
+		if canon := CanonicalAvatarShape(shape); canon != "" {
+			shape = canon
+		} else {
+			return nil, ErrAvatarNotAllowed("avatar_shape not allowed")
+		}
 	}
 	color = ""
 	if colorRaw != "" {

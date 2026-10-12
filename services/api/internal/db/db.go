@@ -441,14 +441,12 @@ ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_shape TEXT NOT NULL DEFAULT '
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT '';
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_user_set BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Avatar v2: map geometric shape ids → organic silhouettes (idempotent, 1:1).
+-- Avatar robot-heads: map organic v2 + leftover geometric ids → library four (idempotent).
 -- soft-delete: exception — remap applies to all rows incl. soft-deleted (keeps restored bots valid).
-UPDATE agents SET avatar_shape = 'cloud' WHERE avatar_shape = 'circle';
-UPDATE agents SET avatar_shape = 'puff' WHERE avatar_shape = 'rounded';
-UPDATE agents SET avatar_shape = 'bean' WHERE avatar_shape = 'squircle';
-UPDATE agents SET avatar_shape = 'soft-hex' WHERE avatar_shape = 'hex';
-UPDATE agents SET avatar_shape = 'drop' WHERE avatar_shape = 'diamond';
-UPDATE agents SET avatar_shape = 'petal' WHERE avatar_shape = 'soft-square';
+-- Library four: circle | square | hexagon | rectangle
+UPDATE agents SET avatar_shape = 'circle' WHERE avatar_shape IN ('cloud');
+UPDATE agents SET avatar_shape = 'square' WHERE avatar_shape IN ('rounded', 'soft', 'soft-square', 'squircle', 'diamond', 'bean', 'drop', 'petal', 'puff');
+UPDATE agents SET avatar_shape = 'hexagon' WHERE avatar_shape IN ('hex', 'soft-hex');
 
 -- Message feedback (explicit submit only; reactions never create rows here).
 CREATE TABLE IF NOT EXISTS message_feedbacks (
