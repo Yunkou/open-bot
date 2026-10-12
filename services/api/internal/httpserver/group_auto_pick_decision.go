@@ -176,7 +176,12 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	keyToID = map[string]string{}
 	criteria := map[string]string{}
 	// Opaque "all" first so models can select every member (intro / round-robin).
-	criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, or explicit all-hands)"
+	// Who-can: keep the key but discourage full-roster parking (Langfuse 21ed840c 「谁会写代码」).
+	if whoCan {
+		criteria[autoPickDecisionAllKey] = "ONLY if EVERY member's role can do X — rare for specialty skills (写代码/coding). Prefer capable mN keys; never use all to mean the whole channel when only a subset fits"
+	} else {
+		criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, or explicit all-hands)"
+	}
 	for i, id := range members {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -216,15 +221,15 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"Do not pick a specialist primary for collective intro / round-robin asks."
 	}
 	if whoCan {
-		instr += " CAPABILITY CENSUS (who-can): the user asks who can do X. " +
+		instr += " CAPABILITY CENSUS (who-can): the user asks who can do X (e.g. 「谁会写代码」「谁会查资料」「who can code」). " +
 			"Match X ONLY to the role labels in criteria (m0, m1, …) — not to Recent-context chat intros. " +
 			"Do NOT choose \"all\" unless EVERY member's role can do X. " +
-			"Choose the best matching capable member as choice (an mN key). " +
+			"You MUST choose a capable mN as choice — never park on \"all\" for a specialty census. " +
 			"Set count to the number of members whose roles share that capability (1 if only one fits; 2 if two researchers fit; etc.). " +
-			"Put HIGH probabilities on EVERY capable mN and LOW on incapable ones. " +
-			"Examples: ask=write/code/编程/写代码 → only members whose role is coding; choice=that mN, count≈1, high prob on coder only. " +
-			"Ask=research/查资料/搜索 → every member whose role is research/资料; choice=one of them, count=how many researchers, high probs on all researchers, low on coder. " +
-			"Never pick \"all\" or pad count to the full roster when only a subset is capable. " +
+			"Put HIGH probabilities on EVERY capable mN and NEAR-ZERO on incapable ones and on \"all\". " +
+			"Hard examples: 「谁会写代码」/ write/code/编程 → ONLY the coding-role mN; choice=that mN, noul near 0 (→1), high mass on coder, low on research and all. " +
+			"「谁会查资料」/ research/搜索 → every research/资料-role mN; choice=one researcher, count=how many researchers, high probs on all researchers, low on coder and all. " +
+			"Never pick \"all\" or pad count/noul to the full roster when only a subset is capable. " +
 			"Never let a peer's self-intro in Recent context override the criteria role labels."
 	}
 	memberN := len(keyToID)
@@ -250,9 +255,10 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		countInstr = fmt.Sprintf(
 			"CAPABILITY CENSUS count: how many members' roles can do what the user asked? "+
 				"Output noul in [0,1] mapped as 1 + round(noul*(%d-1)) → member count. "+
-				"If only ONE member can (e.g. only the coder for 写代码), use near 0 (→1). "+
-				"If exactly TWO share the skill (e.g. two researchers for 查资料), use about %.2f (→2). "+
-				"Use near 1 ONLY when every member is capable. Do not inflate count to the full roster when only a subset fits.",
+				"「谁会写代码」/ only the coder → near 0 (→1). "+
+				"「谁会查资料」/ two researchers → about %.2f (→2). "+
+				"Use near 1 ONLY when every member's role is capable. "+
+				"FORBIDDEN: noul near 1 / full roster when the ask is a specialty census (写代码, 查资料 subset).",
 			memberN, frac2,
 		)
 	}
@@ -275,7 +281,9 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		b.WriteString(" For all-hands / intro-everyone asks: choice must be \"all\", count=full roster; never a single mN.")
 	}
 	if whoCan {
-		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros that merely mention skills.")
+		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros. " +
+			"「谁会写代码」→ coding mN only (choice=mN, noul≈0); never choice=all / never full-roster count. " +
+			"「谁会查资料」→ research mNs only (count=how many researchers).")
 	}
 	if syn := strings.TrimSpace(synopsis); syn != "" {
 		b.WriteString("\n\nRecent context (prior chat only — not an override of criteria roles):\n")
@@ -336,7 +344,14 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 	}
 	if remapAllToCapable {
-		ids, conf2 := mapCapableMultiFromProbs(probs, keyToID, memberOrder, k, countHint)
+		mapCount := countHint
+		// Inflated full-roster count on who-can (Langfuse 21ed840c / 12:18 CST 「谁会写代码」):
+		// SystemOne returned choice=all + noul≈0.91 → count=N; trusting count expanded everyone.
+		// Already-approved who-can remap: never literal full roster — infer from relative mN probs.
+		if whoCan && countHint >= len(keyToID) && len(keyToID) > 0 {
+			mapCount = 0
+		}
+		ids, conf2 := mapCapableMultiFromProbs(probs, keyToID, memberOrder, k, mapCount)
 		if len(ids) == 0 {
 			return nil, 0, false, false
 		}
@@ -464,7 +479,8 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 }
 
 // mapCapableMultiFromProbs picks top-N opaque mN members by probability for who-can / subset-all.
-// When countHint >= 2, takes that many; otherwise keeps members within 40% of the best mN prob.
+// When countHint >= 2, takes that many; countHint 0/<2 keeps members within 40% of the best mN prob.
+// Callers should pass countHint=0 when who-can choice=all claimed a full-roster count (inflated).
 func mapCapableMultiFromProbs(probs map[string]float64, keyToID map[string]string, memberOrder []string, k, countHint int) ([]string, float64) {
 	type ranked struct {
 		key  string

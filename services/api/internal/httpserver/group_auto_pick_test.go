@@ -408,13 +408,18 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", false, true)
 	pick3 := q3["pick"].(map[string]any)
 	instr3 := fmt.Sprint(pick3["instructions"])
-	for _, needle := range []string{"CAPABILITY CENSUS", "写代码", "查资料", "criteria", "all"} {
+	for _, needle := range []string{"CAPABILITY CENSUS", "谁会写代码", "写代码", "查资料", "criteria", "never park on", "NEAR-ZERO"} {
 		if !strings.Contains(instr3, needle) {
 			t.Fatalf("who-can instructions missing %q: %s", needle, instr3)
 		}
 	}
+	criteria3 := pick3["criteria"].(map[string]string)
+	if !strings.Contains(criteria3[autoPickDecisionAllKey], "ONLY if EVERY") {
+		t.Fatalf("who-can criteria[all] should discourage full roster, got %q", criteria3[autoPickDecisionAllKey])
+	}
 	count3 := q3[autoPickDecisionCountKey].(map[string]any)
-	if !strings.Contains(fmt.Sprint(count3["instructions"]), "CAPABILITY CENSUS count") {
+	countInstr3 := fmt.Sprint(count3["instructions"])
+	if !strings.Contains(countInstr3, "CAPABILITY CENSUS count") || !strings.Contains(countInstr3, "FORBIDDEN") {
 		t.Fatalf("who-can count instructions=%v", count3["instructions"])
 	}
 	if !strings.Contains(st3, "Member roles are in the pick criteria") {
@@ -422,6 +427,9 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	}
 	if !strings.Contains(st3, "not an override of criteria roles") {
 		t.Fatalf("state should warn Recent context is not role override, got %q", st3)
+	}
+	if !strings.Contains(st3, "谁会写代码") || !strings.Contains(st3, "never choice=all") {
+		t.Fatalf("state should mandate coder-only for 谁会写代码, got %q", st3)
 	}
 }
 
@@ -826,6 +834,88 @@ func TestMapDecisionWhoCanRemapsAllToCapableMulti(t *testing.T) {
 	}
 	if conf < autoPickConfidenceFloor {
 		t.Fatalf("conf=%.2f should clear floor after who-can remap", conf)
+	}
+}
+
+func TestMapDecisionWhoCanInflatedAllCountNotFullRoster(t *testing.T) {
+	// Langfuse 21ed840c / 12:18 CST 「谁会写代码」: choice=all, noul≈0.91→count=3,
+	// probs all:0.4591 m0:0.2663 m1:0.1758 m2:0.0989 (m0=coder). Old mapping trusted
+	// count=3 and expanded everyone. Inflated full-roster count must use relative mN
+	// inference (approved who-can remap) — never literal roster.
+	keyToID := map[string]string{"m0": "33", "m1": "22", "m2": "44"}
+	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{
+			"type":   "choice",
+			"choice": "all",
+			"probabilities": map[string]any{
+				"all": 0.4591, "m0": 0.2663, "m1": 0.1758, "m2": 0.0989,
+			},
+			"confidence": 0.1025,
+		},
+		"count": map[string]any{"type": "noul", "noul": 0.908},
+	}, keyToID, []string{"33", "22", "44"}, 3, true, true, 3)
+	if !ok || allSel {
+		t.Fatalf("ok=%v allSel=%v (must not expand literally everyone)", ok, allSel)
+	}
+	if len(ids) >= 3 {
+		t.Fatalf("inflated who-can count must not pick full roster, got %#v", ids)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got["33"] {
+		t.Fatalf("coder 33 (top mN) must be included, got %#v", ids)
+	}
+	if conf < autoPickConfidenceFloor {
+		t.Fatalf("conf=%.2f should clear floor after who-can remap", conf)
+	}
+}
+
+func TestAutoPickDecisionWhoCanCodeInflatedAllFailsNotEveryone(t *testing.T) {
+	// End-to-end: same Langfuse shape through autoPickDecision — must not return all 3.
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick := questions["pick"].(map[string]any)
+			if !strings.Contains(fmt.Sprint(pick["instructions"]), "谁会写代码") {
+				t.Fatalf("who-can decide must get strengthened 写代码 census prompt")
+			}
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "all",
+					"probabilities": map[string]any{
+						"all": 0.4591, "m0": 0.2663, "m1": 0.1758, "m2": 0.0989,
+					},
+					"confidence": 0.1025,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.908},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "谁会写代码", members, agents, "22", 1, "我叫 44，主要负责查资料、阅读和整理总结。 | 谁会写代码", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision (not fail-open)", got.Method)
+	}
+	if got.Fallback == "all" || len(got.AgentIDs) >= 3 {
+		t.Fatalf("must not expand inflated who-can all to roster, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["33"] {
+		t.Fatalf("coder 33 must be selected, got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can must not AllowSecondFailOpen")
 	}
 }
 

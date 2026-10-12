@@ -123,7 +123,9 @@ resolveGroupSendTargets / planSendTargets
 | **decision** | **完全信任决策模型** choice+count+probs（**无** keyword / role-match 纠偏）。Prompt 要求：按 criteria 里各 mN 的角色标签做能力普查——写代码→仅 coder；查资料→全部 research；**禁止**在仅子集能做时选 `all` 或把 count 抬到全员。映射：`choice=all` + who-can → 按 mN 概率 + `count` 取有能力子集（不字面展开全员）；`choice=mN` → 主选 + 相对高概率同伴。置信度取 `max(confidence, probs[choice], probs[all], …)`，避免低 `confidence` 字段误 fail-open |
 | **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1`（decision 失败 fail-open 时仍用） |
 
-**Prompt 驱动（who-can）**：`buildAutoPickDecisionPayload` 在 who-can 时强化 instructions / count noul / state——明确「匹配 criteria 角色，Recent context 同伴自介不能覆盖角色」；示例含写代码→单 mN、查资料→多 research。已移除 `capableIDsFromRoleMatch` / `who_can_role_match` 覆盖 SystemOne 结果的路径。
+**Prompt 驱动（who-can）**：`buildAutoPickDecisionPayload` 在 who-can 时强化 instructions / count noul / state / `criteria[all]`——明确「匹配 criteria 角色，Recent context 同伴自介不能覆盖角色」；硬例「谁会写代码」→仅 coding mN + noul≈0（禁止 `all`/全员 count），「谁会查资料」→多 research。已移除 `capableIDsFromRoleMatch` / `who_can_role_match` 覆盖 SystemOne 结果的路径。
+
+**映射硬化（who-can，已批准的 all→capable 重映射）**：`choice=all` + `count≥成员数`（SystemOne 把 noul 抬到全员，如 Langfuse `21ed840c` / 12:18 CST「谁会写代码」）时**不**信任该 count，改为按 mN 相对概率推断有能力子集（与 count 省略/undershoot 同一路径）。不是 keyword role-match，也不是 all-hands underpick→全员展开。
 
 **PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。这是结构安全，不是 keyword 纠偏。
 
