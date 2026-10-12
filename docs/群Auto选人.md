@@ -121,6 +121,8 @@ resolveGroupSendTargets / planSendTargets
 | **decision** | SystemOne 常误选 `choice=all` 且 `confidence` 很低（概率质量压在 `all` 上、mN 被稀释）。映射：**不**按字面展开全员；先按 `count` + mN 取子集，若 `choice=all` 且 mN 被 `all` 稀释 / 含无能力成员 / 少于角色匹配集合，则改用角色匹配普查（如 22+44）；置信度取 `max(confidence, probs[choice], probs[all], Σ selected)`，避免 low-conf fail-open 掉进 heuristic K=1 |
 | **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1` |
 
+**Role-match 纠偏（who-can）**：decision 映射后若含无能力成员 / 漏选 / `choice=all` 且 mN 被 `all` 稀释，改用 `capableIDsFromRoleMatch`（**仅 user 文本**打分，忽略 synopsis，过滤通用词「负责」等 + 相对分阈值），避免 Recent context 里同伴自介污染导致 coder 进普查。
+
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
 
 **日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`

@@ -430,13 +430,13 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 }
 
 
-// capableIDsFromRoleMatch returns members with positive specialty score for the ask (capable census).
-// Same scoring as heuristic AutoPick; empty when nothing matches.
+// capableIDsFromRoleMatch returns members with a strong specialty score for the ask (capable census).
+// Scores the user message only — Recent-context synopsis often repeats peer intros
+// (「我是44，主要负责查资料…」) and would mark every 「负责…」 bot capable via generic tokens.
+// Empty when nothing matches.
 func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Agent, synopsis string) []string {
+	_ = synopsis // intentionally unused: capable census must not absorb chat-context role bleed
 	haystack := strings.ToLower(strings.TrimSpace(userText))
-	if syn := strings.TrimSpace(synopsis); syn != "" {
-		haystack = haystack + "\n" + strings.ToLower(syn)
-	}
 	if haystack == "" || len(members) == 0 {
 		return nil
 	}
@@ -475,6 +475,14 @@ func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Age
 		}
 		return ranked[i].id < ranked[j].id
 	})
+	floor := capableScoreFloor(ranked[0].score)
+	filtered := ranked[:0]
+	for _, e := range ranked {
+		if e.score >= floor {
+			filtered = append(filtered, e)
+		}
+	}
+	ranked = filtered
 	capN := decisionMemberCap(len(members))
 	if len(ranked) > capN {
 		ranked = ranked[:capN]

@@ -151,8 +151,11 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 
 	haystack := strings.ToLower(strings.TrimSpace(userText))
-	if syn := strings.TrimSpace(synopsis); syn != "" {
-		haystack = haystack + "\n" + strings.ToLower(syn)
+	// Who-can census must not absorb Recent-context role language (e.g. peer 「负责查资料」).
+	if !isWhoCanIntent(userText) {
+		if syn := strings.TrimSpace(synopsis); syn != "" {
+			haystack = haystack + "\n" + strings.ToLower(syn)
+		}
 	}
 	if haystack == "" {
 		return failOpenLead()
@@ -196,12 +199,23 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 
 	n := k
-	// Capability census (「谁会/都谁会/who can」): every positive match should reply, not soft K=1.
-	if isWhoCanIntent(userText) && len(ranked) > n {
-		n = len(ranked)
-		capN := decisionMemberCap(len(members))
-		if n > capN {
-			n = capN
+	// Capability census (「谁会/都谁会/who can」): every strong match should reply, not soft K=1.
+	if isWhoCanIntent(userText) && len(ranked) > 0 {
+		best := ranked[0].score
+		floor := capableScoreFloor(best)
+		filtered := ranked[:0]
+		for _, e := range ranked {
+			if e.score >= floor {
+				filtered = append(filtered, e)
+			}
+		}
+		ranked = filtered
+		if len(ranked) > n {
+			n = len(ranked)
+			capN := decisionMemberCap(len(members))
+			if n > capN {
+				n = capN
+			}
 		}
 	}
 	if n > len(ranked) {
@@ -220,6 +234,16 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 		LeadFallback:        map[string]bool{},
 		AllowSecondFailOpen: true,
 	}
+}
+
+// capableScoreFloor drops weak positive scores vs the best specialty hit
+// (synopsis / generic-token residue must not admit the wrong role).
+func capableScoreFloor(best int) int {
+	if best <= 1 {
+		return 1
+	}
+	// Keep roughly the top half of the best score (ceil(best/2)).
+	return (best + 1) / 2
 }
 
 func autoPickConfidence(bestScore int) float64 {
@@ -275,6 +299,9 @@ func tokenizeRoleHints(role string) []string {
 	add := func(s string) {
 		s = strings.TrimSpace(strings.ToLower(s))
 		if s == "" || len([]rune(s)) < 2 {
+			return
+		}
+		if autoPickRoleHintStopword(s) {
 			return
 		}
 		if _, ok := seen[s]; ok {
@@ -351,13 +378,27 @@ var roleSynonymBuckets = []struct {
 		roleNeedles: []string{"写", "文案", "写作", "编辑", "内容", "诗人", "作家"},
 	},
 	{
-		userNeedles: []string{"查资料", "搜索", "研究", "调研", "检索", "百科"},
+		userNeedles: []string{"查资料", "查下资料", "查一下资料", "搜一下", "搜索", "研究", "调研", "检索", "百科"},
 		roleNeedles: []string{"研究", "调研", "资料", "搜索", "分析"},
 	},
 	{
 		userNeedles: []string{"翻译", "英文", "中译", "localize"},
 		roleNeedles: []string{"翻译", "译", "语言", "英语"},
 	},
+}
+
+// autoPickRoleHintStopword drops generic tokens that appear in nearly every
+// Chinese agent blurb (「负责…」). Matching them against Recent-context synopsis
+// (another bot's self-intro) falsely marks every member "capable".
+func autoPickRoleHintStopword(tok string) bool {
+	switch tok {
+	case "负责", "主要", "进行", "可以", "需要", "输出", "以及", "或者",
+		"自己", "用户", "问题", "回答", "尽量", "相关", "工作", "任务",
+		"帮助", "提供", "成员", "助手", "机器人", "能力", "内容", "信息":
+		return true
+	default:
+		return false
+	}
 }
 
 func scoreRoleSynonyms(haystack, roleBlob string) int {
