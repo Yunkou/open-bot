@@ -1284,6 +1284,30 @@ func (d *DB) AddHandoffNote(conversationID, threadRootID string, hp HandoffPaylo
 	return m, true, nil
 }
 
+// ListUserConversationIDs returns all conversation ids owned by userID (DM and
+// channel threads). Used before PurgeUserData so Langfuse session cleanup can
+// still target session_id (= conversation_id) after rows are hard-deleted.
+func (d *DB) ListUserConversationIDs(userID string) ([]string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, nil
+	}
+	rows, err := d.SQL.Query(`SELECT id FROM conversations WHERE user_id = $1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]string, 0)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // ListConversationIDsForAgent returns conversation ids where agent_id is the primary bot
 // (DM thread or channel conversation whose agent_id points at this agent).
 func (d *DB) ListConversationIDsForAgent(userID, agentID string) ([]string, error) {

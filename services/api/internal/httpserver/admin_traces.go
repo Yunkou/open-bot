@@ -97,19 +97,29 @@ func (s *Server) langfuseRequest(ctx context.Context, method, path string, query
 }
 
 const (
-	langfusePurgePageLimit   = 100
-	langfusePurgeMaxPages    = 50
-	langfusePurgeDeleteBatch = 100 // Langfuse allows up to 1000; keep moderate batches
+	langfusePurgePageLimit    = 100
+	langfusePurgeMaxPages     = 50
+	langfusePurgeDeleteBatch  = 100 // Langfuse allows up to 1000; keep moderate batches
+	langfusePurgeMaxSessions  = 500 // cap sessionId follow-up queries per user wipe
+	langfusePurgeScorePageLim = 100 // Scores API v3 max page size
+	langfusePurgeMaxScorePage = 50
 )
 
-// purgeLangfuseUserTraces best-effort deletes Langfuse traces for userID.
+// purgeLangfuseUserTraces best-effort deletes Langfuse data for userID.
 //
-// Langfuse v4 events_only: list via GET /api/public/v2/observations (userId
-// filter, plus metadata.user_id fallback), then DELETE /api/public/traces
-// {"traceIds":[…]}. Deletion is asynchronous on the Langfuse worker (often
-// seconds, up to ~15m). Never fails the caller — returns a status string for
-// side_effects.langfuse (like mem0).
-func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) string {
+// Langfuse v4 events_only: list via GET /api/public/v2/observations (userId,
+// metadata.user_id, and sessionId = conversation_id), then DELETE
+// /api/public/traces {"traceIds":[…]}. Trace delete cascades related
+// observations and scores. Session-level scores (not attached to a trace) are
+// listed via GET /api/public/v3/scores?sessionId=… and removed with
+// DELETE /api/public/scores/{id}. The Users/Sessions UI rows are aggregates of
+// traces — they disappear once traces are gone. Deletion is asynchronous on
+// the Langfuse worker (often seconds, up to ~15m). Never fails the caller —
+// returns a status string for side_effects.langfuse (like mem0).
+//
+// sessionIDs should be collected from conversations before PurgeUserData so
+// session-scoped traces/scores are still reachable after the DB wipe.
+func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string, sessionIDs []string) string {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return "skipped: empty user"
@@ -129,8 +139,27 @@ func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) str
 	fromStr := from.Format(time.RFC3339)
 	toStr := to.Format(time.RFC3339)
 
-	seen := map[string]struct{}{}
+	seenTrace := map[string]struct{}{}
 	var allIDs []string
+	seenSession := map[string]struct{}{}
+	var sessions []string
+	addSession := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, ok := seenSession[id]; ok {
+			return
+		}
+		if len(sessions) >= langfusePurgeMaxSessions {
+			return
+		}
+		seenSession[id] = struct{}{}
+		sessions = append(sessions, id)
+	}
+	for _, id := range sessionIDs {
+		addSession(id)
+	}
 
 	collect := func(label string, q url.Values) string {
 		cursor := ""
@@ -161,14 +190,22 @@ func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) str
 					continue
 				}
 				traceID := strings.TrimSpace(asString(row["traceId"]))
-				if traceID == "" {
-					continue
+				if traceID != "" {
+					if _, ok := seenTrace[traceID]; !ok {
+						seenTrace[traceID] = struct{}{}
+						allIDs = append(allIDs, traceID)
+					}
 				}
-				if _, ok := seen[traceID]; ok {
-					continue
+				sid := strings.TrimSpace(asString(row["sessionId"]))
+				if sid == "" {
+					if meta, _ := row["metadata"].(map[string]any); meta != nil {
+						sid = strings.TrimSpace(asString(meta["conversation_id"]))
+						if sid == "" {
+							sid = strings.TrimSpace(asString(meta["session_id"]))
+						}
+					}
 				}
-				seen[traceID] = struct{}{}
-				allIDs = append(allIDs, traceID)
+				addSession(sid)
 			}
 			meta, _ := raw["meta"].(map[string]any)
 			next := ""
@@ -211,30 +248,132 @@ func (s *Server) purgeLangfuseUserTraces(ctx context.Context, userID string) str
 	qMeta.Set("filter", string(filter))
 	_ = collect("metadata", qMeta) // best-effort; ignore errors if primary already found IDs
 
-	if len(allIDs) == 0 {
-		return fmt.Sprintf("deleted:0 (no traces matched userId=%s or metadata.user_id)", userID)
+	// Session pass: conversation_id is session_id. Covers observations that lack
+	// userId (common on some child spans) and any leftover session scores later.
+	// Re-scan when userId/metadata harvest discovers extra session ids.
+	for i := 0; i < len(sessions); i++ {
+		qSess := url.Values{}
+		qSess.Set("sessionId", sessions[i])
+		_ = collect("session:"+sessions[i], qSess)
 	}
 
 	deleted := 0
-	for i := 0; i < len(allIDs); i += langfusePurgeDeleteBatch {
-		end := i + langfusePurgeDeleteBatch
-		if end > len(allIDs) {
-			end = len(allIDs)
+	if len(allIDs) > 0 {
+		for i := 0; i < len(allIDs); i += langfusePurgeDeleteBatch {
+			end := i + langfusePurgeDeleteBatch
+			if end > len(allIDs) {
+				end = len(allIDs)
+			}
+			chunk := allIDs[i:end]
+			payload, _ := json.Marshal(map[string]any{"traceIds": chunk})
+			dCode, dBody, dErr := s.langfuseRequest(ctx, http.MethodDelete, "/api/public/traces", nil, payload)
+			if dErr != nil {
+				return fmt.Sprintf("partial: deleted=%d delete_err=%s", deleted, dErr.Error())
+			}
+			if dCode < 200 || dCode >= 300 {
+				return fmt.Sprintf("partial: deleted=%d delete_http=%d %s", deleted, dCode, truncateStr(string(dBody), 200))
+			}
+			deleted += len(chunk)
 		}
-		chunk := allIDs[i:end]
-		payload, _ := json.Marshal(map[string]any{"traceIds": chunk})
-		dCode, dBody, dErr := s.langfuseRequest(ctx, http.MethodDelete, "/api/public/traces", nil, payload)
-		if dErr != nil {
-			return fmt.Sprintf("partial: deleted=%d delete_err=%s", deleted, dErr.Error())
-		}
-		if dCode < 200 || dCode >= 300 {
-			return fmt.Sprintf("partial: deleted=%d delete_http=%d %s", deleted, dCode, truncateStr(string(dBody), 200))
-		}
-		deleted += len(chunk)
 	}
 
+	// Session-level scores are not always cascade-deleted with traces; wipe by session.
+	scoreDeleted, scoreErr := s.purgeLangfuseSessionScores(ctx, sessions)
+
+	parts := []string{fmt.Sprintf("deleted:%d traces", deleted)}
+	if len(sessions) > 0 {
+		parts = append(parts, fmt.Sprintf("sessions:%d", len(sessions)))
+	}
+	if scoreDeleted > 0 || scoreErr != "" {
+		parts = append(parts, fmt.Sprintf("scores:%d", scoreDeleted))
+	}
+	if scoreErr != "" {
+		parts = append(parts, "score_err="+scoreErr)
+	}
+	if deleted == 0 && scoreDeleted == 0 && scoreErr == "" {
+		return fmt.Sprintf("deleted:0 (no traces/scores matched userId=%s, metadata.user_id, or %d sessions)", userID, len(sessions))
+	}
 	// Langfuse applies deletes asynchronously (worker → ClickHouse events table).
-	return fmt.Sprintf("deleted:%d queued (async; typically visible within minutes)", deleted)
+	parts = append(parts, "queued (async; typically visible within minutes)")
+	return strings.Join(parts, "; ")
+}
+
+// purgeLangfuseSessionScores lists Scores API v3 by sessionId and deletes each
+// leftover score (covers session-kind scores that survive trace deletion).
+func (s *Server) purgeLangfuseSessionScores(ctx context.Context, sessionIDs []string) (int, string) {
+	if len(sessionIDs) == 0 {
+		return 0, ""
+	}
+	deleted := 0
+	var firstErr string
+	noteErr := func(msg string) {
+		if firstErr == "" {
+			firstErr = truncateStr(msg, 160)
+		}
+	}
+	for _, sid := range sessionIDs {
+		cursor := ""
+		for page := 0; page < langfusePurgeMaxScorePage; page++ {
+			q := url.Values{}
+			q.Set("limit", strconv.Itoa(langfusePurgeScorePageLim))
+			q.Set("sessionId", sid)
+			q.Set("fields", "subject")
+			if cursor != "" {
+				q.Set("cursor", cursor)
+			}
+			code, body, err := s.langfuseRequest(ctx, http.MethodGet, "/api/public/v3/scores", q, nil)
+			if err != nil {
+				noteErr(fmt.Sprintf("list_err=%s", err.Error()))
+				break
+			}
+			if code < 200 || code >= 300 {
+				// v3 may be unavailable on older Langfuse; treat as best-effort skip.
+				if code == http.StatusNotFound || code == http.StatusMethodNotAllowed {
+					noteErr(fmt.Sprintf("scores_api_unavailable http=%d", code))
+					return deleted, firstErr
+				}
+				noteErr(fmt.Sprintf("list_http=%d %s", code, truncateStr(string(body), 120)))
+				break
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				noteErr("parse_err=" + err.Error())
+				break
+			}
+			data, _ := raw["data"].([]any)
+			for _, item := range data {
+				row, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				scoreID := strings.TrimSpace(asString(row["id"]))
+				if scoreID == "" {
+					continue
+				}
+				dCode, dBody, dErr := s.langfuseRequest(ctx, http.MethodDelete, "/api/public/scores/"+url.PathEscape(scoreID), nil, nil)
+				if dErr != nil {
+					noteErr("delete_err=" + dErr.Error())
+					continue
+				}
+				// 202 Accepted is the normal async response.
+				if dCode < 200 || dCode >= 300 {
+					noteErr(fmt.Sprintf("delete_http=%d %s", dCode, truncateStr(string(dBody), 100)))
+					continue
+				}
+				deleted++
+			}
+			meta, _ := raw["meta"].(map[string]any)
+			next := ""
+			if meta != nil {
+				next = strings.TrimSpace(asString(meta["cursor"]))
+			}
+			if next == "" || len(data) == 0 {
+				break
+			}
+			cursor = next
+		}
+	}
+	return deleted, firstErr
 }
 
 func cloneURLValues(in url.Values) url.Values {

@@ -457,12 +457,15 @@ func (s *Server) handleAdminDeleteUserMachine(w http.ResponseWriter, r *http.Req
 func (s *Server) purgeThenSoftDeleteUser(r *http.Request, userID string) (agentIDs []string, purge *db.UserDataPurgeResult, side map[string]any, err error) {
 	s.abortUserTasks(userID)
 
+	// Capture conversation ids before hard purge — Langfuse session_id == conversation_id.
+	sessionIDs, _ := s.db.ListUserConversationIDs(userID)
+
 	purge, err = s.db.PurgeUserData(userID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	side = s.purgeUserSideEffects(r, userID)
+	side = s.purgeUserSideEffects(r, userID, sessionIDs)
 
 	_, err = s.db.SoftDeleteUser(userID)
 	if err != nil {
@@ -509,6 +512,8 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 
 	s.abortUserTasks(target.ID)
 
+	sessionIDs, _ := s.db.ListUserConversationIDs(target.ID)
+
 	result, err := s.db.PurgeUserData(target.ID)
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -519,7 +524,7 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	side := s.purgeUserSideEffects(r, target.ID)
+	side := s.purgeUserSideEffects(r, target.ID, sessionIDs)
 
 	s.writeAudit(admin.OrgID, admin.ID, "user.purge_data", "user", target.ID, map[string]any{
 		"username":     target.Username,
@@ -545,7 +550,7 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 			"inbound_hooks", "llm_connections", "user_skills", "user_skill_files",
 			"user_skill_package_files", "a2a_tasks", "a2a_push_configs", "org_invites(created)",
 			"attachments(uploads)", "运行环境(host data)", "mem0(best-effort)",
-			"langfuse traces(best-effort)",
+			"langfuse traces/scores/sessions(best-effort by userId+session)",
 		},
 		"kept": []string{
 			"users 账号行", "password_hash", "role", "org_id", "email", "casdoor_sub", "created_at",
@@ -554,7 +559,7 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *Server) purgeUserSideEffects(r *http.Request, userID string) map[string]any {
+func (s *Server) purgeUserSideEffects(r *http.Request, userID string, sessionIDs []string) map[string]any {
 	out := map[string]any{}
 
 	// 运行环境：停掉容器并删除本机用户数据目录（含 checkpoints）。
@@ -580,7 +585,7 @@ func (s *Server) purgeUserSideEffects(r *http.Request, userID string) map[string
 	}
 
 	out["mem0"] = s.purgeRuntimeMem0(r, userID)
-	out["langfuse"] = s.purgeLangfuseUserTraces(r.Context(), userID)
+	out["langfuse"] = s.purgeLangfuseUserTraces(r.Context(), userID, sessionIDs)
 	return out
 }
 
