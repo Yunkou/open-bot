@@ -1,7 +1,8 @@
 # 群 Auto 选人 · Current user intent 联合判定（设计）
 
-日期：2026-10-12 · 状态：**设计提案**（未实现）  
+日期：2026-10-12 · 状态：**已实现 v1**（确定性联合，零额外 LLM）  
 对照：`docs/群Auto选人.md` §4 B 档；实现入口 `currentUserIntentSummary` / `buildAutoPickDecisionPayload` / `recentMessagesSynopsis`  
+实现：`currentUserIntentSummary(userText, synopsis)` / `currentUserIntentJoin` → `follow_up|new|soft|none`；log `auto_pick=decision intent_join=`  
 触发：Langfuse peek/obs `c5c3d672118c5d06` · trace `0cdcdd00dfed9e940078a653b6e8e83c` · 2026-10-12 18:57:36 CST
 
 ---
@@ -192,8 +193,8 @@ Agent-runtime compact 的会话摘要偏长窗、多 bot 混合，且常滞后�
 | 步 | 内容 | 工作量 |
 |---|---|---|
 | **0** | 本文档（设计） | 本提交 |
-| **1** | 实现方案 A：`currentUserIntentSummary(userText, synopsis)` + prior 跳过 who-can + 单测（本 peek 形状；38529ebd INTERRUPT 不回退） | 小 |
-| **2** | Prompt 文案微调 §4 + log `intent_join=` | 极小 |
+| **1** | ~~实现方案 A：`currentUserIntentSummary(userText, synopsis)` + prior 跳过 who-can + 单测（本 peek 形状；38529ebd INTERRUPT 不回退）~~ **已落地** | 小 |
+| **2** | ~~Prompt 文案微调 §4 + log `intent_join=`~~ **已落地** | 极小 |
 | **3** | 线上回放 / 新 peek：短追问 → 仅 coder；新长专长问 → 仍 newest wins | 验证 |
 | **4** | 若仍有歧义短句 → 评估方案 B flag | 可选 |
 
@@ -217,4 +218,4 @@ Agent-runtime compact 的会话摘要偏长窗、多 bot 混合，且常滞后�
 
 > **Current user intent**：由 **会话最近 prior USER 任务摘要 ⊕ 本轮问题** 联合生成（短追问绑 prior；新问 / who-can / 自洽专长问仅本轮）；不再是本轮原文单飞。
 
-在落地 PR 前，以本文为准。
+v1 已落地；主文档 §4 B 已回写。方案 B（意图微调用）仍可选。

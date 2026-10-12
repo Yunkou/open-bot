@@ -67,7 +67,7 @@ resolveGroupSendTargets / planSendTargets
 
 ### B 档细节
 
-- **State（四项输入）**：① `User message:`；② **Current user intent**（`用户想：…`；**今日**由本轮最新 user 话 echo；**规划**改为「会话最新 prior USER 摘要 ⊕ 当前问题」联合生成——短追问绑 prior，新问打断未完成旧问；见 `docs/群Auto选人-意图联合判定.md`）；③ **Member capability profiles**（成员能力画像，每 mN 的显示名 — 角色）；④ `Recent context:`（仅当 intent 是短追问时支撑 FOLLOW-UP：优先近期 **USER** 话 + **Last answered by**；跳过本轮刚落库的 user；bot 正文若为 SVG/HTML 不占文本槽，但仍记录作答者身份）
+- **State（四项输入）**：① `User message:`；② **Current user intent**（`用户想：…`；由 **会话最近 prior USER 任务摘要 ⊕ 本轮问题** 联合生成——短追问绑 prior（跳过 who-can）；新问 / who-can / 自洽专长问仅本轮；见 `docs/群Auto选人-意图联合判定.md`）；③ **Member capability profiles**（成员能力画像，每 mN 的显示名 — 角色）；④ `Recent context:`（仅当 intent 是短追问时支撑 FOLLOW-UP：优先近期 **USER** 话 + **Last answered by**；跳过本轮刚落库的 user；bot 正文若为 SVG/HTML 不占文本槽，但仍记录作答者身份）
 - **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
 - **指令（任务类型）**：模型先按 **Current user intent** 分类 **ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP** 再选 mN；集体介绍 / 轮流 / roast → `all`；能力普查 → 有能力子集；专长做事 → 匹配画像；**FOLLOW-UP** 仅当 intent 是短追问，靠 Recent 里 prior USER + Last answered by 延续专长，**禁止** `choice=all`；**INTERRUPT**：新专长/普查/全员问打断未完成旧问（newest wins），不得因 Recent 多 bot 作答就选 `all`（**不**靠 SVG/HTML/哭脸 keyword 针表）
 - **映射**：`choice=all` → 频道顺序展开全部 `agent_id`（**who-can 例外**：按 mN 概率 + `count` 取有能力子集，不展开全员）；否则仅接受 `mN`；按 probability 降序、≥ θ（who-can 用相对阈值）取 top-N；`count` noul→1..N 定人数；无 count / who-can 时可由多路高概率推断多人（不必 `all`）
@@ -131,13 +131,13 @@ resolveGroupSendTargets / planSendTargets
 
 **PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `AllowSecondFailOpen=false`（否则「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST，Langfuse `a32fde27` / obs `5808f45a`）。**不** LeadFallback——无关选中 bot 可 PASS。heuristic 与 decision 成功路径均适用。
 
-> **缺口 / 设计中（2026-10-12）**：`Current user intent` 今日仍是本轮原文 echo；短追问（如「修改下，换成动物的表情」，Langfuse peek `c5c3d672`）缺会话任务锚点 → 易误 `choice=all`。目标改为「会话最新 prior USER 摘要 ⊕ 当前问题」联合判定。设计提案见 `docs/群Auto选人-意图联合判定.md`（推荐确定性拼接 v1，零额外 LLM）。
+> **已落地（2026-10-12）**：`Current user intent` = prior USER ⊕ 本轮联合（`currentUserIntentSummary(userText, synopsis)`，零额外 LLM）。短追问（peek `c5c3d672`「修改下，换成动物的表情」）绑最近非 who-can prior；INTERRUPT / who-can / 自洽新问仍 newest-only。详见 `docs/群Auto选人-意图联合判定.md`。
 
-**专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 意图摘要 + 作答连续性，非 keyword 针表）**：decide state **始终**写入 **Current user intent**（`用户想：…`）与成员能力画像；prompt 要求按 intent 分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**INTERRUPT / newest wins**：新专长问（如「通过选择不同心情生成不同svg」，Langfuse peek `38529ebd`）打断未完成旧问，不得因 Recent 里多 bot 作答就选 `all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（`probs[all]` 有实质质量时才做 full-roster count 展开；choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
+**专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 联合意图 + 作答连续性，非 keyword 针表）**：decide state **始终**写入 **Current user intent**（prior USER ⊕ 本轮；短追问→`继续完善「…」：…`）与成员能力画像；prompt 要求按 intent 分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP；intent 已含「继续完善」时禁止因多人 Last answered by 选 `all`。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**INTERRUPT / newest wins**：新专长问（如「通过选择不同心情生成不同svg」，Langfuse peek `38529ebd`）打断未完成旧问，不得因 Recent 里多 bot 作答就选 `all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（`probs[all]` 有实质质量时才做 full-roster count 展开；choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
 
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 
-**日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
+**日志：** `auto_pick=decision intent_join=follow_up|new|soft|none intent=…`；`auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
 
 ---
 

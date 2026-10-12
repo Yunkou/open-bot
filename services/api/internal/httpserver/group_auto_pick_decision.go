@@ -103,6 +103,9 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	if len(keyToID) == 0 {
 		return groupAutoPickResult{}, false
 	}
+	if _, joinMode := currentUserIntentJoin(userText, synopsis); joinMode != "" {
+		log.Printf("auto_pick=decision intent_join=%s intent=%q", joinMode, clipRunes(currentUserIntentSummary(userText, synopsis), 80))
+	}
 
 	if ctx == nil {
 		ctx = context.Background()
@@ -283,15 +286,16 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"Match the task to Member capability profiles — never park on \"all\", never pick an unrelated role. " +
 		"Research/lookup → research/资料/搜索 profiles; coding/debug/implementation → coding/写代码/排障 profiles only; " +
 		"writing/文案 → writer profiles only. Set count to how many matching profiles should reply.\n" +
-		"4) FOLLOW-UP: only when Current user intent is a short continuation of prior work (anaphora / same-task tweak). " +
+		"4) FOLLOW-UP: only when Current user intent is a short continuation of prior work (anaphora / same-task tweak), including when intent already binds a prior task as 「继续完善「…」」. " +
 		"Use Recent context: prior USER turns + \"Last answered by\" (which bot replied last). " +
 		"Keep that same specialty role mN(s) — usually the last answering bot when their profile still fits; " +
-		"choice = that mN; count near one specialist; NEVER choice=\"all\". " +
+		"choice = that mN; count near one specialist; NEVER choice=\"all\" — FORBIDDEN to pick all merely because Last answered by lists multiple bots. " +
 		"Member capability profiles remain authoritative if last answerer was a mismatch.\n" +
 		"INTERRUPT: when Current user intent is a new ask (new SPECIALTY / WHO-CAN / ALL-HANDS), newest wins — " +
 		"ignore unfinished prior USER asks and do not pick \"all\" merely because Recent shows multiple Last-answered-by bots.\n" +
 		"SINGLE / vague: one best-matching profile, or the generalist. When several specialists fit, set count and probabilities for a multi subset (not only all-or-one). " +
-		"Classify task type from Current user intent first. Reserve choice=\"all\" for ALL-HANDS only — not SPECIALTY or FOLLOW-UP."
+		"Classify task type from Current user intent (may already bind prior session task when this turn is a short follow-up; if intent states a new self-contained ask, newest wins). Reserve choice=\"all\" for ALL-HANDS only — not SPECIALTY or FOLLOW-UP. " +
+		"If intent already contains 「继续完善「…」」, treat as FOLLOW-UP/SPECIALTY — FORBIDDEN to pick choice=\"all\" merely because Last answered by lists multiple bots."
 	if whoCan {
 		instr += " THIS MESSAGE IS A CAPABILITY CENSUS (who-can): follow WHO-CAN only — never treat it as ALL-HANDS. " +
 			"You MUST choose a capable mN as choice — never park on \"all\" for a specialty census. " +
@@ -340,11 +344,11 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	utterance := strings.TrimSpace(userText)
 	b.WriteString("User message:\n")
 	b.WriteString(utterance)
-	// Current user intent: concise 「用户想…」 from latest turn — authoritative vs stale Recent asks.
+	// Current user intent: prior USER task ⊕ current ask (deterministic; zero extra LLM).
 	if utterance != "" {
-		b.WriteString("\n\nCurrent user intent (authoritative this turn — newest ask wins over unfinished prior asks):\n")
+		b.WriteString("\n\nCurrent user intent (authoritative this turn — may bind prior session task on short follow-up; newest ask wins on new/self-contained/who-can):\n")
 		b.WriteString("用户想：")
-		b.WriteString(currentUserIntentSummary(utterance))
+		b.WriteString(currentUserIntentSummary(utterance, synopsis))
 	}
 	b.WriteString("\n\nMember capability profiles (authoritative — match tasks to these roles):\n")
 	for _, p := range profiles {
@@ -354,9 +358,10 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			b.WriteString(fmt.Sprintf("- %s: %s\n", p.key, p.name))
 		}
 	}
-	b.WriteString("Classify from Current user intent then pick: ALL-HANDS → choice=\"all\" + full-roster count; ")
+	b.WriteString("Classify from Current user intent (may already bind prior session task when this turn is a short follow-up; if intent states a new self-contained ask, newest wins) then pick: ")
+	b.WriteString("ALL-HANDS → choice=\"all\" + full-roster count; ")
 	b.WriteString("WHO-CAN → capable mN subset only; SPECIALTY → matching-role mNs only (not all); ")
-	b.WriteString("FOLLOW-UP → only if intent is a short continuation (prior USER turns + Last answered by); same role mN, never choice=\"all\"; ")
+	b.WriteString("FOLLOW-UP → if intent contains 「继续完善「…」」 or is a short continuation (prior USER + Last answered by), same role mN — FORBIDDEN choice=\"all\" merely because Last answered by lists multiple bots; ")
 	b.WriteString("new ask interrupts unfinished prior work — newest wins.")
 	if whoCan {
 		b.WriteString(" This turn is WHO-CAN: capable = profile matches the asked skill; ignore peer self-intros. ")
@@ -370,20 +375,112 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	return keyToID, questions, b.String()
 }
 
-// currentUserIntentSummary formats the latest user turn as a concise 「用户想…」 clause
-// for decide state. Echoes the utterance (clipped) — no LLM paraphrase — so SystemOne
-// classifies the newest ask ahead of stale Recent-context unfinished work.
-func currentUserIntentSummary(userText string) string {
-	s := strings.TrimSpace(userText)
-	if s == "" {
+// currentUserIntentSummary builds decide-state 「用户想…」 body (caller prefixes 用户想：).
+// Deterministic prior-USER ⊕ current-ask join (scheme A / docs/群Auto选人-意图联合判定.md):
+// short follow-ups bind the latest non-who-can prior USER from synopsis; new / self-contained /
+// who-can / INTERRUPT stay newest-only. Zero extra LLM — no specialty keyword needle tables.
+func currentUserIntentSummary(userText, synopsis string) string {
+	summary, _ := currentUserIntentJoin(userText, synopsis)
+	return summary
+}
+
+// currentUserIntentJoin returns the intent body and join mode: follow_up|new|soft|none.
+func currentUserIntentJoin(userText, synopsis string) (summary, mode string) {
+	utterance := strings.TrimSpace(userText)
+	if utterance == "" {
+		return "", "none"
+	}
+	prior := latestNonWhoCanPriorUser(synopsis)
+	clipped := clipRunes(utterance, 120)
+	if prior == "" {
+		return clipped, "none"
+	}
+	if looksLikeNewAsk(utterance) {
+		return clipped, "new"
+	}
+	if looksLikeFollowUp(utterance) {
+		return "继续完善「" + clipRunes(prior, 60) + "」：" + clipRunes(utterance, 80), "follow_up"
+	}
+	return "结合近期「" + clipRunes(prior, 40) + "」，本轮：「" + clipRunes(utterance, 80) + "」", "soft"
+}
+
+// latestNonWhoCanPriorUser walks synopsis User: segments newest→oldest, skipping who-can
+// census asks and tiny noise so follow-ups bind the real prior specialty task.
+func latestNonWhoCanPriorUser(synopsis string) string {
+	syn := strings.TrimSpace(synopsis)
+	if syn == "" {
 		return ""
 	}
-	runes := []rune(s)
-	const limit = 120
-	if len(runes) > limit {
-		return string(runes[:limit]) + "…"
+	parts := strings.Split(syn, " | ")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := strings.TrimSpace(parts[i])
+		if !strings.HasPrefix(p, "User:") {
+			continue
+		}
+		text := strings.TrimSpace(strings.TrimPrefix(p, "User:"))
+		if text == "" {
+			continue
+		}
+		if isWhoCanIntent(text) {
+			continue
+		}
+		if len([]rune(text)) < 4 {
+			continue
+		}
+		return text
 	}
-	return s
+	return ""
+}
+
+// intentFollowUpMarkers are structural/anaphora cues (not specialty needles).
+var intentFollowUpMarkers = []string{
+	"修改", "改成", "换成", "改下", "调整", "继续", "再来", "再画", "同上", "那个", "这个", "刚才", "上面",
+	"change it", "make it", "instead", "again", "same but", "update the",
+}
+
+func hasIntentFollowUpMarker(userText string) bool {
+	lower := strings.ToLower(strings.TrimSpace(userText))
+	if lower == "" {
+		return false
+	}
+	for _, m := range intentFollowUpMarkers {
+		if m == "" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeFollowUp: short utterance with anaphora / tweak markers → bind prior task.
+func looksLikeFollowUp(userText string) bool {
+	s := strings.TrimSpace(userText)
+	if s == "" {
+		return false
+	}
+	if len([]rune(s)) > 40 {
+		return false
+	}
+	return hasIntentFollowUpMarker(s)
+}
+
+// looksLikeNewAsk: who-can, or no follow-up marker (self-contained / INTERRUPT / all-hands).
+// Long asks that still carry markers fall through to soft join.
+func looksLikeNewAsk(userText string) bool {
+	s := strings.TrimSpace(userText)
+	if s == "" {
+		return false
+	}
+	if isWhoCanIntent(s) {
+		return true
+	}
+	if hasIntentFollowUpMarker(s) {
+		return false
+	}
+	// No anaphora marker → newest wins (covers peek 38529ebd INTERRUPT + all-hands).
+	return true
 }
 
 func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int, allowMultiFromProbs bool, whoCan bool, countHint int) (ids []string, conf float64, allSelected bool, ok bool) {

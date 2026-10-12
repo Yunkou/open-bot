@@ -1730,7 +1730,10 @@ func TestBuildAutoPickDecisionPayloadCurrentUserIntentInterrupt(t *testing.T) {
 		t.Fatalf("missing Current user intent block: %q", st)
 	}
 	if !strings.Contains(st, "用户想："+ut) {
-		t.Fatalf("intent summary must echo latest turn: %q", st)
+		t.Fatalf("INTERRUPT intent must stay newest-only (no prior bind): %q", st)
+	}
+	if strings.Contains(st, "用户想：继续完善") {
+		t.Fatalf("INTERRUPT must not bind prior as 继续完善: %q", st)
 	}
 	if !strings.Contains(st, "newest wins") {
 		t.Fatalf("state must teach newest-wins interrupt: %q", st)
@@ -1749,6 +1752,109 @@ func TestBuildAutoPickDecisionPayloadCurrentUserIntentInterrupt(t *testing.T) {
 		if strings.Contains(instr, dead) {
 			t.Fatalf("must not restack specialty needles %q", dead)
 		}
+	}
+}
+
+// Langfuse peek c5c3d672 (2026-10-12 18:57 CST): 「修改下，换成动物的表情」 with Recent
+// html canvas mood page + who-can 「谁能写代码」 + dual Last answered by → intent must bind
+// the html/canvas prior (skip who-can), not echo the short ask alone.
+func TestCurrentUserIntentSummaryPeekC5c3d672(t *testing.T) {
+	syn := "User: 给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg | User: 谁能写代码 | Last answered by: 文章 — 写东西与改稿…, 代码 — 写代码与排障…"
+	ut := "修改下，换成动物的表情"
+	got, mode := currentUserIntentJoin(ut, syn)
+	if mode != "follow_up" {
+		t.Fatalf("want follow_up join, got mode=%s summary=%q", mode, got)
+	}
+	if !strings.Contains(got, "继续完善") {
+		t.Fatalf("follow-up must bind prior with 继续完善: %q", got)
+	}
+	if !strings.Contains(got, "html") && !strings.Contains(got, "canvas") {
+		t.Fatalf("prior must be html/canvas task, got %q", got)
+	}
+	if strings.Contains(got, "谁能写代码") {
+		t.Fatalf("prior must skip who-can census ask, got %q", got)
+	}
+	if !strings.Contains(got, ut) {
+		t.Fatalf("summary must keep current ask, got %q", got)
+	}
+}
+
+func TestBuildAutoPickDecisionPayloadJointIntentFollowUpPeekC5c3d672(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	ut := "修改下，换成动物的表情"
+	syn := "User: 给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg | User: 谁能写代码 | Last answered by: 文章 — 写东西与改稿…, 代码 — 写代码与排障…"
+	_, q, st := buildAutoPickDecisionPayload(ut, members, agents, syn, false)
+	if !strings.Contains(st, "继续完善") {
+		t.Fatalf("state intent must bind prior task: %q", st)
+	}
+	if !strings.Contains(st, "html") && !strings.Contains(st, "canvas") {
+		t.Fatalf("state intent must carry html/canvas anchor: %q", st)
+	}
+	if strings.Contains(st, "用户想：继续完善「谁能写代码」") || strings.Contains(st, "继续完善「谁能写代码") {
+		t.Fatalf("must not bind who-can as prior: %q", st)
+	}
+	// Exact raw echo of short ask alone is the bug (c5c3d672).
+	if strings.Contains(st, "用户想："+ut) && !strings.Contains(st, "继续完善") {
+		t.Fatalf("must not leave intent as raw short-ask echo: %q", st)
+	}
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	if !strings.Contains(instr, "继续完善") {
+		t.Fatalf("instructions should teach bound follow-up intent: %s", instr)
+	}
+	if !strings.Contains(st, "may already bind prior session task") {
+		t.Fatalf("state classify line must mention prior bind: %q", st)
+	}
+}
+
+func TestCurrentUserIntentSummaryJoinModes(t *testing.T) {
+	syn := "User: 给我写个html页面，用canvas | User: 谁能写代码 | Last answered by: 代码 — 写代码…"
+
+	// INTERRUPT / self-contained (peek 38529ebd shape): newest-only.
+	utNew := "通过选择不同心情生成不同svg"
+	got, mode := currentUserIntentJoin(utNew, syn)
+	if mode != "new" || got != utNew {
+		t.Fatalf("INTERRUPT want newest-only, got mode=%s summary=%q", mode, got)
+	}
+
+	// Who-can this turn: newest-only (do not bind html).
+	utWho := "谁会写代码"
+	got, mode = currentUserIntentJoin(utWho, syn)
+	if mode != "new" || got != utWho {
+		t.Fatalf("who-can want newest-only, got mode=%s summary=%q", mode, got)
+	}
+
+	// All-hands: not 继续完善.
+	utAll := "都介绍下自己"
+	got, mode = currentUserIntentJoin(utAll, syn)
+	if mode != "new" || strings.Contains(got, "继续完善") {
+		t.Fatalf("all-hands must not bind 继续完善, got mode=%s summary=%q", mode, got)
+	}
+
+	// No synopsis: none.
+	got, mode = currentUserIntentJoin("修改下，换成动物的表情", "")
+	if mode != "none" || got != "修改下，换成动物的表情" {
+		t.Fatalf("empty synopsis want none echo, got mode=%s summary=%q", mode, got)
+	}
+
+	// Soft: long ask (>40 runes) that still carries a follow-up marker.
+	utSoft := "把刚才那个页面里的按钮颜色改成红色并且加上一点简单的动画效果让整个交互看起来更生动一些"
+	if len([]rune(utSoft)) <= 40 {
+		t.Fatalf("soft fixture must be >40 runes, got %d", len([]rune(utSoft)))
+	}
+	got, mode = currentUserIntentJoin(utSoft, syn)
+	if mode != "soft" {
+		t.Fatalf("long+marker want soft, got mode=%s summary=%q", mode, got)
+	}
+	if !strings.Contains(got, "结合近期") || !strings.Contains(got, "本轮") {
+		t.Fatalf("soft framing missing: %q", got)
+	}
+	if strings.Contains(got, "谁能写代码") {
+		t.Fatalf("soft prior must skip who-can: %q", got)
 	}
 }
 
