@@ -76,12 +76,14 @@ func decisionEffectiveK(k, memberCount int, countHint int) int {
 // count noul → how many (1..members); specialty soft K; multi/count may raise to members.
 // Trusts model choice+count+probs. Decide state always feeds Member capability profiles;
 // the prompt classifies ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no isAllHandsIntent
-// phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: choice=all /
-// full roster → LeadFallback (hard no-[PASS]); who-can / specialty close second-wave but
-// do NOT LeadFallback (selected off-topic bots may still [PASS]); count-expand only when
-// probs[all] is meaningful; who-can may remap choice=all → capable subset; who-can /
-// specialty mismatch vs Member capability profiles rematches or fail-opens. On soft
-// failure the caller fail-opens to heuristic (not lead-only).
+// phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: explicit
+// choice=all (or mapping that already covers the full roster) → LeadFallback (hard
+// no-[PASS]); who-can / specialty close second-wave but do NOT LeadFallback (selected
+// off-topic bots may still [PASS]). Underpick choice=mN is never expanded to the full
+// roster via count≈N + probs[all] mass — only choice=all means everyone. Who-can may
+// remap choice=all → capable subset; who-can / specialty mismatch vs Member capability
+// profiles rematches or fail-opens. On soft failure the caller fail-opens to heuristic
+// (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	whoCan := isWhoCanIntent(userText)
@@ -132,30 +134,9 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
-	// Thin structural safety (no specialty/anaphora needle tables): full-roster count
-	// expands an underpick mN primary only when the model also put meaningful mass on
-	// "all" (intro underpick). Weak probs[all] (<0.20) keeps the mapped specialty subset even
-	// if noul was inflated. Current-utterance specialty synonym still blocks expand —
-	// Langfuse a0233dbd 「写个html…canvas」: choice=m0 + probs[all]=0.35 + noul≈1 must not
-	// expand; coding synonym (html/canvas/…) closes this gate and specialty-mismatch
-	// fail-opens to the capable profile.
-	if ok && !whoCan && !allSelected && !userTextHitsRoleSynonym(userText) &&
-		countHint >= len(members) && len(members) > 1 &&
-		probs[autoPickDecisionAllKey] >= 0.20 {
-		if len(ids) < len(members) {
-			ids = orderedDecisionMemberIDs(members, keyToID)
-			allSelected = true
-			if conf < autoPickConfidenceFloor {
-				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
-					conf = pAll
-				}
-				if conf < autoPickConfidenceFloor {
-					conf = 0.55
-				}
-			}
-			log.Printf("auto_pick=decision note=full_roster_count_expand choice=%s count=%d ids=%v", choiceKey, countHint, ids)
-		}
-	}
+	// No full_roster_count_expand: underpick choice=mN stays the mapped subset even when
+	// count≈roster and probs[all] is high (Langfuse a0233dbd 「写个html…canvas」 shape).
+	// Explicit choice=all is the only path that means everyone (mapping above).
 	// Who-can / specialty structural safety vs Member capability profiles (not SVG/HTML needles).
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)

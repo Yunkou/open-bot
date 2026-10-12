@@ -96,7 +96,7 @@ resolveGroupSendTargets / planSendTargets
 **薄结构安全（非 all-hands 短语表）**：
 
 - 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。**仅此**（及 lead / 二次 fail-open）为硬 must-answer；who-can / specialty / 宽 fail-open-all **不**标 LeadFallback。
-- **信任全员 count**：非 who-can、非 specialty（核心 role synonym；coding 桶含 html/canvas/svg/js/网页等**实现标记**，**不是**「再来个哭脸」式追问 anaphora 针表）且 `count ≥ 成员数` **且** `probs[all]` 有实质质量（≥0.20）时，underpick mN 才展开全员 + LeadFallback。peek `a0233dbd`「写个html…canvas」靠 coding synonym 挡住展开，再经 specialty-mismatch → coder。
+- **不信任 underpick count→全员**：`choice=mN` 即使 `count ≥ 成员数` 且 `probs[all]` 偏高也**不**展开全员（已移除 `full_roster_count_expand`）。**仅**显式 `choice=all`（或映射已覆盖全员）→ 全员 + LeadFallback。peek `a0233dbd`「写个html…canvas」靠关掉 count-expand 避免双 bot must-answer；若 wrong m0，specialty-mismatch 可再 fail-open 到 capable（次要，非主路径）。
 - decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员候选**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」），但 **不** LeadFallback——宽路径里无关 bot 仍可 candidacy `[PASS]`。成功 `choice=all` 才硬禁 PASS。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
 - decide 客户端超时约 **20s**（原 8s 曾与 ~7.3s Laya 完成竞态）。
@@ -133,7 +133,7 @@ resolveGroupSendTargets / planSendTargets
 
 > **已落地（2026-10-12）**：`Current user intent` = prior USER ⊕ 本轮联合（`currentUserIntentSummary(userText, synopsis)`，零额外 LLM）。短追问（peek `c5c3d672`「修改下，换成动物的表情」）绑最近非 who-can prior；INTERRUPT / who-can / 自洽新问仍 newest-only。详见 `docs/群Auto选人-意图联合判定.md`。
 
-**专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 联合意图 + 作答连续性，非 keyword 针表）**：decide state **始终**写入 **Current user intent**（prior USER ⊕ 本轮；短追问→`继续完善「…」：…`）与成员能力画像；prompt 要求按 intent 分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP；intent 已含「继续完善」时禁止因多人 Last answered by 选 `all`。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**INTERRUPT / newest wins**：新专长问（如「通过选择不同心情生成不同svg」，Langfuse peek `38529ebd`）打断未完成旧问，不得因 Recent 里多 bot 作答就选 `all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（`probs[all]` 有实质质量时才做 full-roster count 展开；choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
+**专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 联合意图 + 作答连续性，非 keyword 针表）**：decide state **始终**写入 **Current user intent**（prior USER ⊕ 本轮；短追问→`继续完善「…」：…`）与成员能力画像；prompt 要求按 intent 分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP；intent 已含「继续完善」时禁止因多人 Last answered by 选 `all`。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**INTERRUPT / newest wins**：新专长问（如「通过选择不同心情生成不同svg」，Langfuse peek `38529ebd`）打断未完成旧问，不得因 Recent 里多 bot 作答就选 `all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（**不**再对 underpick mN 做 full-roster count 展开；仅 choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
 
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 

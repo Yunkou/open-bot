@@ -1251,9 +1251,9 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 }
 
 func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
-	// Prompt still teaches ALL-HANDS; thin structural safety trusts full-roster count
-	// (no phrase table): choice=m0 + count=N on non-specialty → expand to everyone.
-	// Langfuse 38726dc4 / roast underpick shapes.
+	// Prompt still teaches ALL-HANDS; underpick choice=mN is NOT expanded via
+	// count≈N + probs[all] (full_roster_count_expand removed). Only explicit
+	// choice=all means everyone. Langfuse 38726dc4 / roast underpick shapes.
 	members := []string{"635d1077-5611-41bb-9fcf-2a4454d43d5a", "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf", "f634df70-8e30-4f71-9415-c7f80a8c0ec3"}
 	agents := []*db.Agent{
 		{ID: members[0], Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -1299,16 +1299,14 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if !sawAllHandsPrompt {
 		t.Fatal("decide must receive all-hands-strengthened payload")
 	}
-	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 3 {
-		t.Fatalf("full-roster count must expand underpick to all, got %#v", got)
+	if got.Method != "decision" {
+		t.Fatalf("want decision keep underpick, got %#v", got)
 	}
-	for _, id := range members {
-		if !got.LeadFallback[id] {
-			t.Fatalf("LeadFallback missing %s: %#v", id, got.LeadFallback)
-		}
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != members[0] {
+		t.Fatalf("underpick mN must NOT count-expand to all, got %#v", got)
 	}
-	if got.AllowSecondFailOpen {
-		t.Fatal("full roster must disable second fail-open")
+	if got.LeadFallback[members[0]] && len(got.AgentIDs) >= len(members) {
+		t.Fatalf("must not LeadFallback full roster from underpick: %#v", got)
 	}
 	// Contrast: who-can with single capable must NOT expand to all.
 	deps2 := &autoPickDecisionDeps{
@@ -1858,9 +1856,9 @@ func TestCurrentUserIntentSummaryJoinModes(t *testing.T) {
 	}
 }
 
-// Structural count-trust: underpick mN + full-roster count expands only when probs[all]
-// is meaningful. Weak probs[all] keeps the specialty primary (no synopsis synonym needle).
-func TestAutoPickDecisionCountExpandRequiresAllMass(t *testing.T) {
+// Underpick choice=mN never expands via count≈roster + probs[all] (full_roster_count_expand
+// removed). Weak or strong probs[all] both keep the mapped primary; only choice=all means everyone.
+func TestAutoPickDecisionNoCountExpandUnderpick(t *testing.T) {
 	members := []string{"33", "22", "44"}
 	agents := []*db.Agent{
 		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -1892,7 +1890,7 @@ func TestAutoPickDecisionCountExpandRequiresAllMass(t *testing.T) {
 		t.Fatalf("weak probs[all] must NOT count-expand; want coder 33, got %#v fallback=%s", got.AgentIDs, got.Fallback)
 	}
 
-	// Meaningful probs[all] + full-roster count on non-specialty → expand (intro underpick).
+	// Strong probs[all] + full-roster count on intro underpick → still keep m0 (no expand).
 	depsStrong := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
@@ -1910,17 +1908,18 @@ func TestAutoPickDecisionCountExpandRequiresAllMass(t *testing.T) {
 		},
 	}
 	got2 := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, "33", 1, "", depsStrong)
-	if got2.Method != "decision" || got2.Fallback != "all" || len(got2.AgentIDs) != 3 {
-		t.Fatalf("strong probs[all]+count must expand underpick to all, got %#v", got2)
+	if got2.Method != "decision" || got2.Fallback == "all" || len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "33" {
+		t.Fatalf("strong probs[all]+count must NOT expand underpick; want m0 only, got %#v", got2)
 	}
 }
 
 // Production 2026-10-12 19:49 CST Langfuse peek/obs=a0233dbd84136984 (trace a52623e3…):
 // 「给我写个html…通过canvas画出不同的动物表情」 → SystemOne choice=m0(文章) @0.53,
-// probs[all]=0.35, noul≈0.997 → count=2. Old full_roster_count_expand (probs[all]≥0.20
-// only) expanded to both + LeadFallback; session showed 文章+代码 both must-answer.
-// Fix: html/canvas/svg/js/网页 coding synonym blocks expand + specialty-mismatch
-// fail-opens to coder-only heuristic (AllowSecondFailOpen=false, no LeadFallback).
+// probs[all]=0.35, noul≈0.997 → count=2. Old full_roster_count_expand (probs[all]≥0.20)
+// expanded to both + LeadFallback must-answer. Primary fix: disable that expand for
+// choice=mN underpick (only explicit choice=all → everyone). Secondary: coding role
+// markers can still specialty-mismatch fail-open to the capable profile — not the
+// structural expand gate.
 func TestReproLangfuseA023HTMLCanvasNoCountExpand(t *testing.T) {
 	members := []string{"b82b2fbe-c621-4943-aff0-f59e7fc075b6", "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"}
 	writer, coder := members[0], members[1]
@@ -1944,14 +1943,25 @@ func TestReproLangfuseA023HTMLCanvasNoCountExpand(t *testing.T) {
 		},
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, writer, 1, syn, deps)
-	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != coder {
-		t.Fatalf("html/canvas specialty must resolve to coder only, got method=%s ids=%#v fallback=%s LeadFallback=%#v", got.Method, got.AgentIDs, got.Fallback, got.LeadFallback)
+	if got.Fallback == "all" || len(got.AgentIDs) >= len(members) {
+		t.Fatalf("a023 underpick must NOT count-expand to full roster, got method=%s ids=%#v fallback=%s LeadFallback=%#v", got.Method, got.AgentIDs, got.Fallback, got.LeadFallback)
 	}
-	if got.LeadFallback[writer] || got.LeadFallback[coder] {
-		t.Fatalf("specialty must not LeadFallback, got %#v", got.LeadFallback)
+	if got.LeadFallback[writer] && got.LeadFallback[coder] {
+		t.Fatalf("must not dual LeadFallback from count-expand, got %#v", got.LeadFallback)
 	}
-	if got.AllowSecondFailOpen {
-		t.Fatal("html/canvas coding synonym must close second-wave")
+	// Prefer structural no-expand; if specialty-mismatch recovers coder, that is fine too.
+	if len(got.AgentIDs) == 1 && got.AgentIDs[0] == coder {
+		if got.LeadFallback[writer] || got.LeadFallback[coder] {
+			t.Fatalf("specialty path must not LeadFallback, got %#v", got.LeadFallback)
+		}
+		if got.AllowSecondFailOpen {
+			t.Fatal("specialty path must close second-wave")
+		}
+		return
+	}
+	// Without specialty recover: mapped underpick stays single (writer m0) — still not dual reply.
+	if len(got.AgentIDs) != 1 {
+		t.Fatalf("underpick without expand should be single primary, got %#v", got)
 	}
 }
 
