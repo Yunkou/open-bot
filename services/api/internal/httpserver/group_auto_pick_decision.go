@@ -281,14 +281,16 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"NEAR-ZERO on incapable ones and on \"all\". Hard examples: 「谁会写代码」→ ONLY coding-role mN (noul near 0); " +
 		"「谁会查资料」→ every research/资料-role mN (count=how many researchers).\n" +
 		"SPECIALTY TASK (do-the-job, not who-can / not intro): when the user asks bots to perform work " +
-		"(e.g. 「帮我查下…」「查一下…发展/资料」「搜索/调研/research/look up»; or 「修 bug」「写代码」/code), " +
+		"(e.g. 「帮我查下…」「查一下…发展/资料」「搜索/调研/research/look up»; or 「修 bug」「写代码」/code; " +
+		"or markup/UI code 「用svg写个笑脸图标」「写个html页面」「做个可交互页面」), " +
 		"match the task to criteria role labels — never park on \"all\" and never pick an unrelated specialty. " +
-		"Research/lookup → every research/资料/搜索-role mN; coding/debug → ONLY the coding-role mN. " +
+		"Research/lookup → every research/资料/搜索-role mN; coding/debug/SVG/HTML/CSS/JS → ONLY the coding-role mN (not the writer/文案). " +
 		"Hard example: 「帮我查下2026年优锘科技的发展」/ look up a company → research mNs only (e.g. 22+44), not the coder, not all. " +
+		"Hard example: 「用svg给我写一个笑脸图标」/ 「来个html页面选心情生成图标」 → coding-role mN only (noul near 0), never choice=\"all\" and never the writer. " +
 		"SPECIALTY FOLLOW-UP / ANAPHORA: short continuations that refer to the prior specialty turn " +
-		"(e.g. 「再来个哭脸」「再画一个」「换个颜色」「another one」「same again but crying」) " +
+		"(e.g. 「再来个哭脸」「再画一个」「换个颜色」「要html」「改成html」「another one」「same again but crying」) " +
 		"KEEP the same specialty role mN(s) from Recent-context prior USER asks — never switch to choice=\"all\". " +
-		"Hard example: prior user asked to code/draw a smile (SVG) with 代码 → current 「再来个哭脸」 → coding-role mN only (not all, not intro). " +
+		"Hard example: prior user asked to code/draw a smile (SVG) with 代码 → current 「再来个哭脸」/「要html」 → coding-role mN only (not all, not intro, not writer). " +
 		"Reserve choice=\"all\" for introductions / round-robin / address-everyone / roast-everyone / explicit everyone — not for a concrete specialty task or its anaphoric follow-up.\n" +
 		"SINGLE / vague: prefer one specialist when the request matches their role, or the generalist for vague single-responder requests. " +
 		"When several specialists fit, pick the best primary — also set count and probabilities so extras can be included (multi subset, not only all-or-one)."
@@ -311,8 +313,8 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"ALL-HANDS / intro / roast / address-everyone (「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」) → noul near 1 (full roster). "+
 			"WHO-CAN census: 「谁会写代码」/ only the coder → near 0 (→1); 「谁会查资料」/ two researchers → about %.2f (→2); "+
 			"near 1 ONLY when every member's role is capable. "+
-			"SPECIALTY task: research with two researchers → about %.2f (→2); coding with one coder → near 0 (→1). "+
-			"SPECIALTY follow-up/anaphora (「再来个哭脸」/再画 after a coding/research turn) → noul MUST stay near 0 (one specialist); FORBIDDEN to raise noul toward 1. "+
+			"SPECIALTY task: research with two researchers → about %.2f (→2); coding/SVG/HTML with one coder → near 0 (→1). "+
+			"SPECIALTY follow-up/anaphora (「再来个哭脸」/「要html」/再画 after a coding/SVG turn) → noul MUST stay near 0 (one specialist); FORBIDDEN to raise noul toward 1. "+
 			"FORBIDDEN: noul near 1 / full roster when only a specialty or who-can subset fits.",
 		memberN, frac2, frac2,
 	)

@@ -1721,3 +1721,114 @@ func TestLooksLikeSpecialtyFollowUp(t *testing.T) {
 		t.Fatal("long specialty task is not anaphora")
 	}
 }
+
+
+// Channel 333 / 2026-10-12 16:56–16:59 CST Langfuse:
+// 「用svg给我写一个笑脸图标」 decide choice=all + flat probs + diluted conf + noul≈1
+// (trace 6aa69f96). All-hands conf-lift would run 文章+代码; specialty synonym +
+// mismatch must fail-open heuristic → coder only (决策更准).
+func TestAutoPickDecisionSVGSmileNotAllHands(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	if !userTextHitsRoleSynonym("用svg给我写一个笑脸图标") {
+		t.Fatal("svg markup ask must hit coding specialty synonym")
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick := questions["pick"].(map[string]any)
+			instr := fmt.Sprint(pick["instructions"])
+			if !strings.Contains(instr, "svg") && !strings.Contains(instr, "HTML") {
+				t.Fatalf("specialty prompt must teach SVG/HTML → coding, instr=%s", instr)
+			}
+			// Mirror Langfuse 6aa69f9603e61a6a772b75b65083de55 output.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "all",
+					"confidence": 0.0018,
+					"probabilities": map[string]any{
+						"all": 0.3628, "m0": 0.3165, "m1": 0.3207,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9816},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "用svg给我写一个笑脸图标", members, agents, "writer", 1, "在座的都是垃圾", deps)
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+		t.Fatalf("SVG specialty must not all-hands; want coder only, got %#v", got)
+	}
+}
+
+// Same channel: short 「要html」 after SVG smile — decide still choice=all
+// (trace 7a1d93b8). html synonym + mismatch → coder; also skip count-expand when
+// synopsis carries prior SVG specialty ask and model parks on m1 with noul≈1.
+func TestAutoPickDecisionYaoHTMLFollowUpKeepsCoder(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	if !userTextHitsRoleSynonym("要html") {
+		t.Fatal("要html must hit coding specialty synonym")
+	}
+	depsAll := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "all",
+					"confidence": 0.1968,
+					"probabilities": map[string]any{
+						"all": 0.6469, "m0": 0.2217, "m1": 0.1314,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9937},
+			}, nil
+		},
+	}
+	syn := "在座的都是垃圾 | 用svg给我写一个笑脸图标"
+	got := runAutoPickByMode(db.AutoPickDecision, "要html", members, agents, "writer", 1, syn, depsAll)
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+		t.Fatalf("要html after SVG must keep coder, got %#v", got)
+	}
+
+	// Mood-page turn (trace 22e8cc7a): choice=m1 coder + inflated noul must not
+	// full-roster expand when synopsis still has SVG specialty.
+	depsM1 := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m1",
+					"confidence": 0.1506,
+					"probabilities": map[string]any{
+						"all": 0.1365, "m0": 0.2678, "m1": 0.5957,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9969},
+			}, nil
+		},
+	}
+	got2 := runAutoPickByMode(db.AutoPickDecision, "来个html页面，选择不同心情，生成不同图标", members, agents, "writer", 1, syn+" | 要html", depsM1)
+	if got2.Fallback == "all" || len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "coder" {
+		t.Fatalf("html mood page must keep coder (no count-expand), got %#v", got2)
+	}
+}
+
+func TestUserTextHitsRoleSynonymMarkup(t *testing.T) {
+	for _, u := range []string{"用svg给我写一个笑脸图标", "要html", "写个html页面", "做个前端页面"} {
+		if !userTextHitsRoleSynonym(u) {
+			t.Fatalf("expected coding synonym hit for %q", u)
+		}
+	}
+	if userTextHitsRoleSynonym("在座的都是垃圾") {
+		t.Fatal("roast must not hit coding synonym")
+	}
+}

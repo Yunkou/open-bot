@@ -133,6 +133,8 @@ resolveGroupSendTargets / planSendTargets
 
 **专长追问准确度（prompt + synopsis，非 keyword 纠偏）**：短回指「再来个哭脸」「再画一个」等 anaphora 在 Recent context 有先前专长 user 话（如「用代码画个笑脸」）时应保持 coding（或原专长）mN，不得因无「代码」字样塌成 `choice=all`。靠 decide prompt 的 SPECIALTY FOLLOW-UP 示例 + synopsis 优先 user；**不**把「再来个/哭脸」扩进 `userTextHitsRoleSynonym`，也**不**对 `choice=all` 做 specialty 拒收→fail-open-all。薄安全：若 synopsis 仍含专长同义词、primary 为 mN 且 `probs[all]` 偏低，则**跳过** full-roster count 展开；若模型仍 `choice=all` 且当前句是短 anaphora（再来个/再画…）且 synopsis 含专长同义词，则 fail-open heuristic（synopsis 混合打分选专长 bot），并禁止 decision→heuristic 单人结果再被抬成全员。
 
+**SVG/HTML 专长（channel 333 / 2026-10-12 16:56–16:59 CST）**：「用svg给我写一个笑脸图标」「要html」「来个html页面…」SystemOne 常 `choice=all` / 高 noul 或 mN+全员 count（Langfuse `6aa69f96` / `7a1d93b8` / `22e8cc7a`），all-hands 置信度抬升会让文章+代码双答。coding 同义词补 `svg`/`html`/`css`/… 后走已有 specialty mismatch → heuristic（仅代码）；synopsis 含 SVG 时跳过 count 展开。prompt 增 SVG/HTML→coding 与「要html」追问示例。仍非新建 all 拒收陷阱。
+
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 
 **日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
