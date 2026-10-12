@@ -140,10 +140,10 @@ func (d *DB) globalSkillBotUsage(orgID string, skillNames []string) (map[string]
 		disabled := userDisabled[b.UserID]
 		m, hasRows := allow[b.ID]
 		for n := range nameSet {
-			if disabled[n] {
+			if disabled[n] && !IsAlwaysOnBuiltin(n) {
 				continue
 			}
-			if !hasRows {
+			if !hasRows || IsAlwaysOnBuiltin(n) {
 				out[n] = append(out[n], b.SkillBotRef)
 				continue
 			}

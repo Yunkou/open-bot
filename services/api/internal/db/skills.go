@@ -478,7 +478,8 @@ func (d *DB) ListEnabledSkillNamesForAgent(userID, agentID string) ([]string, er
 			out = append(out, slug)
 		}
 	}
-	return out, nil
+	// Parity with empty-allowlist path: always-on discovery skills stay mounted.
+	return EnsureAlwaysOnSkills(out), nil
 }
 
 type AgentSkill struct {
@@ -600,12 +601,16 @@ func (d *DB) SetAgentSkillEnabled(userID, agentID, name string, enabled bool) (*
 		return nil, err
 	}
 	alwaysOn := IsAlwaysOnBuiltin(name)
+	en := enabled && meta.Enabled
+	if alwaysOn {
+		en = true
+	}
 	return &AgentSkill{
 		Name:           name,
 		Description:    meta.Description,
-		Enabled:        enabled && meta.Enabled,
+		Enabled:        en,
 		Custom:         meta.Custom,
-		AccountEnabled: meta.Enabled,
+		AccountEnabled: meta.Enabled || alwaysOn,
 		AlwaysOn:       alwaysOn,
 		DisableBlocked: alwaysOn,
 	}, nil
@@ -1112,6 +1117,12 @@ func (d *DB) UpsertGlobalSkill(name, description, bodyMarkdown string, enabled b
 	if !ValidSkillName(name) {
 		return nil, fmt.Errorf("invalid skill name: use lowercase letters, digits, hyphens")
 	}
+	if !enabled && IsAlwaysOnBuiltin(name) {
+		return nil, ErrSkillDisableBlocked
+	}
+	if IsAlwaysOnBuiltin(name) {
+		enabled = true
+	}
 	md := BuildSkillMarkdown(name, description, bodyMarkdown)
 	_, desc := parseSkillFrontmatter(md, name)
 	_, err := d.SQL.Exec(
@@ -1138,6 +1149,12 @@ func (d *DB) ImportGlobalSkillPackage(files []SkillFileRecord, nameHint, descHin
 	name, desc, normalized, err := ValidateSkillPackage(files, nameHint, descHint)
 	if err != nil {
 		return nil, err
+	}
+	if !enabled && IsAlwaysOnBuiltin(name) {
+		return nil, ErrSkillDisableBlocked
+	}
+	if IsAlwaysOnBuiltin(name) {
+		enabled = true
 	}
 	var skillMD string
 	for _, f := range normalized {
@@ -1268,6 +1285,12 @@ func (d *DB) DeleteGlobalSkillFile(name, path string) error {
 
 func (d *DB) SetGlobalSkillEnabled(name string, enabled bool) (*GlobalSkillRecord, error) {
 	name = strings.TrimSpace(name)
+	if !enabled && IsAlwaysOnBuiltin(name) {
+		return nil, ErrSkillDisableBlocked
+	}
+	if IsAlwaysOnBuiltin(name) {
+		enabled = true
+	}
 	res, err := d.SQL.Exec(`UPDATE global_skills SET enabled = $2, updated_at = NOW() WHERE name = $1`, name, enabled)
 	if err != nil {
 		return nil, err
@@ -1281,6 +1304,9 @@ func (d *DB) SetGlobalSkillEnabled(name string, enabled bool) (*GlobalSkillRecor
 
 func (d *DB) DeleteGlobalSkill(name string) error {
 	name = strings.TrimSpace(name)
+	if IsAlwaysOnBuiltin(name) {
+		return ErrSkillDisableBlocked
+	}
 	res, err := d.SQL.Exec(`DELETE FROM global_skills WHERE name = $1`, name)
 	if err != nil {
 		return err
@@ -1343,6 +1369,16 @@ func (d *DB) SeedGlobalSkillsFromDisk() error {
 			if err != nil {
 				return err
 			}
+		}
+	}
+	// Discovery entry: never leave role=always_on skills disabled in global_skills
+	// (SetGlobalSkillEnabled used to allow it; UI overlays can hide the real DB flag).
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		if _, err := d.SQL.Exec(
+			`UPDATE global_skills SET enabled = TRUE, updated_at = NOW() WHERE name = $1 AND enabled = FALSE`,
+			slug,
+		); err != nil {
+			return err
 		}
 	}
 	return d.BackfillGlobalSkillFilesFromBody()

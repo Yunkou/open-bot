@@ -155,28 +155,32 @@ export default function SkillsPage() {
                     .catch((err) => message.error(err instanceof Error ? err.message : String(err)));
                 },
               },
-              {
-                key: "del",
-                label: (
-                  <Popconfirm
-                    title="确认删除该平台技能？"
-                    description="用户侧目录会随之消失。"
-                    okText="删除"
-                    okButtonProps={{ danger: true }}
-                    onConfirm={async () => {
-                      try {
-                        await adminDeleteSkill(row.name);
-                        message.success("已删除");
-                        reload();
-                      } catch (err) {
-                        message.error(err instanceof Error ? err.message : String(err));
-                      }
-                    }}
-                  >
-                    <span style={{ color: "#ff4d4f" }}>删除</span>
-                  </Popconfirm>
-                ),
-              },
+              ...(row.disable_blocked || row.always_on
+                ? []
+                : [
+                    {
+                      key: "del",
+                      label: (
+                        <Popconfirm
+                          title="确认删除该平台技能？"
+                          description="用户侧目录会随之消失。"
+                          okText="删除"
+                          okButtonProps={{ danger: true }}
+                          onConfirm={async () => {
+                            try {
+                              await adminDeleteSkill(row.name);
+                              message.success("已删除");
+                              reload();
+                            } catch (err) {
+                              message.error(err instanceof Error ? err.message : String(err));
+                            }
+                          }}
+                        >
+                          <span style={{ color: "#ff4d4f" }}>删除</span>
+                        </Popconfirm>
+                      ),
+                    },
+                  ]),
             ],
           }}
         >

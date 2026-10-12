@@ -42,7 +42,7 @@ var (
 )
 
 // ErrSkillDisableBlocked is returned when disabling an always-on discovery skill.
-var ErrSkillDisableBlocked = errors.New("find-skills is always-on (skill discovery); disabling it is blocked")
+var ErrSkillDisableBlocked = errors.New("find-skills is always-on (skill discovery); disabling or deleting it is blocked")
 
 func curatedManifestPath() string {
 	return filepath.Join(SkillsRoot(), "curated-builtins.json")
