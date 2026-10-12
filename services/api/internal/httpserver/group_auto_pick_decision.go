@@ -151,7 +151,22 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	fallback := ""
 	allowSecond := true
 	leadFB := map[string]bool{}
-	if allSelected {
+	if allHands {
+		// Intro / round-robin: selected members must speak (LeadFallback prompt forbids
+		// candidacy [PASS]). Production 14:25 CST 「大家都介绍下自己」 (Langfuse peek
+		// f24b88df / 9bd33f4a / aeb5cffa): decision choice=all but LeadFallback empty
+		// → 文章+代码 both [PASS] → silence. Mirror who-can/specialty structural safety.
+		allowSecond = false
+		for _, id := range ids {
+			leadFB[id] = true
+		}
+		if allSelected {
+			fallback = "all"
+			log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
+		} else {
+			log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
+		}
+	} else if allSelected {
 		fallback = "all"
 		allowSecond = false
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
@@ -417,6 +432,17 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		ids = orderedDecisionMemberIDs(memberOrder, keyToID)
 		if len(ids) == 0 {
 			return nil, 0, false, false
+		}
+		// Literal everyone (all-hands intro): SystemOne often returns choice=all + high
+		// noul/probs[all] with a diluted confidence field (~0.1). Don't fail-open away
+		// from a correct all mapping (14:25 CST 「大家都介绍下自己」 conf=0.10).
+		if conf < autoPickConfidenceFloor {
+			if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+				conf = pAll
+			}
+			if conf < autoPickConfidenceFloor {
+				conf = 0.55
+			}
 		}
 		return ids, conf, true, true
 	}
@@ -859,6 +885,17 @@ func optionalFloat(v any) (float64, bool) {
 	case json.Number:
 		f, err := t.Float64()
 		return f, err == nil
+	case string:
+		// SystemOne / Langfuse sometimes stringify noul/confidence ("0.8896").
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+			return 0, false
+		}
+		return f, true
 	default:
 		return 0, false
 	}
