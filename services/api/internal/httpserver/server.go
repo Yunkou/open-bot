@@ -223,6 +223,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("DELETE /v1/channels/{id}", s.requireAuth(s.handleDeleteChannel))
 	mux.HandleFunc("PATCH /v1/channels/{id}", s.requireAuth(s.handlePatchChannel))
 	mux.HandleFunc("POST /v1/channels/{id}/members", s.requireAuth(s.handleAddChannelMember))
+	mux.HandleFunc("DELETE /v1/channels/{id}/members/{agentId}", s.requireAuth(s.handleRemoveChannelMember))
 	mux.HandleFunc("GET /v1/channels/{id}/conversation", s.requireAuth(s.handleChannelConversation))
 	mux.HandleFunc("POST /v1/agent-bus/messages", s.requireAuth(s.handlePostAgentBusMessage))
 	mux.HandleFunc("GET /v1/agent-bus/inbox", s.requireAuth(s.handleAgentBusInbox))
@@ -2609,6 +2610,30 @@ func (s *Server) handleAddChannelMember(w http.ResponseWriter, r *http.Request) 
 		if conv, e := s.db.EnsureChannelConversation(uid, c.ID, agentID, c.Name); e == nil {
 			c.ConversationID = conv.ID
 		}
+	}
+	s.enrichChannelOnline(uid, c)
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) handleRemoveChannelMember(w http.ResponseWriter, r *http.Request) {
+	uid := userIDFrom(r.Context())
+	id := r.PathValue("id")
+	agentID := r.PathValue("agentId")
+	if err := s.db.RemoveChannelMember(uid, id, agentID); err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	c, err := s.db.GetChannel(uid, id)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+	if conv, e := s.db.GetConversationByChannel(uid, c.ID); e == nil && conv != nil {
+		c.ConversationID = conv.ID
 	}
 	s.enrichChannelOnline(uid, c)
 	writeJSON(w, http.StatusOK, c)

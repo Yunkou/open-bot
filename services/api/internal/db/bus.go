@@ -183,6 +183,50 @@ func (d *DB) AddChannelMember(userID, channelID, agentID string) error {
 	return err
 }
 
+// RemoveChannelMember deletes agentID from the channel.
+// Rules: channel/member must exist (ErrNotFound); at least one member remains;
+// cannot remove the channel lead (conversation.agent_id / 主助理).
+func (d *DB) RemoveChannelMember(userID, channelID, agentID string) error {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return errors.New("agent_id required")
+	}
+	ch, err := d.GetChannel(userID, channelID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, id := range ch.Members {
+		if id == agentID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	if len(ch.Members) <= 1 {
+		return errors.New("群里至少保留一位成员")
+	}
+	if conv, cerr := d.GetConversationByChannel(userID, channelID); cerr == nil && conv != nil {
+		if strings.TrimSpace(conv.AgentID) == agentID {
+			return errors.New("不能移除主助理")
+		}
+	}
+	res, err := d.SQL.Exec(
+		`DELETE FROM channel_members WHERE channel_id = $1 AND agent_id = $2`,
+		channelID, agentID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (d *DB) PostAgentMessage(userID, fromAgentID string, toAgentID, channelID *string, priority bool, body string, replyToID *string) (*AgentBusMessage, error) {
 	body = strings.TrimSpace(body)
 	if body == "" {
