@@ -41,6 +41,13 @@ func (s *Server) handleSetAgentSkill(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -101,12 +108,25 @@ var onboardingPresets = map[string]struct {
 			"code-review",
 			"host-ssh",
 			"summarize-text",
+			"grill-me",
+			"grill-with-docs",
+			"improve-codebase-architecture",
+			"codebase-design",
+			"domain-modeling",
+			"prototype",
+			"triage",
+			"find-skills",
+			"frontend-design",
+			"vercel-react-best-practices",
+			"handoff",
+			"teach",
 		},
 	},
 	"E": {
 		Description:  "通用助手：按用户当下话题协助，保持灵活。",
-		SystemPrompt: "你是通用助手，先理解用户意图再行动，不强行套用固定流程。",
-		Skills:       nil,
+		SystemPrompt: "你是通用助手，先理解用户意图再行动，不强行套用固定流程。需要深挖需求时 load_skill grill-me；找生态技能用 find-skills。",
+		// Curated skills.sh batch default-on (not full leaderboard). nil would inherit all user-enabled.
+		Skills: db.CuratedBuiltinSlugs(),
 	},
 }
 
@@ -150,6 +170,7 @@ func (s *Server) handleAgentOnboarding(w http.ResponseWriter, r *http.Request) {
 		if skillArg == nil {
 			skillArg = []string{}
 		}
+		skillArg = db.EnsureAlwaysOnSkills(skillArg)
 	} else {
 		skillArg = nil // leave agent_skills unset → all user-enabled
 	}

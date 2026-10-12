@@ -230,8 +230,11 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 	leadFB := map[string]bool{}
 	allowSecond := true
-	if isWhoCanIntent(userText) {
-		// Same as decision who-can: capable must speak; no second-wave dump.
+	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): capable must answer;
+	// no PASS→second-wave dump of incapable peers. Production 13:45 CST Langfuse
+	// peek/obs=5808f45a (「写个js的代码…」): low-conf decision→heuristic picked both
+	// coders; both [PASS]; second fail-open dumped to 文档助手 who answered.
+	if isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText) {
 		allowSecond = false
 		for _, id := range ids {
 			leadFB[id] = true
@@ -660,27 +663,32 @@ var whoCanAbilityMarkers = []string{
 	"会", "能", "可以", "can", "could",
 }
 
-// autoPickAllCandidates returns every member as a non-forced candidate (same as auto_pick=off).
-// Each may PASS; Method is mode-prefixed for logs (heuristic->all_hands / decision->all_hands).
+// autoPickAllCandidates returns every member for all-hands phrasing (intro / round-robin).
+// LeadFallback on each so participation prompt forbids candidacy [PASS]; Method is
+// mode-prefixed for logs (heuristic->all_hands / decision->heuristic->all_hands).
 func autoPickAllCandidates(method string, members []string) groupAutoPickResult {
 	if strings.TrimSpace(method) == "" {
 		method = "all_hands"
 	}
 	out := copyStringSlice(members)
+	leadFB := map[string]bool{}
+	for _, id := range out {
+		leadFB[id] = true
+	}
 	log.Printf("auto_pick=%s ids=%v conf=1.00 fallback=all", method, out)
 	return groupAutoPickResult{
 		AgentIDs:            out,
 		Confidence:          1.0,
 		Method:              method,
 		Fallback:            "all",
-		LeadFallback:        map[string]bool{},
+		LeadFallback:        leadFB,
 		AllowSecondFailOpen: false,
 	}
 }
 
 // runAutoPickByMode applies org auto_pick mode for a no-@ turn.
-// Heuristic all-hands phrasing (「都介绍下自己」…) short-circuits to all members as
-// candidates (non-forced, may PASS) — same candidacy as off.
+// Heuristic all-hands phrasing (「都介绍下自己」…) short-circuits to all members with
+// LeadFallback (must answer; no candidacy [PASS]).
 // Decision always calls SystemOne (no phrase skip): schema includes opaque "all" + mN + count;
 // multi/all-hands may raise effective K up to members so the model can return a subset / all.
 // On parse/timeout/empty/low-conf/off fail-open to heuristic (or all-hands if phrase).

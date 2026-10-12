@@ -1,0 +1,162 @@
+{
+  "synced_at": "2026-10-12T05:43:02Z",
+  "manifest_version": 1,
+  "skills": {
+    "find-skills": {
+      "slug": "find-skills",
+      "package": "vercel-labs/skills",
+      "skill": "find-skills",
+      "repo": "https://github.com/vercel-labs/skills",
+      "path": "skills/find-skills",
+      "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "913b9d37d0d54047"
+    },
+    "grill-me": {
+      "slug": "grill-me",
+      "package": "mattpocock/skills",
+      "skill": "grill-me",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/grill-me",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "fe33aaa8e8dcd606"
+    },
+    "grill-with-docs": {
+      "slug": "grill-with-docs",
+      "package": "mattpocock/skills",
+      "skill": "grill-with-docs",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/grill-with-docs",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "9e8f732b80672797"
+    },
+    "improve-codebase-architecture": {
+      "slug": "improve-codebase-architecture",
+      "package": "mattpocock/skills",
+      "skill": "improve-codebase-architecture",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/improve-codebase-architecture",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "741b4015c0edbcd5"
+    },
+    "tdd": {
+      "slug": "tdd",
+      "package": "mattpocock/skills",
+      "skill": "tdd",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/tdd",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "e77d53662b8232fd"
+    },
+    "frontend-design": {
+      "slug": "frontend-design",
+      "package": "anthropics/skills",
+      "skill": "frontend-design",
+      "repo": "https://github.com/anthropics/skills",
+      "path": "skills/frontend-design",
+      "ref": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "89496d5dd00f4810"
+    },
+    "handoff": {
+      "slug": "handoff",
+      "package": "mattpocock/skills",
+      "skill": "handoff",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/handoff",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "16e5b77eadb689d6"
+    },
+    "triage": {
+      "slug": "triage",
+      "package": "mattpocock/skills",
+      "skill": "triage",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/triage",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "bf09f37fa24ab643"
+    },
+    "prototype": {
+      "slug": "prototype",
+      "package": "mattpocock/skills",
+      "skill": "prototype",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/prototype",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "090ae76b97353255"
+    },
+    "domain-modeling": {
+      "slug": "domain-modeling",
+      "package": "mattpocock/skills",
+      "skill": "domain-modeling",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/domain-modeling",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "467f5e92529c2a46"
+    },
+    "teach": {
+      "slug": "teach",
+      "package": "mattpocock/skills",
+      "skill": "teach",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/teach",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "7bd8a41095f71c5e"
+    },
+    "vercel-react-best-practices": {
+      "slug": "vercel-react-best-practices",
+      "package": "vercel-labs/agent-skills",
+      "skill": "vercel-react-best-practices",
+      "repo": "https://github.com/vercel-labs/agent-skills",
+      "path": "skills/react-best-practices",
+      "ref": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "74f142d28d360d78"
+    },
+    "codebase-design": {
+      "slug": "codebase-design",
+      "package": "mattpocock/skills",
+      "skill": "codebase-design",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/codebase-design",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": false,
+      "status": "synced",
+      "content_hash": "07246bd43eadfb50"
+    },
+    "diagnosing-bugs": {
+      "slug": "diagnosing-bugs",
+      "package": "mattpocock/skills",
+      "skill": "diagnosing-bugs",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/diagnosing-bugs",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "39867a469e44c4d3"
+    }
+  },
+  "errors": [],
+  "refresh": "Re-run: scripts/sync-curated-builtins.sh\nOr per skill: npx skills add <repo> --skill <skill>  then copy into skills/<slug>/\nUpdate refs in skills/curated-builtins.json after upstream moves."
+}

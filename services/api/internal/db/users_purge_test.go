@@ -88,6 +88,16 @@ VALUES ($1,$2,'r','p','0 9 * * *',TRUE)`, routineID, userID)
 	mustExec(`INSERT INTO a2a_push_configs (id, task_id, url) VALUES ($1,$2,'http://example')`, uuid.NewString(), a2aID)
 	mustExec(`INSERT INTO org_invites (id, org_id, username_or_email, role, invited_by, status)
 VALUES ($1,$2,'invitee@example.com','member',$3,'pending')`, inviteID, org.ID, userID)
+	threadID := "thr-" + userID[:8]
+	mustExec(`INSERT INTO harness_threads (thread_id, conversation_id, user_id, org_id, agent_id, status)
+VALUES ($1,$2,$3,$4,$5,'done')`, threadID, convID, userID, org.ID, agentID)
+	mustExec(`INSERT INTO harness_entries (id, org_id, user_id, conversation_id, thread_id, seq, kind, payload)
+VALUES ($1,$2,$3,$4,$5,1,'status','{}')`, uuid.NewString(), org.ID, userID, convID, threadID)
+	mustExec(`INSERT INTO harness_docs (thread_id, kind, data) VALUES ($1,'summary','{}')`, threadID)
+	mustExec(`INSERT INTO bot_lessons (id, user_id, agent_id, title, body, tags_json, status, created_at, updated_at)
+VALUES ($1,$2,$3,'lesson','body','[]','active',$4,$4)`, uuid.NewString(), userID, agentID, Now())
+	mustExec(`INSERT INTO user_tool_allowlist (id, user_id, tool_group, tool, agent_id)
+VALUES ($1,$2,'shell','host_shell','')`, uuid.NewString(), userID)
 	_ = taskID
 	_ = time.Now()
 
@@ -146,6 +156,11 @@ VALUES ($1,$2,'invitee@example.com','member',$3,'pending')`, inviteID, org.ID, u
 	assertZero("a2a_push", `SELECT COUNT(*) FROM a2a_push_configs WHERE task_id = $1`, a2aID)
 	assertZero("agent_skills", `SELECT COUNT(*) FROM agent_skills WHERE agent_id = $1`, agentID)
 	assertZero("org_invites", `SELECT COUNT(*) FROM org_invites WHERE id = $1`, inviteID)
+	assertZero("harness_threads", `SELECT COUNT(*) FROM harness_threads WHERE user_id = $1`, userID)
+	assertZero("harness_entries", `SELECT COUNT(*) FROM harness_entries WHERE user_id = $1`, userID)
+	assertZero("harness_docs", `SELECT COUNT(*) FROM harness_docs WHERE thread_id = $1`, threadID)
+	assertZero("bot_lessons", `SELECT COUNT(*) FROM bot_lessons WHERE user_id = $1`, userID)
+	assertZero("user_tool_allowlist", `SELECT COUNT(*) FROM user_tool_allowlist WHERE user_id = $1`, userID)
 
 	// Soft-deleted user cannot be purged (account already gone from product view).
 	other := uuid.NewString()

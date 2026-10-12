@@ -440,21 +440,33 @@ def observation_decision(
     state: Any = None,
     questions: Any = None,
     metadata: dict[str, Any] | None = None,
+    user_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> Iterator[Any]:
     """Generation observation for SystemOne decide (Jev / Laya / Unsloth).
 
     Used by /v1/decision/test, /v1/decision/decide, and try_decide. Soft-fails
     to _Noop when Langfuse is off. Safe as a root observation (admin probe /
     auto_pick) or nested under open-bot.run when decide runs in-process.
+
+    When user_id / conversation_id are set (group Auto-pick decide), propagate
+    them so user-delete Langfuse purge can match by userId + sessionId.
     """
     client = get_langfuse()
     if client is None:
         yield _Noop()
         return
 
+    uid = (str(user_id).strip() if user_id else "") or ""
+    sid = (str(conversation_id).strip() if conversation_id else "") or ""
+
     meta: dict[str, Any] = {"kind": "decision"}
     if provider:
         meta["provider"] = str(provider)
+    if uid:
+        meta["user_id"] = uid
+    if sid:
+        meta["conversation_id"] = sid
     if metadata:
         for k, v in metadata.items():
             if k in ("api_key", "system_prompt", "OPENAI_API_KEY"):
@@ -470,8 +482,10 @@ def observation_decision(
         }
     )
     obs_cm: Any | None = None
+    prop_cm: Any | None = None
     gen: Any = _Noop()
     entered = False
+    prop_entered = False
     try:
         try:
             obs_cm = client.start_as_current_observation(
@@ -488,11 +502,32 @@ def observation_decision(
             obs_cm = None
             gen = _Noop()
             entered = False
+
+        if entered and (uid or sid):
+            try:
+                from langfuse import propagate_attributes
+
+                prop_cm = propagate_attributes(
+                    user_id=uid or None,
+                    session_id=sid or None,
+                )
+                prop_cm.__enter__()
+                prop_entered = True
+            except Exception:  # noqa: BLE001
+                prop_cm = None
+                prop_entered = False
+
         yield gen  # exactly once
     finally:
+        exc_info = sys.exc_info()
+        if prop_entered and prop_cm is not None:
+            try:
+                prop_cm.__exit__(*exc_info)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("langfuse decision propagate exit skipped: %s", e)
         if entered and obs_cm is not None:
             try:
-                obs_cm.__exit__(*sys.exc_info())
+                obs_cm.__exit__(*exc_info)
             except Exception as e:  # noqa: BLE001
                 logger.debug("langfuse decision exit skipped: %s", e)
 

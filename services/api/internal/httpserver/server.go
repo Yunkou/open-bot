@@ -374,6 +374,12 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
+		// Reject soft-deleted accounts. JWT alone used to keep working after purge,
+		// so chat fell through to env OPENAI_MODEL (stale MiniMax → 503).
+		if _, err := s.db.GetUserByID(claims.UserID); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		next(w, r.WithContext(ctx))
 	}
@@ -826,6 +832,12 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// New-bot default template: curated skills.sh batch default-on (+ account-enabled first-party).
+	// Old bots are never rewritten (SeedNewAgentDefaultSkills no-ops when agent_skills already exist).
+	if err := s.db.SeedNewAgentDefaultSkills(uid, a.ID); err != nil {
+		// Best-effort; agent row already created.
+		_ = err
+	}
 	if body.MachineID != nil {
 		a2, e2 := s.db.SetAgentMachineID(uid, a.ID, *body.MachineID)
 		if e2 != nil {
@@ -976,6 +988,13 @@ func (s *Server) handlePutSkill(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
+			return
+		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -2087,7 +2106,7 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	}
 	var decisionDeps *autoPickDecisionDeps
 	if mode == db.AutoPickDecision {
-		decisionDeps = s.decisionDepsForUser(uid)
+		decisionDeps = s.decisionDepsForUser(uid, conv.ID)
 	}
 	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis, decisionDeps)
 	plan.AutoPick = &pick

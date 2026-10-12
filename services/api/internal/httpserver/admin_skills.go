@@ -139,6 +139,13 @@ func (s *Server) handleAdminUpsertSkill(w http.ResponseWriter, r *http.Request) 
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	if !enabled && db.IsAlwaysOnBuiltin(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": db.ErrSkillDisableBlocked.Error(),
+			"code":  "skill_disable_blocked",
+		})
+		return
+	}
 	sk, err := s.db.UpsertGlobalSkill(name, body.Description, body.BodyMarkdown, enabled)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -185,6 +192,13 @@ func (s *Server) handleAdminPatchSkill(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Enabled != nil {
 		en = *body.Enabled
+	}
+	if body.Enabled != nil && !*body.Enabled && db.IsAlwaysOnBuiltin(name) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": db.ErrSkillDisableBlocked.Error(),
+			"code":  "skill_disable_blocked",
+		})
+		return
 	}
 	sk, err := s.db.UpsertGlobalSkill(name, desc, md, en)
 	if err != nil {
@@ -327,6 +341,13 @@ func (s *Server) handleAdminSetUserSkill(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
 			return
 		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -336,7 +357,6 @@ func (s *Server) handleAdminSetUserSkill(w http.ResponseWriter, r *http.Request)
 	})
 	writeJSON(w, http.StatusOK, sk)
 }
-
 
 func (s *Server) handleAdminSaveSkillPackage(w http.ResponseWriter, r *http.Request) {
 	admin, ok := s.loadAuthUser(w, r)
@@ -416,6 +436,13 @@ func (s *Server) handleAdminSetBotSkill(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		if errors.Is(err, db.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
 			return
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

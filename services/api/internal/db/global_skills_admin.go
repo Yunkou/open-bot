@@ -8,15 +8,17 @@ import (
 
 // GlobalSkillListItem powers GET /v1/admin/skills (management list).
 type GlobalSkillListItem struct {
-	Name        string        `json:"name"`
-	Description string        `json:"description"`
-	Enabled     bool          `json:"enabled"`
-	Source      string        `json:"source"` // builtin | custom
-	ReadOnly    bool          `json:"read_only"`
-	CreatedAt   string        `json:"created_at,omitempty"`
-	UpdatedAt   string        `json:"updated_at,omitempty"`
-	BotCount    int           `json:"bot_count"`
-	Bots        []SkillBotRef `json:"bots"`
+	Name           string        `json:"name"`
+	Description    string        `json:"description"`
+	Enabled        bool          `json:"enabled"`
+	Source         string        `json:"source"` // builtin | custom
+	ReadOnly       bool          `json:"read_only"`
+	CreatedAt      string        `json:"created_at,omitempty"`
+	UpdatedAt      string        `json:"updated_at,omitempty"`
+	BotCount       int           `json:"bot_count"`
+	Bots           []SkillBotRef `json:"bots"`
+	AlwaysOn       bool          `json:"always_on,omitempty"`
+	DisableBlocked bool          `json:"disable_blocked,omitempty"`
 }
 
 func diskBuiltinSkillNames() map[string]bool {
@@ -170,15 +172,21 @@ func (d *DB) ListGlobalSkillsDetailed(orgID string, includeDisabled bool) ([]Glo
 	}
 	out := make([]GlobalSkillListItem, 0, len(list))
 	for _, sk := range list {
+		alwaysOn := IsAlwaysOnBuiltin(sk.Name)
 		it := GlobalSkillListItem{
-			Name:        sk.Name,
-			Description: sk.Description,
-			Enabled:     sk.Enabled,
-			Source:      SkillSourceCustom,
-			ReadOnly:    false,
-			CreatedAt:   sk.CreatedAt,
-			UpdatedAt:   sk.UpdatedAt,
-			Bots:        usage[sk.Name],
+			Name:           sk.Name,
+			Description:    sk.Description,
+			Enabled:        sk.Enabled,
+			Source:         SkillSourceCustom,
+			ReadOnly:       false,
+			CreatedAt:      sk.CreatedAt,
+			UpdatedAt:      sk.UpdatedAt,
+			Bots:           usage[sk.Name],
+			AlwaysOn:       alwaysOn,
+			DisableBlocked: alwaysOn,
+		}
+		if alwaysOn {
+			it.Enabled = true
 		}
 		if builtin[sk.Name] {
 			it.Source = SkillSourceBuiltin

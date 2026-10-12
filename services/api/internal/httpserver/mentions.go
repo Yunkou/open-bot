@@ -281,7 +281,9 @@ func groupParticipationExtraSystemMode(forced, leadFallback bool, self *db.Agent
 		return "【群聊参与】你在群聊中，且本回合被用户点名（@你或 @everyone/@all）。请直接回复用户，不要输出 [PASS]，也不要只打招呼敷衍。"
 	}
 	if leadFallback {
-		return "【群聊参与】你在群聊中。本回合需要你来回答用户。请直接给出有帮助的回复，不要只打招呼敷衍，也不要沉默不语。"
+		// Explicitly forbid [PASS] (same as forced). Soft "不要沉默" alone was not enough
+		// when models still emit [PASS] from training; who-can/specialty/all-hands rely on this.
+		return "【群聊参与】你在群聊中。本回合需要你来回答用户。请直接给出有帮助的回复，不要输出 [PASS]，也不要只打招呼敷衍。"
 	}
 	selfID := ""
 	selfName := "你"

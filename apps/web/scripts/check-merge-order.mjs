@@ -61,3 +61,76 @@ list = insertKeepingStreamLast(list, {
 assert(list.map((m) => m.id).join(",") === "u1,ack,final", `got ${list.map((m) => m.id)}`);
 
 console.log("check-merge-order: ok");
+
+// Parallel group: never fuzzy-adopt across different agent_ids; preserve agent_id on same-id merge.
+function mergeIncomingMessage(prev, msg) {
+  if (!msg?.id) return prev;
+  if (prev.some((m) => m.id === msg.id)) {
+    return prev.map((m) => {
+      if (m.id !== msg.id) return m;
+      const merged = { ...m, ...msg, streaming: false };
+      const keep = (m.agent_id || "").trim();
+      const next = (msg.agent_id || "").trim();
+      if (keep && !next) merged.agent_id = keep;
+      return merged;
+    });
+  }
+  const incomingAgent = (msg.agent_id || "").trim();
+  if (msg.role === "assistant" && incomingAgent) {
+    for (let i = prev.length - 1; i >= 0; i--) {
+      const m = prev[i];
+      if (m.role !== "assistant") continue;
+      const local = Boolean(m.streaming) || String(m.id).startsWith("local-");
+      if (!local) continue;
+      if ((m.agent_id || "").trim() === incomingAgent) {
+        return prev.map((item, j) => (j === i ? { ...item, ...msg, streaming: false } : item));
+      }
+    }
+  }
+  for (let i = prev.length - 1; i >= 0; i--) {
+    const m = prev[i];
+    if (m.role !== msg.role) continue;
+    if (m.streaming && m.role === "assistant" && !(m.content ?? "").trim()) continue;
+    const local = Boolean(m.streaming) || String(m.id).startsWith("local-");
+    if (!local) break;
+    const localAgent = (m.agent_id || "").trim();
+    if (incomingAgent && localAgent && localAgent !== incomingAgent) continue;
+    if (incomingAgent && localAgent && localAgent === incomingAgent) {
+      return prev.map((item, j) => (j === i ? { ...item, ...msg, streaming: false } : item));
+    }
+    const same =
+      m.content === msg.content ||
+      (m.content === "" && !m.streaming) ||
+      (m.content !== "" && msg.content.startsWith(m.content));
+    if (!same) {
+      if (incomingAgent && !localAgent) continue;
+      break;
+    }
+    return prev.map((item, j) => (j === i ? { ...item, ...msg, streaming: false } : item));
+  }
+  return [...prev, { ...msg, streaming: false }];
+}
+
+// Same-id merge must keep agent_id when incoming omits it (avatar stamp).
+let avatars = [
+  { id: "m1", role: "assistant", content: "hi", agent_id: "bot-a", streaming: true },
+];
+avatars = mergeIncomingMessage(avatars, { id: "m1", role: "assistant", content: "hi there" });
+assert(avatars[0].agent_id === "bot-a", `agent_id wiped: ${avatars[0].agent_id}`);
+
+// Must not adopt bot-a bubble for bot-b projection.
+avatars = [
+  { id: "local-a", role: "assistant", content: "partial", agent_id: "bot-a", streaming: true },
+  { id: "local-b", role: "assistant", content: "", agent_id: "bot-b", streaming: true },
+];
+avatars = mergeIncomingMessage(avatars, {
+  id: "srv-b",
+  role: "assistant",
+  content: "from b",
+  agent_id: "bot-b",
+});
+assert(avatars.some((m) => m.id === "local-a" && m.agent_id === "bot-a"), "bot-a bubble lost");
+assert(avatars.some((m) => m.agent_id === "bot-b" && m.content === "from b"), "bot-b not adopted");
+assert(!avatars.some((m) => m.id === "local-a" && m.agent_id === "bot-b"), "avatar swap onto bot-a");
+
+console.log("check-merge-order: agent_id stamp ok");

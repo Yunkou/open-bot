@@ -485,12 +485,18 @@ export default function UsersPage() {
               render: (_, row) => (
                 <Switch
                   checked={row.enabled}
+                  disabled={Boolean(row.disable_blocked || row.always_on)}
+                  title={
+                    row.disable_blocked || row.always_on
+                      ? "find-skills 为技能发现入口，关闭后将无法发现生态技能"
+                      : undefined
+                  }
                   onChange={async (checked) => {
                     if (!skillsUser) return;
                     try {
                       const updated = await adminSetUserSkill(skillsUser.id, row.name, checked);
                       setUserSkills((prev) =>
-                        prev.map((s) => (s.name === row.name ? { ...s, enabled: updated.enabled } : s)),
+                        prev.map((s) => (s.name === row.name ? { ...s, ...updated } : s)),
                       );
                     } catch (err) {
                       message.error(err instanceof Error ? err.message : String(err));

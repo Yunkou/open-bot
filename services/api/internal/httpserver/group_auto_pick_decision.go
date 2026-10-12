@@ -151,15 +151,31 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	fallback := ""
 	allowSecond := true
 	leadFB := map[string]bool{}
-	if allSelected {
+	if allHands {
+		// Intro / round-robin: selected members must speak (LeadFallback prompt forbids
+		// candidacy [PASS]). Production 14:25 CST 「大家都介绍下自己」 (Langfuse peek
+		// f24b88df / 9bd33f4a / aeb5cffa): decision choice=all but LeadFallback empty
+		// → 文章+代码 both [PASS] → silence. Mirror who-can/specialty structural safety.
+		allowSecond = false
+		for _, id := range ids {
+			leadFB[id] = true
+		}
+		if allSelected {
+			fallback = "all"
+			log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
+		} else {
+			log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
+		}
+	} else if allSelected {
 		fallback = "all"
 		allowSecond = false
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
 	} else {
-		// Who-can census: capable picks must answer (leadFallback prompt) and must not
-		// second-fail-open into the remaining channel (incapable peers). Production
-		// 11:41 CST 「谁会写代码」mapped to 33 only, then 33 [PASS] → 22+44 spoke.
-		if whoCan {
+		// Who-can / specialty: capable picks must answer (leadFallback prompt) and must
+		// not second-fail-open into incapable peers. Production 11:41 CST 「谁会写代码」
+		// mapped to 33 only, then 33 [PASS] → 22+44 spoke; 13:45 CST 「写个js的代码」
+		// (peek/obs=5808f45a) low-conf→heuristic both coders PASS → 文档助手 spoke.
+		if whoCan || userTextHitsRoleSynonym(userText) {
 			allowSecond = false
 			for _, id := range ids {
 				leadFB[id] = true
@@ -416,6 +432,17 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		ids = orderedDecisionMemberIDs(memberOrder, keyToID)
 		if len(ids) == 0 {
 			return nil, 0, false, false
+		}
+		// Literal everyone (all-hands intro): SystemOne often returns choice=all + high
+		// noul/probs[all] with a diluted confidence field (~0.1). Don't fail-open away
+		// from a correct all mapping (14:25 CST 「大家都介绍下自己」 conf=0.10).
+		if conf < autoPickConfidenceFloor {
+			if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+				conf = pAll
+			}
+			if conf < autoPickConfidenceFloor {
+				conf = 0.55
+			}
 		}
 		return ids, conf, true, true
 	}
@@ -858,25 +885,44 @@ func optionalFloat(v any) (float64, bool) {
 	case json.Number:
 		f, err := t.Float64()
 		return f, err == nil
+	case string:
+		// SystemOne / Langfuse sometimes stringify noul/confidence ("0.8896").
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return 0, false
+		}
+		var f float64
+		if _, err := fmt.Sscanf(s, "%f", &f); err != nil {
+			return 0, false
+		}
+		return f, true
 	default:
 		return 0, false
 	}
 }
 
 // callRuntimeDecision invokes agent-runtime /v1/decision/decide (factory → SystemOne).
-func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, apiKey, model string, state any, questions map[string]any) (map[string]any, error) {
+// userID / conversationID are optional Langfuse attribution (user-delete purge).
+func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, apiKey, model string, state any, questions map[string]any, userID, conversationID string) (map[string]any, error) {
 	if s == nil || strings.TrimSpace(s.runtimeURL) == "" {
 		return nil, fmt.Errorf("runtime unavailable")
 	}
 	provider, baseURL, model = db.ApplyDecisionDefaults(provider, baseURL, model)
-	payload, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"provider":  provider,
 		"base_url":  baseURL,
 		"api_key":   apiKey,
 		"model":     model,
 		"state":     state,
 		"questions": questions,
-	})
+	}
+	if uid := strings.TrimSpace(userID); uid != "" {
+		body["user_id"] = uid
+	}
+	if cid := strings.TrimSpace(conversationID); cid != "" {
+		body["conversation_id"] = cid
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
@@ -924,8 +970,9 @@ func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, api
 }
 
 // decisionDepsForUser loads org decision settings and binds runtime decide.
+// conversationID is the Langfuse session_id (= conversations.id) for purge attribution.
 // Returns nil when org decision is off (caller fail-opens to heuristic).
-func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
+func (s *Server) decisionDepsForUser(uid, conversationID string) *autoPickDecisionDeps {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -933,6 +980,7 @@ func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
 	if uid == "" {
 		return nil
 	}
+	conversationID = strings.TrimSpace(conversationID)
 	u, err := s.db.GetUserByID(uid)
 	if err != nil || u == nil || strings.TrimSpace(u.OrgID) == "" {
 		return nil
@@ -952,7 +1000,7 @@ func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
 		Model:    settings.DecisionModel,
 	}
 	deps.Decide = func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
-		return s.callRuntimeDecision(ctx, deps.Provider, deps.BaseURL, deps.APIKey, deps.Model, state, questions)
+		return s.callRuntimeDecision(ctx, deps.Provider, deps.BaseURL, deps.APIKey, deps.Model, state, questions, uid, conversationID)
 	}
 	return deps
 }

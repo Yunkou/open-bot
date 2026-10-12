@@ -38,3 +38,17 @@ code-review (no parallel sub-agents), Chinese brief notes where helpful.
 - `code-review/references/verification-verdict.md` ← sdlc-review（Jakub Wolniewicz；已去掉 Kanban 依赖）
 
 **未移植：** `hermes-agent`（Hermes 自身的 CLI / 配置 / 插件手册）。
+
+## skills.sh curated builtins（默认开启）
+
+清单见 `skills/curated-builtins.json`；锁定版本见 `skills/CURATED.lock`。
+刷新：`scripts/sync-curated-builtins.sh`（或按清单里的 `npx skills add …`）。
+
+默认开启（新 Bot / 新账号），**不是** skills.sh 全榜：
+
+- `find-skills` ← vercel-labs/skills (**always_on** discovery entry: always mounted for new bots; disable blocked)
+- `grill-me` / `grill-with-docs` / `improve-codebase-architecture` / `tdd` / `handoff` / `triage` / `prototype` / `domain-modeling` / `teach` / `codebase-design` / `diagnosing-bugs` ← mattpocock/skills（`tdd` 与 `diagnosing-bugs` 保留 open-bot 改编，sync 不覆盖）
+- `frontend-design` ← anthropics/skills
+- `vercel-react-best-practices` ← vercel-labs/agent-skills
+
+明确不默认：`agent-browser`、`setup-matt-pocock-skills`、`grilling`（并入 grill-me）、`hyperframes*`、reddit/twitter 自动化、`lark-*`。旧 Bot 不做强制回填。

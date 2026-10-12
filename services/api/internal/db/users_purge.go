@@ -71,6 +71,45 @@ WHERE task_id IN (SELECT id FROM a2a_tasks WHERE user_id = $1)
 	if err := execCount("conversation_tasks", `DELETE FROM conversation_tasks WHERE user_id = $1`, userID); err != nil {
 		return nil, err
 	}
+
+	// Durable harness journal (group/DM runs). No FK to users — delete before
+	// conversations so we can also match threads by conversation_id.
+	if err := execCount("harness_docs", `
+DELETE FROM harness_docs
+WHERE thread_id IN (
+  SELECT thread_id FROM harness_threads WHERE user_id = $1
+  UNION
+  SELECT thread_id FROM harness_threads
+  WHERE conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)
+)
+`, userID); err != nil {
+		return nil, err
+	}
+	if err := execCount("harness_entries", `
+DELETE FROM harness_entries
+WHERE user_id = $1
+   OR conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)
+   OR thread_id IN (SELECT thread_id FROM harness_threads WHERE user_id = $1)
+`, userID); err != nil {
+		return nil, err
+	}
+	if err := execCount("harness_threads", `
+DELETE FROM harness_threads
+WHERE user_id = $1
+   OR conversation_id IN (SELECT id FROM conversations WHERE user_id = $1)
+`, userID); err != nil {
+		return nil, err
+	}
+
+	// Feedback lessons survive conversation cascade (feedback_id ON DELETE SET NULL).
+	if err := execCount("bot_lessons", `DELETE FROM bot_lessons WHERE user_id = $1`, userID); err != nil {
+		return nil, err
+	}
+	// Always-allow tool prefs (no cascade from business tables).
+	if err := execCount("user_tool_allowlist", `DELETE FROM user_tool_allowlist WHERE user_id = $1`, userID); err != nil {
+		return nil, err
+	}
+
 	if err := execCount("conversations", `DELETE FROM conversations WHERE user_id = $1`, userID); err != nil {
 		return nil, err
 	}

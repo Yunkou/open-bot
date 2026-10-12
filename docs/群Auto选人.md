@@ -87,12 +87,14 @@ resolveGroupSendTargets / planSendTargets
 
 | 模式 | 行为 |
 |---|---|
-| **heuristic** | phrase 短路 → 全员候选（非 forced，可 PASS；同 `off`） |
-| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；**Prompt 强制** `choice=all`、count=全员、高概率质量压在 `all`（「都介绍下自己」「大家都介绍一下」）；**信任模型映射**（无 underpick→全员结构展开）。与 who-can 子集互斥 |
+| **heuristic** | phrase 短路 → 全员；每人 `LeadFallback`（须作答，禁止 candidacy `[PASS]`） |
+| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；**Prompt 强制** `choice=all`、count=全员、高概率质量压在 `all`（「都介绍下自己」「大家都介绍一下」）；**信任模型映射**（无 underpick→全员结构展开）。选出后每人 `LeadFallback` + `AllowSecondFailOpen=false`。与 who-can 子集互斥 |
 
 **Prompt 驱动（all-hands）**：`buildAutoPickDecisionPayload` 在 all-hands 时强化 instructions / count noul / state——必须 `choice="all"`、noul near 1、禁止单 mN；示例含「都介绍下自己」「大家都介绍一下」。已移除 `all_hands_expand` 在 choice≠all 时强制展开全员的路径。
 
 **短语检测**（`isAllHandsIntent`）仍用于：heuristic 短路、decision 抬高 K / 加强指令、decision 失败时 fail-open 全员。
+
+**PASS / 二次 fail-open（all-hands，结构安全）**：全员介绍选出的每位成员标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「文章+代码都 PASS → 全员沉默」——14:25 CST「大家都介绍下自己」即此（Langfuse decision peek `f24b88df`，runs `9bd33f4a` / `aeb5cffa`）。decision 成功 / fail-open `*->all_hands` / heuristic 短路均适用。另：`choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
 
 **日志：**
 
@@ -129,6 +131,8 @@ resolveGroupSendTargets / planSendTargets
 
 **PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。这是结构安全，不是 keyword 纠偏。
 
+**PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `LeadFallback` + `AllowSecondFailOpen=false`。否则会出现「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST「写个js的代码…」即此（Langfuse `a32fde27` / obs `5808f45a`）。heuristic 与 decision 成功路径均适用。
+
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
 
 **日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
@@ -138,7 +142,7 @@ resolveGroupSendTargets / planSendTargets
 ## 5. 与 PASS / 全员候选并存
 
 - 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑。  
-- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**who-can 例外**：有能力子集关闭二次 fail-open，并强制候选作答（见 §4.2）。  
+- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**例外**：who-can / specialty / **all-hands** 关闭二次 fail-open，并对候选标 `LeadFallback` 强制作答（见 §4.1 / §4.2）。  
 - 开关：仅 org `feature_flags_json.auto_pick` 三态；默认 **heuristic**。
 
 ## 6. 文案 / 可观测

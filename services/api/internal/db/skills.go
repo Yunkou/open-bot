@@ -20,6 +20,9 @@ type UserSkill struct {
 	Custom      bool              `json:"custom"`
 	FileCount   int               `json:"file_count,omitempty"`
 	Files       []SkillFileRecord `json:"files,omitempty"`
+	// AlwaysOn / DisableBlocked: curated role=always_on discovery entry (find-skills).
+	AlwaysOn       bool `json:"always_on,omitempty"`
+	DisableBlocked bool `json:"disable_blocked,omitempty"`
 }
 
 // SkillsRoot resolves the global skills directory (repo skills/).
@@ -229,11 +232,17 @@ func (d *DB) ListUserSkills(userID string) ([]UserSkill, error) {
 		if !ok {
 			en = true
 		}
+		alwaysOn := IsAlwaysOnBuiltin(g.Name)
+		if alwaysOn {
+			en = true
+		}
 		sk := UserSkill{
-			Name:        g.Name,
-			Description: g.Description,
-			Enabled:     en,
-			Custom:      g.Custom,
+			Name:           g.Name,
+			Description:    g.Description,
+			Enabled:        en,
+			Custom:         g.Custom,
+			AlwaysOn:       alwaysOn,
+			DisableBlocked: alwaysOn,
 		}
 		if g.Custom {
 			n, _ := d.countUserSkillPackageFiles(userID, g.Name)
@@ -247,19 +256,112 @@ func (d *DB) ListUserSkills(userID string) ([]UserSkill, error) {
 	return out, nil
 }
 
+// SeedUserSkills inserts missing user_skills rows.
+// Brand-new accounts: enable all catalog skills (first-party disk + curated skills.sh batch).
+// Existing accounts: newly appeared skills default to enabled=false so adding curated
+// packages does not force-enable them on old bots/users (no backfill). ON CONFLICT DO NOTHING.
 func (d *DB) SeedUserSkills(userID string, global []GlobalSkill) error {
+	var n int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM user_skills WHERE user_id = $1`, userID).Scan(&n); err != nil {
+		return err
+	}
+	brandNew := n == 0
 	for _, g := range global {
+		enabled := true
+		if !brandNew {
+			// Existing user: do not auto-enable skills that just appeared in the catalog.
+			enabled = false
+		}
+		// Discovery entry (find-skills): always account-enabled.
+		if IsAlwaysOnBuiltin(g.Name) {
+			enabled = true
+		}
 		_, err := d.SQL.Exec(
 			`INSERT INTO user_skills (user_id, skill_name, enabled)
-			 VALUES ($1, $2, TRUE)
+			 VALUES ($1, $2, $3)
 			 ON CONFLICT (user_id, skill_name) DO NOTHING`,
-			userID, g.Name,
+			userID, g.Name, enabled,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	// Keep always-on discovery skills enabled even if an older row was disabled.
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		_, err := d.SQL.Exec(
+			`UPDATE user_skills SET enabled = TRUE WHERE user_id = $1 AND skill_name = $2 AND enabled = FALSE`,
+			userID, slug,
 		)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// SeedNewAgentDefaultSkills materializes agent_skills for a newly created bot.
+// Default-on = curated skills.sh batch (always, when present on disk) ∪ currently
+// account-enabled first-party skills. role=always_on (find-skills) is always mounted
+// as the discovery entry. Does not rewrite existing agent_skills rows.
+// Old bots are untouched (no backfill).
+func (d *DB) SeedNewAgentDefaultSkills(userID, agentID string) error {
+	var n int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM agent_skills WHERE agent_id = $1`, agentID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	userList, err := d.ListUserSkills(userID)
+	if err != nil {
+		return err
+	}
+	curated := map[string]bool{}
+	for _, s := range CuratedBuiltinSlugs() {
+		curated[s] = true
+	}
+	inCatalog := map[string]bool{}
+	for _, s := range userList {
+		inCatalog[s.Name] = true
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, s := range userList {
+		if curated[s.Name] {
+			if !seen[s.Name] {
+				seen[s.Name] = true
+				names = append(names, s.Name)
+			}
+			continue
+		}
+		// First-party (not in curated skills.sh batch): keep account-enabled ones.
+		if s.Enabled && !seen[s.Name] {
+			seen[s.Name] = true
+			names = append(names, s.Name)
+		}
+	}
+	// Curated always default-on for new bots even if account toggle is still off
+	// (existing users may have received curated rows as enabled=false).
+	for _, slug := range CuratedBuiltinSlugs() {
+		if !inCatalog[slug] || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		names = append(names, slug)
+	}
+	// Discovery entry: always mount find-skills (and any other role=always_on).
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		if !inCatalog[slug] || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		names = append(names, slug)
+	}
+	names = EnsureAlwaysOnSkills(names)
+	if len(names) == 0 {
+		return nil
+	}
+	return d.ReplaceAgentSkills(userID, agentID, names)
 }
 
 func (d *DB) findSkillMeta(userID, name string) (GlobalSkill, bool, error) {
@@ -280,6 +382,9 @@ func (d *DB) SetUserSkillEnabled(userID, name string, enabled bool) (*UserSkill,
 	if name == "" {
 		return nil, errors.New("skill name required")
 	}
+	if !enabled && IsAlwaysOnBuiltin(name) {
+		return nil, ErrSkillDisableBlocked
+	}
 	meta, found, err := d.findSkillMeta(userID, name)
 	if err != nil {
 		return nil, err
@@ -296,7 +401,11 @@ func (d *DB) SetUserSkillEnabled(userID, name string, enabled bool) (*UserSkill,
 	if err != nil {
 		return nil, err
 	}
-	return &UserSkill{Name: name, Description: meta.Description, Enabled: enabled, Custom: meta.Custom}, nil
+	alwaysOn := IsAlwaysOnBuiltin(name)
+	return &UserSkill{
+		Name: name, Description: meta.Description, Enabled: enabled, Custom: meta.Custom,
+		AlwaysOn: alwaysOn, DisableBlocked: alwaysOn,
+	}, nil
 }
 
 func (d *DB) ListEnabledSkillNames(userID string) ([]string, error) {
@@ -347,12 +456,26 @@ func (d *DB) ListEnabledSkillNamesForAgent(userID, agentID string) ([]string, er
 		return nil, err
 	}
 	if !anyRow {
-		return userEnabled, nil
+		return EnsureAlwaysOnSkills(userEnabled), nil
+	}
+	userSet := map[string]bool{}
+	for _, name := range userEnabled {
+		userSet[name] = true
 	}
 	var out []string
+	seen := map[string]bool{}
 	for _, name := range userEnabled {
-		if agentMap[name] {
-			out = append(out, name)
+		if agentMap[name] || IsAlwaysOnBuiltin(name) {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		if userSet[slug] && !seen[slug] {
+			seen[slug] = true
+			out = append(out, slug)
 		}
 	}
 	return out, nil
@@ -365,6 +488,9 @@ type AgentSkill struct {
 	Custom      bool   `json:"custom"`
 	// AccountEnabled is the account-level toggle (settings「技能」); Enabled is already the intersection.
 	AccountEnabled bool `json:"account_enabled"`
+	// AlwaysOn / DisableBlocked: curated role=always_on discovery entry (find-skills).
+	AlwaysOn       bool `json:"always_on,omitempty"`
+	DisableBlocked bool `json:"disable_blocked,omitempty"`
 }
 
 func (d *DB) ListAgentSkills(userID, agentID string) ([]AgentSkill, error) {
@@ -407,12 +533,18 @@ func (d *DB) ListAgentSkills(userID, agentID string) ([]AgentSkill, error) {
 				en = false
 			}
 		}
+		alwaysOn := IsAlwaysOnBuiltin(u.Name)
+		if alwaysOn {
+			en = true
+		}
 		out = append(out, AgentSkill{
 			Name:           u.Name,
 			Description:    u.Description,
 			Enabled:        en,
 			Custom:         u.Custom,
 			AccountEnabled: u.Enabled,
+			AlwaysOn:       alwaysOn,
+			DisableBlocked: alwaysOn,
 		})
 	}
 	return out, nil
@@ -422,6 +554,9 @@ func (d *DB) SetAgentSkillEnabled(userID, agentID, name string, enabled bool) (*
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("skill name required")
+	}
+	if !enabled && IsAlwaysOnBuiltin(name) {
+		return nil, ErrSkillDisableBlocked
 	}
 	if _, err := d.GetAgent(userID, agentID); err != nil {
 		return nil, err
@@ -464,16 +599,20 @@ func (d *DB) SetAgentSkillEnabled(userID, agentID, name string, enabled bool) (*
 	if err != nil {
 		return nil, err
 	}
+	alwaysOn := IsAlwaysOnBuiltin(name)
 	return &AgentSkill{
 		Name:           name,
 		Description:    meta.Description,
 		Enabled:        enabled && meta.Enabled,
 		Custom:         meta.Custom,
 		AccountEnabled: meta.Enabled,
+		AlwaysOn:       alwaysOn,
+		DisableBlocked: alwaysOn,
 	}, nil
 }
 
 // ReplaceAgentSkills sets the full per-bot allowlist (enabled names only get enabled=true).
+// Always-on discovery skills (find-skills) are force-included.
 func (d *DB) ReplaceAgentSkills(userID, agentID string, enabledNames []string) error {
 	if _, err := d.GetAgent(userID, agentID); err != nil {
 		return err
@@ -482,12 +621,16 @@ func (d *DB) ReplaceAgentSkills(userID, agentID string, enabledNames []string) e
 	if err != nil {
 		return err
 	}
+	enabledNames = EnsureAlwaysOnSkills(enabledNames)
 	allow := map[string]bool{}
 	for _, n := range enabledNames {
 		n = strings.TrimSpace(n)
 		if n != "" {
 			allow[n] = true
 		}
+	}
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		allow[slug] = true
 	}
 	_, err = d.SQL.Exec(`DELETE FROM agent_skills WHERE agent_id = $1`, agentID)
 	if err != nil {

@@ -50,7 +50,7 @@ func withLangfuseEnv(t *testing.T, base, pk, sk string) {
 func TestPurgeLangfuseUserTracesSkippedWhenUnconfigured(t *testing.T) {
 	withLangfuseEnv(t, "", "", "")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "user-1")
+	got := s.purgeLangfuseUserTraces(context.Background(), "user-1", nil)
 	if !strings.HasPrefix(got, "skipped:") {
 		t.Fatalf("expected skipped, got %q", got)
 	}
@@ -123,9 +123,9 @@ func TestPurgeLangfuseUserTracesListsAndBatchDeletes(t *testing.T) {
 
 	withLangfuseEnv(t, srv.URL, "pk-test", "sk-test")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
-	if !strings.HasPrefix(got, "deleted:3") {
-		t.Fatalf("got %q want deleted:3…", got)
+	got := s.purgeLangfuseUserTraces(context.Background(), "u1", nil)
+	if !strings.HasPrefix(got, "deleted:3 traces") {
+		t.Fatalf("got %q want deleted:3 traces…", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -160,7 +160,7 @@ func TestPurgeLangfuseUserTracesBestEffortOnListDown(t *testing.T) {
 	defer srv.Close()
 	withLangfuseEnv(t, srv.URL, "pk", "sk")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
+	got := s.purgeLangfuseUserTraces(context.Background(), "u1", nil)
 	if !strings.HasPrefix(got, "list HTTP 502") {
 		t.Fatalf("got %q", got)
 	}
@@ -169,7 +169,7 @@ func TestPurgeLangfuseUserTracesBestEffortOnListDown(t *testing.T) {
 func TestPurgeLangfuseUserTracesUnreachable(t *testing.T) {
 	withLangfuseEnv(t, "http://127.0.0.1:1", "pk", "sk")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
+	got := s.purgeLangfuseUserTraces(context.Background(), "u1", nil)
 	if !strings.HasPrefix(got, "unreachable:") {
 		t.Fatalf("got %q", got)
 	}
@@ -192,7 +192,7 @@ func TestPurgeLangfuseUserTracesPartialOnDeleteFailure(t *testing.T) {
 	defer srv.Close()
 	withLangfuseEnv(t, srv.URL, "pk", "sk")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "u1")
+	got := s.purgeLangfuseUserTraces(context.Background(), "u1", nil)
 	if !strings.HasPrefix(got, "partial: deleted=0 delete_http=500") {
 		t.Fatalf("got %q", got)
 	}
@@ -248,8 +248,8 @@ func TestPurgeLangfuseUserTracesMetadataFallback(t *testing.T) {
 
 	withLangfuseEnv(t, srv.URL, "pk", "sk")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "u-meta")
-	if !strings.HasPrefix(got, "deleted:1") {
+	got := s.purgeLangfuseUserTraces(context.Background(), "u-meta", nil)
+	if !strings.HasPrefix(got, "deleted:1 traces") {
 		t.Fatalf("got %q", got)
 	}
 	mu.Lock()
@@ -269,8 +269,154 @@ func TestPurgeLangfuseUserTracesEmptyMatch(t *testing.T) {
 	defer srv.Close()
 	withLangfuseEnv(t, srv.URL, "pk", "sk")
 	s := &Server{}
-	got := s.purgeLangfuseUserTraces(context.Background(), "nobody")
-	if !strings.HasPrefix(got, "deleted:0") {
+	got := s.purgeLangfuseUserTraces(context.Background(), "nobody", nil)
+	if !strings.HasPrefix(got, "deleted:0 (no traces/scores") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+
+func TestPurgeLangfuseUserTracesBySessionID(t *testing.T) {
+	var mu sync.Mutex
+	var sawSession string
+	var deleted []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v2/observations":
+			w.Header().Set("Content-Type", "application/json")
+			q := r.URL.Query()
+			if q.Get("userId") != "" || strings.Contains(q.Get("filter"), "user_id") {
+				// Primary/metadata find nothing — only sessionId has the orphan span.
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+				return
+			}
+			if q.Get("sessionId") == "conv-1" {
+				mu.Lock()
+				sawSession = q.Get("sessionId")
+				mu.Unlock()
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": []map[string]any{
+						{"id": "o1", "traceId": "tr-sess", "sessionId": "conv-1"}, // no userId
+					},
+					"meta": map[string]any{},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v3/scores":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/public/traces":
+			b, _ := io.ReadAll(r.Body)
+			var body struct {
+				TraceIDs []string `json:"traceIds"`
+			}
+			_ = json.Unmarshal(b, &body)
+			mu.Lock()
+			deleted = append(deleted, body.TraceIDs...)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Traces deleted successfully"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	withLangfuseEnv(t, srv.URL, "pk", "sk")
+	s := &Server{}
+	got := s.purgeLangfuseUserTraces(context.Background(), "u-orphan", []string{"conv-1"})
+	if !strings.HasPrefix(got, "deleted:1 traces") {
+		t.Fatalf("got %q", got)
+	}
+	if !strings.Contains(got, "sessions:1") {
+		t.Fatalf("expected sessions count in %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if sawSession != "conv-1" {
+		t.Fatalf("sessionId=%q", sawSession)
+	}
+	if len(deleted) != 1 || deleted[0] != "tr-sess" {
+		t.Fatalf("deleted=%v", deleted)
+	}
+}
+
+func TestPurgeLangfuseSessionScoresDeleted(t *testing.T) {
+	var mu sync.Mutex
+	var deletedScores []string
+	var deletedTraces []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v2/observations":
+			q := r.URL.Query()
+			if q.Get("userId") == "u-score" || q.Get("sessionId") == "sess-score" {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": []map[string]any{
+						{"id": "o1", "traceId": "tr-1", "userId": "u-score", "sessionId": "sess-score"},
+					},
+					"meta": map[string]any{},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/public/v3/scores":
+			if r.URL.Query().Get("sessionId") != "sess-score" {
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "meta": map[string]any{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"id": "score-1", "name": "thumbs", "dataType": "BOOLEAN"},
+					{"id": "score-2", "name": "rating", "dataType": "NUMERIC"},
+				},
+				"meta": map[string]any{},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/public/traces":
+			b, _ := io.ReadAll(r.Body)
+			var body struct {
+				TraceIDs []string `json:"traceIds"`
+			}
+			_ = json.Unmarshal(b, &body)
+			mu.Lock()
+			deletedTraces = append(deletedTraces, body.TraceIDs...)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/public/scores/"):
+			id := strings.TrimPrefix(r.URL.Path, "/api/public/scores/")
+			mu.Lock()
+			deletedScores = append(deletedScores, id)
+			mu.Unlock()
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "Score deletion queued successfully"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	withLangfuseEnv(t, srv.URL, "pk", "sk")
+	s := &Server{}
+	got := s.purgeLangfuseUserTraces(context.Background(), "u-score", []string{"sess-score"})
+	if !strings.Contains(got, "deleted:1 traces") {
+		t.Fatalf("got %q", got)
+	}
+	if !strings.Contains(got, "scores:2") {
+		t.Fatalf("expected scores:2 in %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deletedTraces) != 1 || deletedTraces[0] != "tr-1" {
+		t.Fatalf("traces=%v", deletedTraces)
+	}
+	want := map[string]bool{"score-1": true, "score-2": true}
+	for _, id := range deletedScores {
+		if !want[id] {
+			t.Fatalf("unexpected score %s", id)
+		}
+		delete(want, id)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing score deletes: %v", want)
 	}
 }
