@@ -157,11 +157,21 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 			}
 		}
 	}
-	if !whoCan && userTextHitsRoleSynonym(userText) {
-		if heur := capableIDsFromRoleMatch(userText, members, agents, ""); len(heur) > 0 {
+	// Specialty probe: raw ask, or joined intent when FOLLOW-UP binds a specialty prior
+	// (short "修改下" alone has no coding needles; intent join carries html/canvas/…).
+	specialtyProbe := specialtyProbeText(userText, synopsis)
+	if !whoCan && userTextHitsRoleSynonym(specialtyProbe) {
+		if heur := capableIDsFromRoleMatch(specialtyProbe, members, agents, ""); len(heur) > 0 {
 			if specialtyPicksIncapable(ids, heur) {
-				log.Printf("auto_pick=decision note=specialty_mismatch_failopen_heuristic ids=%v capable=%v choice=%s count=%d probs=%v", ids, heur, choiceKey, countHint, probs)
-				return groupAutoPickResult{}, false
+				// Remap to capable profiles (same direction as who_can_profile_match).
+				// Do not fail-open to full heuristic: generic bigram residue can re-admit
+				// the wrong role (writer 「先给草稿」 vs ask 「先给骨架」) and undo the recover.
+				log.Printf("auto_pick=decision note=specialty_mismatch_profile_match ids=%v capable=%v choice=%s count=%d probs=%v", ids, heur, choiceKey, countHint, probs)
+				ids = orderIDsByMembers(heur, members)
+				allSelected = false
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
 			}
 		}
 	}
@@ -193,7 +203,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		// Do NOT LeadFallback: selected bots keep candidacy [PASS] when off-topic /
 		// mis-selected. Hard no-PASS is only for true all-hands (above) or intentional
 		// must-answer (lead / second fail-open).
-		if whoCan || userTextHitsRoleSynonym(userText) {
+		if whoCan || userTextHitsRoleSynonym(specialtyProbe) {
 			allowSecond = false
 		}
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
@@ -367,6 +377,26 @@ func currentUserIntentSummary(userText, synopsis string) string {
 	summary, _ := currentUserIntentJoin(userText, synopsis)
 	return summary
 }
+
+
+// specialtyProbeText is the haystack for specialty synonym / capable-profile safety.
+// Short FOLLOW-UP asks ("修改下…") have no coding needles themselves; intent join v1
+// already binds prior specialty into Current user intent ("继续完善「…html/canvas…」：…").
+// Use that joined intent when the raw utterance misses synonyms so specialty_mismatch
+// can still rematch wrong m0 → capable (peek c5c3d672 follow-up shape). Who-can stays
+// on raw userText (caller). No new SVG/HTML needles.
+func specialtyProbeText(userText, synopsis string) string {
+	raw := strings.TrimSpace(userText)
+	if userTextHitsRoleSynonym(raw) {
+		return raw
+	}
+	intent := currentUserIntentSummary(userText, synopsis)
+	if intent != "" && userTextHitsRoleSynonym(intent) {
+		return intent
+	}
+	return raw
+}
+
 
 // currentUserIntentJoin returns the intent body and join mode: follow_up|new|soft|none.
 func currentUserIntentJoin(userText, synopsis string) (summary, mode string) {
@@ -743,6 +773,12 @@ func mapCapableMultiFromProbs(probs map[string]float64, keyToID map[string]strin
 // capableIDsFromRoleMatch returns members with a strong specialty score for the ask.
 // Scores the user message only — Recent-context synopsis often repeats peer intros
 // and would falsely mark the wrong role capable. Empty when nothing matches.
+//
+// When the ask hits a specialty synonym bucket (coding/research/…) and at least one
+// member matches that bucket via scoreRoleSynonyms, keep only synonym-matched
+// members. Generic role bigrams (e.g. writer blurb 「先给草稿」 vs ask 「先给骨架」)
+// must not admit the wrong role into the capable set — otherwise specialty_mismatch
+// / who_can_profile_match cannot recover a wrong decision choice=m0.
 func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Agent, synopsis string) []string {
 	_ = synopsis // intentionally unused: capable census must not absorb chat-context role bleed
 	haystack := strings.ToLower(strings.TrimSpace(userText))
@@ -756,8 +792,9 @@ func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Age
 		}
 	}
 	type scored struct {
-		id    string
-		score int
+		id      string
+		score   int
+		synonym int
 	}
 	var ranked []scored
 	for _, id := range members {
@@ -770,13 +807,28 @@ func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Age
 			}
 			role = groupParticipationRoleHint(a)
 		}
+		nameL := strings.ToLower(strings.TrimSpace(name))
+		roleL := strings.ToLower(strings.TrimSpace(role))
+		syn := scoreRoleSynonyms(haystack, nameL+" "+roleL)
 		sc := scoreAutoPickMatch(haystack, name, role)
 		if sc > 0 {
-			ranked = append(ranked, scored{id: id, score: sc})
+			ranked = append(ranked, scored{id: id, score: sc, synonym: syn})
 		}
 	}
 	if len(ranked) == 0 {
 		return nil
+	}
+	// Prefer synonym-bucket matches when the ask itself is a specialty synonym hit.
+	if userTextHitsRoleSynonym(haystack) {
+		var synOnly []scored
+		for _, e := range ranked {
+			if e.synonym > 0 {
+				synOnly = append(synOnly, e)
+			}
+		}
+		if len(synOnly) > 0 {
+			ranked = synOnly
+		}
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {

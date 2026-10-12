@@ -127,3 +127,102 @@ func TestCapableIDsFromRoleMatchWhoCanCoding(t *testing.T) {
 		t.Fatalf("want only coder, got %#v", got)
 	}
 }
+
+// Writer blurb contains 「先给草稿」; ask 「…先给骨架…html/canvas」 used to score both
+// bots via generic bigram 「先给」, so specialty_mismatch never fired and wrong m0(文章)
+// stuck. Synonym-bucket filter keeps only the coding profile.
+func TestCapableIDsHTMLCanvasIgnoresXianGeiResidue(t *testing.T) {
+	writer := "b82b2fbe-c621-4943-aff0-f59e7fc075b6"
+	coder := "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"
+	members := []string{writer, coder}
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。"},
+	}
+	ut := "给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg。先给骨架即可，别太长。"
+	if !userTextHitsRoleSynonym(ut) {
+		t.Fatal("html/canvas ask must hit coding synonym")
+	}
+	got := capableIDsFromRoleMatch(ut, members, agents, "")
+	if len(got) != 1 || got[0] != coder {
+		t.Fatalf("want only coder (ignore 先给 residue on writer), got %#v", got)
+	}
+	if !specialtyPicksIncapable([]string{writer}, got) {
+		t.Fatal("writer-only map must be specialty-incapable vs coder capable set")
+	}
+}
+
+func TestSpecialtyMismatchHTMLCanvasWrongM0WithXianGei(t *testing.T) {
+	writer := "b82b2fbe-c621-4943-aff0-f59e7fc075b6"
+	coder := "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"
+	members := []string{writer, coder}
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。"},
+	}
+	ut := "给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg。先给骨架即可，别太长。"
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"count": map[string]any{"type": "noul", "noul": "0.99"},
+				"pick": map[string]any{
+					"type": "choice", "choice": "m0",
+					"probabilities": map[string]any{"all": "0.2373", "m0": "0.4288", "m1": "0.3339"},
+					"confidence": "0.43",
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, writer, 1, "", deps)
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != coder {
+		t.Fatalf("wrong m0 must specialty-mismatch fail-open to coder, got %#v", got)
+	}
+	if got.Fallback == "all" || got.LeadFallback[writer] || got.LeadFallback[coder] {
+		t.Fatalf("specialty recover must not LeadFallback/all, got %#v", got)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("specialty path must close second-wave")
+	}
+}
+
+// peek c5c3d672 shape: short follow-up has no coding needles; intent join binds html/canvas
+// prior. Wrong choice=m0(文章) must specialty_mismatch_profile_match → coder.
+func TestSpecialtyMismatchFollowUpUsesJoinedIntent(t *testing.T) {
+	writer := "b82b2fbe-c621-4943-aff0-f59e7fc075b6"
+	coder := "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"
+	members := []string{writer, coder}
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。"},
+	}
+	ut := "修改下，换成动物的表情"
+	syn := "User: 给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg。先给骨架即可，别太长。 | Last answered by: 代码 — 写代码与排障…"
+	if userTextHitsRoleSynonym(ut) {
+		t.Fatal("raw follow-up must not hit specialty synonym (no needle spam on short ask)")
+	}
+	probe := specialtyProbeText(ut, syn)
+	if !userTextHitsRoleSynonym(probe) {
+		t.Fatalf("joined intent probe must hit coding synonym, got %q", probe)
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"count": map[string]any{"type": "noul", "noul": "0.99"},
+				"pick": map[string]any{
+					"type": "choice", "choice": "m0",
+					"probabilities": map[string]any{"all": "0.15", "m0": "0.48", "m1": "0.37"},
+					"confidence": "0.48",
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, writer, 1, syn, deps)
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != coder {
+		t.Fatalf("follow-up wrong m0 must rematch to coder via joined intent, got %#v", got)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("follow-up specialty rematch must close second-wave")
+	}
+}

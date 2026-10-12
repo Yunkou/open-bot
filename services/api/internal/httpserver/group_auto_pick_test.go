@@ -1465,7 +1465,8 @@ func TestAutoPickHeuristicResearchLookupYouNuo(t *testing.T) {
 // Production 2026-10-12 12:35 CST Langfuse peek/obs=3569c5ef947ad07a (trace 38cb71ea…):
 // 「帮我查下2025年格灵深瞳的年报」— c5c5231 SPECIALTY TASK prompt was loaded, but SystemOne
 // still chose m0=coder (pick-prob 0.61, calibrated conf 0.23, count noul≈0.99).
-// Specialty mismatch vs role-capable 22+44 → fail-open heuristic (not trust m0).
+// Specialty mismatch vs role-capable 22+44 → remap to capable (same direction as
+// who_can_profile_match; not fail-open heuristic which can re-admit wrong roles).
 // Companion run peek/obs=f258fadb… / trace 042ffb71… answered by 33.
 func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	members := []string{"33", "22", "44"}
@@ -1492,8 +1493,8 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	}
 	synopsis := "要的。你刚才问的是谁不会写代码：22 和 44 主要负责查资料与总结；33 负责写代码与排障。"
 	got := runAutoPickByMode(db.AutoPickDecision, "帮我查下2025年格灵深瞳的年报", members, agents, "33", 1, synopsis, deps)
-	if got.Method != "decision->heuristic" {
-		t.Fatalf("want decision->heuristic fail-open, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
+	if got.Method != "decision" {
+		t.Fatalf("want decision specialty_mismatch_profile_match, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
 	}
 	if len(got.AgentIDs) != 2 {
 		t.Fatalf("research specialty want 22+44, got %#v", got.AgentIDs)
@@ -1504,6 +1505,9 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	}
 	if !set["22"] || !set["44"] || set["33"] {
 		t.Fatalf("want research 22+44 only (not coder 33), got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("specialty rematch must close second-wave")
 	}
 }
 
