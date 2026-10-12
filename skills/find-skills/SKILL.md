@@ -1,112 +1,86 @@
 ---
 name: find-skills
-description: Helps users discover and install agent skills when they ask questions like "how do I do X", "find a skill for X", "is there a skill that can...", or express interest in extending capabilities. This skill should be used when the user is looking for functionality that might exist as an installable skill.
+description: Discover and install skills when the user asks "how do I do X", "is there a skill for X", or wants to extend capabilities. Covers open-bot Settings install and skills.sh search.
 ---
 
-# Find Skills
+# Find Skills（open-bot）
 
-This skill helps you discover and install skills from the open agent skills ecosystem.
+改编自 [vercel-labs/skills](https://github.com/vercel-labs/skills) 的 `find-skills`。安装与生效路径已按 **open-bot** 重写；`npx skills` 仅作生态检索，不是本产品的安装入口。
 
-## When to Use This Skill
+## 何时用
 
-Use this skill when the user:
+- 「有没有 skill 能…」「帮我找个做 X 的技能」
+- 「how do I do X」且 X 像常见可沉淀工作流（设计、测试、部署、文档等）
+- 当前目录里没有明显匹配，需要到 skills.sh 生态深搜
+- 用户想扩展能力 / 安装别人的 skill 包
 
-- Asks "how do I do X" where X might be a common task with an existing skill
-- Says "find a skill for X" or "is there a skill for X"
-- Asks "can you do X" where X is a specialized capability
-- Expresses interest in extending agent capabilities
-- Wants to search for tools, templates, or workflows
-- Mentions they wish they had help with a specific domain (design, testing, deployment, etc.)
+目录里已有明显匹配时：直接 `load_skill` 那个名字，不必先走本包。
 
-## What is the Skills CLI?
+## open-bot 里技能怎么生效
 
-The Skills CLI (`npx skills`) is the package manager for the open agent skills ecosystem. Skills are modular packages that extend agent capabilities with specialized knowledge, workflows, and tools.
+| 来源 | 怎么来 | 怎么用 |
+|------|--------|--------|
+| **已启用目录** | 系统提示「可用技能」列表（含 always_on 的本包） | `load_skill(name)` 读全文后自己执行 |
+| **平台 / curated** | 仓库 `skills/` + `curated-builtins.json` 默认开启 batch | 新 Bot 已挂；旧 Bot 在设置里打开 |
+| **个人安装** | **设置 → 扩展能力包**：粘贴 SKILL.md、选文件夹、或上传 `.zip` | 上传并启用后进入目录；名字勿与平台技能冲突 |
+| **管理端** | Admin「Skills」导入 zip（全局） | 组织级平台技能 |
 
-**Key commands:**
+**不要**让用户只跑 `npx skills add …` 就以为 open-bot 已安装——那只影响本机 skills CLI 目录，**不会**自动进 open-bot 目录。发现合适包后：说明用设置上传（或把包放进仓库 `skills/<slug>/` 再 seed），并给出 skills.sh 链接便于核对。
 
-- `npx skills find [query] [--owner <owner>]` - Search for skills interactively or by keyword, optionally scoped to a GitHub owner
-- `npx skills add <package>` - Install a skill from GitHub or other sources
-- `npx skills update` - Update all installed skills
+## 流程
 
-**Browse skills at:** https://skills.sh/
+### 1. 先看本轮目录
 
-## How to Help Users Find Skills
+扫描系统提示里的技能目录；名字/描述对得上就 `load_skill`，不要重复搜索。
 
-### Step 1: Understand What They Need
+### 2. 目录不够再深搜
 
-When a user asks for help with something, identify:
-
-1. The domain (e.g., React, testing, design, deployment)
-2. The specific task (e.g., writing tests, creating animations, reviewing PRs)
-3. Whether this is a common enough task that a skill likely exists
-
-### Step 2: Check the Leaderboard First
-
-Before running a CLI search, check the [skills.sh leaderboard](https://skills.sh/) to see if a well-known skill already exists for the domain. The leaderboard ranks skills by total installs, surfacing the most popular and battle-tested options.
-
-For example, top skills for web development include:
-- `vercel-labs/agent-skills` — React, Next.js, web design (100K+ installs each)
-- `anthropics/skills` — Frontend design, document processing (100K+ installs)
-
-### Step 3: Search for Skills
-
-If the leaderboard doesn't cover the user's need, run the find command:
+1. 浏览 [skills.sh](https://skills.sh/) leaderboard（热门、安装量）。
+2. 需要时在**已连接电脑**上检索（先 `load_skill host-shell`）：
 
 ```bash
 npx skills find [query] [--owner <owner>]
 ```
 
-For example:
+示例：`npx skills find react performance`、`npx skills find pr review`。
 
-- User asks "how do I make my React app faster?" → `npx skills find react performance`
-- User asks "can you help me with PR reviews?" → `npx skills find pr review`
-- User asks "I need to create a changelog" → `npx skills find changelog`
+无已连接电脑时：用 `http_fetch` 打开 skills.sh 相关页，或请用户打开桌面应用后再搜；不要编造安装量或包名。
 
-### Step 4: Verify Quality Before Recommending
+### 3. 质量门槛（推荐前必过）
 
-**Do not recommend a skill based solely on search results.** Always verify:
+1. **安装量** — 优先 1K+；少于 100 要谨慎说明。
+2. **来源** — `vercel-labs`、`anthropics`、`microsoft` 等官方/知名源更可信。
+3. **仓库星数** — 来源 repo 少于约 100 star 需标明风险。
 
-1. **Install count** — Prefer skills with 1K+ installs. Be cautious with anything under 100.
-2. **Source reputation** — Official sources (`vercel-labs`, `anthropics`, `microsoft`) are more trustworthy than unknown authors.
-3. **GitHub stars** — Check the source repository. A skill from a repo with <100 stars should be treated with skepticism.
+### 4. 向用户呈现（自然语言，不提内部工具名）
 
-### Step 5: Present Options to the User
+包含：做什么、安装量与来源、**open-bot 安装方式**、skills.sh 链接。
 
-When you find relevant skills, present them to the user with:
-
-1. The skill name and what it does
-2. The install count and source
-3. The install command they can run
-4. A link to learn more at skills.sh
-
-Example response:
+示例：
 
 ```
-I found a skill that might help! The "react-best-practices" skill provides
-React and Next.js performance optimization guidelines from Vercel Engineering.
-(185K installs)
+我找到一个可能有用的能力包：react-best-practices（Vercel，约 185K 安装），偏 React/Next 性能。
 
-To install it:
-npx skills add vercel-labs/agent-skills@react-best-practices
+在本产品里安装：打开 设置 → 扩展能力包，上传该技能的文件夹或 zip（需含 SKILL.md），上传并启用。
+详情：https://skills.sh/vercel-labs/agent-skills/react-best-practices
 
-Learn more: https://skills.sh/vercel-labs/agent-skills/react-best-practices
+需要的话我可以按你已连接的电脑帮你把包下载到本地再指引上传。
 ```
 
-### Step 6: Offer to Install
+若用户同意由助手协助下载：在已连接电脑用 `host_shell` / `host_write` 取包到用户可读目录，再请用户在设置里上传启用（助手不能替用户点设置 UI 完成启用，除非另有明确的产品 API 任务）。
 
-If the user wants to proceed, you can install the skill for them:
+### 5. 生态 CLI（仅检索 / 可选本机缓存）
 
 ```bash
-npx skills add <owner/repo@skill> -g -y
+npx skills find [query]
+npx skills add <owner/repo@skill>   # 写入本机 CLI 技能目录，不等于 open-bot 启用
 ```
 
-The `-g` flag installs globally (user-level) and `-y` skips confirmation prompts.
+浏览：https://skills.sh/
 
-## Common Skill Categories
+## 常见检索类别
 
-When searching, consider these common categories:
-
-| Category        | Example Queries                          |
+| Category        | Example queries                          |
 | --------------- | ---------------------------------------- |
 | Web Development | react, nextjs, typescript, css, tailwind |
 | Testing         | testing, jest, playwright, e2e           |
@@ -116,26 +90,13 @@ When searching, consider these common categories:
 | Design          | ui, ux, design-system, accessibility     |
 | Productivity    | workflow, automation, git                |
 
-## Tips for Effective Searches
+## 找不到时
 
-1. **Use specific keywords**: "react testing" is better than just "testing"
-2. **Try alternative terms**: If "deploy" doesn't work, try "deployment" or "ci-cd"
-3. **Check popular sources**: Many skills come from `vercel-labs/agent-skills` or `ComposioHQ/awesome-claude-skills`
+1. 如实说明没找到现成包。
+2. 用已有能力直接帮用户做。
+3. 若值得沉淀：引导写 skill（`load_skill skill-authoring`）或设置里新建后上传。
 
-## When No Skills Are Found
+## 注意
 
-If no relevant skills exist:
-
-1. Acknowledge that no existing skill was found
-2. Offer to help with the task directly using your general capabilities
-3. Suggest the user could create their own skill with `npx skills init`
-
-Example:
-
-```
-I searched for skills related to "xyz" but didn't find any matches.
-I can still help you with this task directly! Would you like me to proceed?
-
-If this is something you do often, you could create your own skill:
-npx skills init my-xyz-skill
-```
+- 本包为 always_on 发现入口：不要建议用户关闭/删除它。
+- 对用户可见文案避免「skill / load_skill / 工具」等内部词，改用「能力包 / 扩展 / 设置里安装」。

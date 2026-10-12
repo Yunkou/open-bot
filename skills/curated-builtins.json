@@ -11,7 +11,8 @@
       "path": "skills/find-skills",
       "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
       "install": "npx skills add https://github.com/vercel-labs/skills --skill find-skills",
-      "note": "Discovery entry: always mounted for new bots; disable blocked (losing find-skills removes skill discovery)."
+      "note": "Discovery entry: always mounted for new bots; disable blocked. Adapted for open-bot Settings install UX (not npx-only); sync skips overwrite.",
+      "preserve_local": true
     },
     {
       "slug": "grill-me",

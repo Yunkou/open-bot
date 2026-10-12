@@ -9,8 +9,8 @@
       "repo": "https://github.com/vercel-labs/skills",
       "path": "skills/find-skills",
       "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
-      "preserve_local": false,
-      "status": "synced",
+      "preserve_local": true,
+      "status": "preserved_local",
       "content_hash": "913b9d37d0d54047"
     },
     "grill-me": {
