@@ -902,19 +902,27 @@ func optionalFloat(v any) (float64, bool) {
 }
 
 // callRuntimeDecision invokes agent-runtime /v1/decision/decide (factory → SystemOne).
-func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, apiKey, model string, state any, questions map[string]any) (map[string]any, error) {
+// userID / conversationID are optional Langfuse attribution (user-delete purge).
+func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, apiKey, model string, state any, questions map[string]any, userID, conversationID string) (map[string]any, error) {
 	if s == nil || strings.TrimSpace(s.runtimeURL) == "" {
 		return nil, fmt.Errorf("runtime unavailable")
 	}
 	provider, baseURL, model = db.ApplyDecisionDefaults(provider, baseURL, model)
-	payload, err := json.Marshal(map[string]any{
+	body := map[string]any{
 		"provider":  provider,
 		"base_url":  baseURL,
 		"api_key":   apiKey,
 		"model":     model,
 		"state":     state,
 		"questions": questions,
-	})
+	}
+	if uid := strings.TrimSpace(userID); uid != "" {
+		body["user_id"] = uid
+	}
+	if cid := strings.TrimSpace(conversationID); cid != "" {
+		body["conversation_id"] = cid
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
@@ -962,8 +970,9 @@ func (s *Server) callRuntimeDecision(ctx context.Context, provider, baseURL, api
 }
 
 // decisionDepsForUser loads org decision settings and binds runtime decide.
+// conversationID is the Langfuse session_id (= conversations.id) for purge attribution.
 // Returns nil when org decision is off (caller fail-opens to heuristic).
-func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
+func (s *Server) decisionDepsForUser(uid, conversationID string) *autoPickDecisionDeps {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -971,6 +980,7 @@ func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
 	if uid == "" {
 		return nil
 	}
+	conversationID = strings.TrimSpace(conversationID)
 	u, err := s.db.GetUserByID(uid)
 	if err != nil || u == nil || strings.TrimSpace(u.OrgID) == "" {
 		return nil
@@ -990,7 +1000,7 @@ func (s *Server) decisionDepsForUser(uid string) *autoPickDecisionDeps {
 		Model:    settings.DecisionModel,
 	}
 	deps.Decide = func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
-		return s.callRuntimeDecision(ctx, deps.Provider, deps.BaseURL, deps.APIKey, deps.Model, state, questions)
+		return s.callRuntimeDecision(ctx, deps.Provider, deps.BaseURL, deps.APIKey, deps.Model, state, questions, uid, conversationID)
 	}
 	return deps
 }

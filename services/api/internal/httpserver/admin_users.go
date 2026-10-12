@@ -549,8 +549,10 @@ func (s *Server) handleAdminPurgeUserData(w http.ResponseWriter, r *http.Request
 			"bot_secrets", "bot_secret_requests", "mcp_servers", "sandboxes(row)",
 			"inbound_hooks", "llm_connections", "user_skills", "user_skill_files",
 			"user_skill_package_files", "a2a_tasks", "a2a_push_configs", "org_invites(created)",
+			"harness_threads/entries/docs", "bot_lessons", "user_tool_allowlist",
+			"message_feedbacks/reactions/attachments(via conversation cascade)",
 			"attachments(uploads)", "运行环境(host data)", "mem0(best-effort)",
-			"langfuse traces/scores/sessions(best-effort by userId+session)",
+			"langfuse traces/scores/sessions(best-effort by userId+session; decision traces need user/session attrs)",
 		},
 		"kept": []string{
 			"users 账号行", "password_hash", "role", "org_id", "email", "casdoor_sub", "created_at",

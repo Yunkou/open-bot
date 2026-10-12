@@ -2106,7 +2106,7 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	}
 	var decisionDeps *autoPickDecisionDeps
 	if mode == db.AutoPickDecision {
-		decisionDeps = s.decisionDepsForUser(uid)
+		decisionDeps = s.decisionDepsForUser(uid, conv.ID)
 	}
 	pick := runAutoPickByMode(mode, content, members, agents, conv.AgentID, ch.Settings.AutoPickK, synopsis, decisionDeps)
 	plan.AutoPick = &pick

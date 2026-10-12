@@ -264,6 +264,10 @@ async def compact_config() -> dict:
 class DecisionTestRequest(DecisionSettings):
     state: Any = "ping"
     questions: dict[str, Any] | None = None
+    # Optional attribution so user-delete Langfuse purge can match decide traces
+    # (group Auto-pick /v1/decision/decide). Admin probe may omit.
+    user_id: str | None = None
+    conversation_id: str | None = None
 
 
 def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
@@ -295,6 +299,8 @@ def _run_decision(body: DecisionTestRequest, *, default_probe: bool) -> dict:
         state=body.state,
         questions=questions,
         metadata=meta,
+        user_id=body.user_id,
+        conversation_id=body.conversation_id,
     ) as obs:
         try:
             result = client.decide(body.state, questions)
