@@ -247,19 +247,88 @@ func (d *DB) ListUserSkills(userID string) ([]UserSkill, error) {
 	return out, nil
 }
 
+// SeedUserSkills inserts missing user_skills rows.
+// Brand-new accounts: enable all catalog skills (first-party disk + curated skills.sh batch).
+// Existing accounts: newly appeared skills default to enabled=false so adding curated
+// packages does not force-enable them on old bots/users (no backfill). ON CONFLICT DO NOTHING.
 func (d *DB) SeedUserSkills(userID string, global []GlobalSkill) error {
+	var n int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM user_skills WHERE user_id = $1`, userID).Scan(&n); err != nil {
+		return err
+	}
+	brandNew := n == 0
 	for _, g := range global {
+		enabled := true
+		if !brandNew {
+			// Existing user: do not auto-enable skills that just appeared in the catalog.
+			enabled = false
+		}
 		_, err := d.SQL.Exec(
 			`INSERT INTO user_skills (user_id, skill_name, enabled)
-			 VALUES ($1, $2, TRUE)
+			 VALUES ($1, $2, $3)
 			 ON CONFLICT (user_id, skill_name) DO NOTHING`,
-			userID, g.Name,
+			userID, g.Name, enabled,
 		)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// SeedNewAgentDefaultSkills materializes agent_skills for a newly created bot.
+// Default-on = curated skills.sh batch (always, when present on disk) ∪ currently
+// account-enabled first-party skills. Does not rewrite existing agent_skills rows.
+// Old bots are untouched (no backfill).
+func (d *DB) SeedNewAgentDefaultSkills(userID, agentID string) error {
+	var n int
+	if err := d.SQL.QueryRow(`SELECT COUNT(*) FROM agent_skills WHERE agent_id = $1`, agentID).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	userList, err := d.ListUserSkills(userID)
+	if err != nil {
+		return err
+	}
+	curated := map[string]bool{}
+	for _, s := range CuratedBuiltinSlugs() {
+		curated[s] = true
+	}
+	inCatalog := map[string]bool{}
+	for _, s := range userList {
+		inCatalog[s.Name] = true
+	}
+	seen := map[string]bool{}
+	var names []string
+	for _, s := range userList {
+		if curated[s.Name] {
+			if !seen[s.Name] {
+				seen[s.Name] = true
+				names = append(names, s.Name)
+			}
+			continue
+		}
+		// First-party (not in curated skills.sh batch): keep account-enabled ones.
+		if s.Enabled && !seen[s.Name] {
+			seen[s.Name] = true
+			names = append(names, s.Name)
+		}
+	}
+	// Curated always default-on for new bots even if account toggle is still off
+	// (existing users may have received curated rows as enabled=false).
+	for _, slug := range CuratedBuiltinSlugs() {
+		if !inCatalog[slug] || seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		names = append(names, slug)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return d.ReplaceAgentSkills(userID, agentID, names)
 }
 
 func (d *DB) findSkillMeta(userID, name string) (GlobalSkill, bool, error) {

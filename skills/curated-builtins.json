@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "description": "skills.sh curated builtins that are default-on for new bots. Not the full leaderboard. Existing first-party disk skills remain available; this file only governs the skills.sh batch.",
+  "skills": [
+    {
+      "slug": "find-skills",
+      "package": "vercel-labs/skills",
+      "skill": "find-skills",
+      "repo": "https://github.com/vercel-labs/skills",
+      "path": "skills/find-skills",
+      "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
+      "install": "npx skills add https://github.com/vercel-labs/skills --skill find-skills"
+    },
+    {
+      "slug": "grill-me",
+      "package": "mattpocock/skills",
+      "skill": "grill-me",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/grill-me",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill grill-me",
+      "note": "grilling is merged into grill-me; do not add grilling separately"
+    },
+    {
+      "slug": "grill-with-docs",
+      "package": "mattpocock/skills",
+      "skill": "grill-with-docs",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/grill-with-docs",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill grill-with-docs"
+    },
+    {
+      "slug": "improve-codebase-architecture",
+      "package": "mattpocock/skills",
+      "skill": "improve-codebase-architecture",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/improve-codebase-architecture",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill improve-codebase-architecture"
+    },
+    {
+      "slug": "tdd",
+      "package": "mattpocock/skills",
+      "skill": "tdd",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/tdd",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill tdd",
+      "preserve_local": true,
+      "note": "Already adapted for open-bot (host_*/load_skill). Sync skips overwrite."
+    },
+    {
+      "slug": "frontend-design",
+      "package": "anthropics/skills",
+      "skill": "frontend-design",
+      "repo": "https://github.com/anthropics/skills",
+      "path": "skills/frontend-design",
+      "ref": "dbd4588f9e1033efb41dad4bef2f7947c8993d44",
+      "install": "npx skills add https://github.com/anthropics/skills --skill frontend-design"
+    },
+    {
+      "slug": "handoff",
+      "package": "mattpocock/skills",
+      "skill": "handoff",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/handoff",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill handoff"
+    },
+    {
+      "slug": "triage",
+      "package": "mattpocock/skills",
+      "skill": "triage",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/triage",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill triage"
+    },
+    {
+      "slug": "prototype",
+      "package": "mattpocock/skills",
+      "skill": "prototype",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/prototype",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill prototype"
+    },
+    {
+      "slug": "domain-modeling",
+      "package": "mattpocock/skills",
+      "skill": "domain-modeling",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/domain-modeling",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill domain-modeling"
+    },
+    {
+      "slug": "teach",
+      "package": "mattpocock/skills",
+      "skill": "teach",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/teach",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill teach"
+    },
+    {
+      "slug": "vercel-react-best-practices",
+      "package": "vercel-labs/agent-skills",
+      "skill": "vercel-react-best-practices",
+      "repo": "https://github.com/vercel-labs/agent-skills",
+      "path": "skills/react-best-practices",
+      "ref": "063bee94c3f4df8453406c830b0a7df0f2860278",
+      "install": "npx skills add https://github.com/vercel-labs/agent-skills --skill vercel-react-best-practices",
+      "note": "Upstream folder is skills/react-best-practices; frontmatter name is vercel-react-best-practices. Local dir uses the slug."
+    },
+    {
+      "slug": "codebase-design",
+      "package": "mattpocock/skills",
+      "skill": "codebase-design",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/codebase-design",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill codebase-design"
+    },
+    {
+      "slug": "diagnosing-bugs",
+      "package": "mattpocock/skills",
+      "skill": "diagnosing-bugs",
+      "repo": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/diagnosing-bugs",
+      "ref": "49dd158d1076134a641b33efb035946536778336",
+      "install": "npx skills add https://github.com/mattpocock/skills --skill diagnosing-bugs",
+      "preserve_local": true,
+      "note": "Already adapted for open-bot. Sync skips overwrite."
+    }
+  ],
+  "not_default": [
+    "agent-browser",
+    "setup-matt-pocock-skills",
+    "grilling",
+    "hyperframes",
+    "hyperframes-cli",
+    "hyperframes-core",
+    "hyperframes-animation",
+    "hyperframes-registry",
+    "hyperframes-creative",
+    "hyperframes-keyframes",
+    "hyperframes-audio",
+    "hyperframes-studio",
+    "reddit-automation",
+    "twitter-automation",
+    "lark-doc",
+    "lark-workflow-standup-report",
+    "lark-vc",
+    "lark-okr",
+    "lark-markdown",
+    "lark-vc-agent",
+    "lark-note",
+    "lark-approval",
+    "lark-attendance",
+    "lark-openapi-explorer",
+    "lark-skill-maker",
+    "lark-apps"
+  ]
+}

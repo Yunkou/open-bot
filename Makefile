@@ -1,5 +1,5 @@
 # open-bot local dev helpers
-.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop build-desktop-windows build-desktop-macos build-desktop-linux check-desktop \
+.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop build-desktop-windows build-desktop-macos build-desktop-linux check-desktop \ sync-curated-builtins
 	build-web build-admin sync-mobile build-android build-android-debug build-android-release dev-mobile-ios open-mobile-android build-ios \
 	dev-mobile-rn dev-mobile-rn-clear check-mobile-rn \
 	sandbox-image sandbox-image-desktop \
@@ -288,3 +288,7 @@ dream-user:
 	  set -a && [ -f ../../.env ] && . ../../.env; set +a && \
 	  . $(VENV_ACTIVATE) && \
 	  MEM0_DREAM_ENABLED=1 python -m app.dream --user-id "$(USER_ID)"
+
+# Refresh skills.sh curated builtins into skills/ + CURATED.lock (no push).
+sync-curated-builtins:
+	./scripts/sync-curated-builtins.sh

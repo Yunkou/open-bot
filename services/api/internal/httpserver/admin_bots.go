@@ -83,6 +83,7 @@ func (s *Server) handleAdminCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	_ = s.db.SeedNewAgentDefaultSkills(owner.ID, a.ID)
 	s.writeAudit(admin.OrgID, admin.ID, "bot.create", "agent", a.ID, map[string]any{
 		"name":     a.Name,
 		"user_id":  a.UserID,
