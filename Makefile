@@ -1,5 +1,5 @@
 # open-bot local dev helpers
-.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop build-desktop-windows build-desktop-macos build-desktop-linux check-desktop \ sync-curated-builtins
+.PHONY: compose-up compose-all compose-postgres compose-down compose-langfuse compose-langfuse-down compose-casdoor compose-casdoor-down dev-api dev-api-air dev-runtime dev-backend dev-worker dev-web dev-admin dev-desktop build-desktop build-desktop-windows build-desktop-macos build-desktop-linux check-desktop \ sync-curated-builtins sandbox-image-verify
 	build-web build-admin sync-mobile build-android build-android-debug build-android-release dev-mobile-ios open-mobile-android build-ios \
 	dev-mobile-rn dev-mobile-rn-clear check-mobile-rn \
 	sandbox-image sandbox-image-desktop \
@@ -217,16 +217,19 @@ build-ios: sync-mobile
 	cd apps/mobile/ios/App && xcodebuild -scheme App -configuration Debug -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO
 	@echo "iOS build complete"
 
-# Phase-1 sandbox computer image (debian bookworm-slim + bash/curl/python3/git)
+# Sandbox computer images: tooling baked into /usr/local + /opt/micromamba.
+# See deploy/sandbox/README.md for rebuild/publish. Does not push a registry.
 SANDBOX_IMAGE ?= openbot-sandbox:dev
 sandbox-image:
 	docker build -t $(SANDBOX_IMAGE) -f deploy/sandbox/Dockerfile deploy/sandbox
 
-# Lightweight Xvfb+fluxbox+x11vnc+noVNC (port 6080). Does not need the CLI image.
-# Alternative (pull): SANDBOX_DESKTOP_IMAGE=lscr.io/linuxserver/webtop:alpine-xfce SANDBOX_DESKTOP_PORT=3000
+sandbox-image-verify:
+	docker run --rm $(SANDBOX_IMAGE) bash -lc '	  set -e; 	  node -v; npm -v; pnpm -v; yarn -v; bun -v; 	  python3 --version; python --version; uv --version; 	  micromamba --version; conda --version; 	  micromamba run -n py312 python --version; 	  echo OK'
+
+# Desktop extends CLI image (SANDBOX_BASE). Alternative: webtop pull via .env.
 SANDBOX_DESKTOP_IMAGE ?= openbot-sandbox-desktop:dev
-sandbox-image-desktop:
-	docker build -t $(SANDBOX_DESKTOP_IMAGE) -f deploy/sandbox-desktop/Dockerfile deploy/sandbox-desktop
+sandbox-image-desktop: sandbox-image
+	docker build --build-arg SANDBOX_BASE=$(SANDBOX_IMAGE) 	  -t $(SANDBOX_DESKTOP_IMAGE) 	  -f deploy/sandbox-desktop/Dockerfile deploy/sandbox-desktop
 
 # Stop local dev processes. Web only kills Vite belonging to this repo (won't touch other apps on :5173).
 stop-api:
