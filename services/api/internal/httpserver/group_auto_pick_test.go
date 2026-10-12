@@ -391,6 +391,25 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(pick2["instructions"]), "all-hands") {
 		t.Fatalf("allHands instructions missing hint: %v", pick2["instructions"])
 	}
+	// who-can: prompt must drive specific mN + capable count (no role-match remap later)
+	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", false, true)
+	pick3 := q3["pick"].(map[string]any)
+	instr3 := fmt.Sprint(pick3["instructions"])
+	for _, needle := range []string{"CAPABILITY CENSUS", "写代码", "查资料", "criteria", "all"} {
+		if !strings.Contains(instr3, needle) {
+			t.Fatalf("who-can instructions missing %q: %s", needle, instr3)
+		}
+	}
+	count3 := q3[autoPickDecisionCountKey].(map[string]any)
+	if !strings.Contains(fmt.Sprint(count3["instructions"]), "CAPABILITY CENSUS count") {
+		t.Fatalf("who-can count instructions=%v", count3["instructions"])
+	}
+	if !strings.Contains(st3, "Member roles are in the pick criteria") {
+		t.Fatalf("state should point at criteria roles, got %q", st3)
+	}
+	if !strings.Contains(st3, "not an override of criteria roles") {
+		t.Fatalf("state should warn Recent context is not role override, got %q", st3)
+	}
 }
 
 func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
@@ -844,12 +863,11 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	}
 }
 
-
-
-func TestAutoPickDecisionWhoCanDilutedAllPrefersRoleMatch(t *testing.T) {
-	// Production 2026-10-12 10:35 CST: 「谁能帮我查下资料？」
-	// choice=all count≈2 but diluted mN ranked coder m0 above researchers → 33+22.
-	// Role-match must recover both research bots (22+44).
+func TestAutoPickDecisionWhoCanResearchViaModelNotChannelOrder(t *testing.T) {
+	// Production 2026-10-12 10:35 CST: 「谁能帮我查下资料？」— old SystemOne returned
+	// choice=all count≈2 with diluted mN ranking coder first (would map to 33+22 by
+	// channel-order top-N). Prompt now teaches role-matched mN; mock that output.
+	// Mapping must trust choice+count+probs — no capableIDsFromRoleMatch override.
 	members := []string{"33", "22", "44"}
 	agents := []*db.Agent{
 		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -862,13 +880,13 @@ func TestAutoPickDecisionWhoCanDilutedAllPrefersRoleMatch(t *testing.T) {
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
-					"choice": "all",
+					"choice": "m1",
 					"probabilities": map[string]any{
-						"all": 0.7891, "m0": 0.1401, "m1": 0.0454, "m2": 0.0254,
+						"all": 0.05, "m0": 0.05, "m1": 0.48, "m2": 0.42,
 					},
-					"confidence": 0.498,
+					"confidence": 0.75,
 				},
-				"count": map[string]any{"type": "noul", "noul": 0.5872},
+				"count": map[string]any{"type": "noul", "noul": 0.5},
 			}, nil
 		},
 	}
@@ -884,16 +902,17 @@ func TestAutoPickDecisionWhoCanDilutedAllPrefersRoleMatch(t *testing.T) {
 		set[id] = true
 	}
 	if !set["22"] || !set["44"] || set["33"] || len(got.AgentIDs) != 2 {
-		t.Fatalf("want research 22+44 only (not diluted mN 33+22), got %#v", got.AgentIDs)
+		t.Fatalf("want research 22+44 only (not channel-order 33+22), got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can must not AllowSecondFailOpen")
 	}
 }
 
-
-func TestAutoPickDecisionWhoCanWrongPrimarySynopsisBleed(t *testing.T) {
-	// Production 2026-10-12 11:34 CST langfuse a14ae0e4… / decision e356c54d…
-	// 「你们谁能帮我查下资料」— SystemOne chose m0=coder (0.59) with count≈3;
-	// Recent context was 44's research intro (「主要负责查资料」). Role-match must
-	// NOT treat generic 「负责」+synopsis as making 33 capable → expect 22+44 only.
+func TestAutoPickDecisionWhoCanUsesCriteriaRolesNotSynopsis(t *testing.T) {
+	// Production 2026-10-12 11:34 CST: 「你们谁能帮我查下资料」— model wrongly chose
+	// m0=coder while Recent context had 44's research intro. Prompt now says match
+	// criteria roles, not synopsis. Mock correct researchers; mapping trusts model.
 	members := []string{"33", "22", "44"}
 	agents := []*db.Agent{
 		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -901,19 +920,25 @@ func TestAutoPickDecisionWhoCanWrongPrimarySynopsisBleed(t *testing.T) {
 		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
 	}
 	synopsis := "我是44，主要负责查资料、阅读和整理总结，尽量把结论与来源依据说清楚。 | 你们谁能帮我查下资料"
+	var sawState string
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			sawState = fmt.Sprint(state)
+			pick := questions["pick"].(map[string]any)
+			if !strings.Contains(fmt.Sprint(pick["instructions"]), "CAPABILITY CENSUS") {
+				t.Fatalf("who-can decide must get census instructions, got %v", pick["instructions"])
+			}
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
-					"choice": "m0",
+					"choice": "m1",
 					"probabilities": map[string]any{
-						"all": 0.2471, "m0": 0.5873, "m1": 0.1053, "m2": 0.0604,
+						"all": 0.04, "m0": 0.06, "m1": 0.46, "m2": 0.44,
 					},
-					"confidence": 0.2321,
+					"confidence": 0.78,
 				},
-				"count": map[string]any{"type": "noul", "noul": 0.7615},
+				"count": map[string]any{"type": "noul", "noul": 0.5},
 			}, nil
 		},
 	}
@@ -929,25 +954,78 @@ func TestAutoPickDecisionWhoCanWrongPrimarySynopsisBleed(t *testing.T) {
 		set[id] = true
 	}
 	if !set["22"] || !set["44"] || set["33"] || len(got.AgentIDs) != 2 {
-		t.Fatalf("want research 22+44 only (not synopsis-bleed all-3), got %#v", got.AgentIDs)
+		t.Fatalf("want research 22+44 only (criteria roles, not synopsis bleed), got %#v", got.AgentIDs)
+	}
+	if !strings.Contains(sawState, "not an override of criteria roles") {
+		t.Fatalf("state must warn synopsis is not role override, got %q", sawState)
 	}
 }
 
-func TestCapableIDsFromRoleMatchIgnoresSynopsisBleed(t *testing.T) {
+func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
+	// 「谁会写代码」with members ordered coder first: model picks m0 + count=1.
 	members := []string{"33", "22", "44"}
 	agents := []*db.Agent{
 		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
 		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
 		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
 	}
-	synopsis := "我是44，主要负责查资料、阅读和整理总结，尽量把结论与来源依据说清楚。"
-	got := capableIDsFromRoleMatch("你们谁能帮我查下资料", members, agents, synopsis)
-	set := map[string]bool{}
-	for _, id := range got {
-		set[id] = true
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.03, "m0": 0.88, "m1": 0.05, "m2": 0.04,
+					},
+					"confidence": 0.86,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.02},
+			}, nil
+		},
 	}
-	if !set["22"] || !set["44"] || set["33"] || len(got) != 2 {
-		t.Fatalf("capable set want 22+44, got %#v", got)
+	got := runAutoPickByMode(db.AutoPickDecision, "谁会写代码", members, agents, "22", 1, "", deps)
+	if got.Method != "decision" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
+		t.Fatalf("want only coder 33, got %#v method=%s", got.AgentIDs, got.Method)
+	}
+	if got.AllowSecondFailOpen || !got.LeadFallback["33"] {
+		t.Fatalf("structural safety: LeadFallback 33, no second-wave, got %#v", got)
+	}
+}
+
+func TestAutoPickDecisionAllHandsStillCallsDecide(t *testing.T) {
+	// 「都介绍下自己」— still call decide; choice=all → everyone OK.
+	members := []string{"22", "33", "44"}
+	agents := []*db.Agent{
+		{ID: "22", Name: "22", Description: "负责查资料与总结"},
+		{ID: "33", Name: "33", Description: "负责写代码与排障"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结"},
+	}
+	called := false
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			called = true
+			pick := questions["pick"].(map[string]any)
+			if !strings.Contains(fmt.Sprint(pick["instructions"]), "all-hands") {
+				t.Fatalf("all-hands decide must get all-hands instructions")
+			}
+			return map[string]any{
+				"pick": map[string]any{
+					"type": "choice", "choice": "all", "confidence": 0.9,
+					"probabilities": map[string]any{"all": 0.9, "m0": 0.03, "m1": 0.03, "m2": 0.04},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.95},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, "22", 1, "", deps)
+	if !called {
+		t.Fatal("all-hands must still call decide")
+	}
+	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 3 {
+		t.Fatalf("want decision fallback=all all members, got %#v", got)
 	}
 }
 

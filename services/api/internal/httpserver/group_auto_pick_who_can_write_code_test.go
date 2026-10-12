@@ -8,11 +8,10 @@ import (
 )
 
 func TestAutoPickDecisionWhoCanWriteCodeOnlyCoder(t *testing.T) {
-	// Production 2026-10-12 11:41 CST langfuse a1f143e3 / obs 30796cdf
-	// 「谁会写代码」— SystemOne choice=all count noul=0.8289→3, probs all≈0.38 m0≈0.31…
-	// Role-match must keep only coder 33. Capable picks must be leadFallback and
-	// AllowSecondFailOpen=false so a [PASS] cannot second-wave dump 22+44
-	// (that is what happened in production after 33 PASSed).
+	// Production 2026-10-12 11:41 CST needed only coder 33. Prompt now teaches SystemOne
+	// to pick that mN (not choice=all). Mock the desired model output; mapping must trust
+	// choice+count+probs (no role-match remap). Capable picks stay LeadFallback +
+	// AllowSecondFailOpen=false so a [PASS] cannot second-wave dump 22+44.
 	coder := "635d1077-5611-41bb-9fcf-2a4454d43d5a"
 	r22 := "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf"
 	r44 := "f634df70-8e30-4f71-9415-c7f80a8c0ec3"
@@ -29,13 +28,13 @@ func TestAutoPickDecisionWhoCanWriteCodeOnlyCoder(t *testing.T) {
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
-					"choice": "all",
+					"choice": "m0",
 					"probabilities": map[string]any{
-						"all": 0.3797, "m0": 0.312, "m1": 0.2194, "m2": 0.089,
+						"all": 0.05, "m0": 0.85, "m1": 0.05, "m2": 0.05,
 					},
-					"confidence": 0.0773,
+					"confidence": 0.82,
 				},
-				"count": map[string]any{"type": "noul", "noul": 0.8289},
+				"count": map[string]any{"type": "noul", "noul": 0.05},
 			}, nil
 		},
 	}

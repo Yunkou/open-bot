@@ -118,12 +118,12 @@ resolveGroupSendTargets / planSendTargets
 
 | 模式 | 行为 |
 |---|---|
-| **decision** | SystemOne 常误选 `choice=all` 且 `confidence` 很低（概率质量压在 `all` 上、mN 被稀释）。映射：**不**按字面展开全员；先按 `count` + mN 取子集，若 `choice=all` 且 mN 被 `all` 稀释 / 含无能力成员 / 少于角色匹配集合，则改用角色匹配普查（如 22+44）；置信度取 `max(confidence, probs[choice], probs[all], Σ selected)`，避免 low-conf fail-open 掉进 heuristic K=1 |
-| **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1` |
+| **decision** | **完全信任决策模型** choice+count+probs（**无** keyword / role-match 纠偏）。Prompt 要求：按 criteria 里各 mN 的角色标签做能力普查——写代码→仅 coder；查资料→全部 research；**禁止**在仅子集能做时选 `all` 或把 count 抬到全员。映射：`choice=all` + who-can → 按 mN 概率 + `count` 取有能力子集（不字面展开全员）；`choice=mN` → 主选 + 相对高概率同伴。置信度取 `max(confidence, probs[choice], probs[all], …)`，避免低 `confidence` 字段误 fail-open |
+| **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1`（decision 失败 fail-open 时仍用） |
 
-**Role-match 纠偏（who-can）**：decision 映射后若含无能力成员 / 漏选 / `choice=all` 且 mN 被 `all` 稀释，改用 `capableIDsFromRoleMatch`（**仅 user 文本**打分，忽略 synopsis，过滤通用词「负责」等 + 相对分阈值），避免 Recent context 里同伴自介污染导致 coder 进普查。
+**Prompt 驱动（who-can）**：`buildAutoPickDecisionPayload` 在 who-can 时强化 instructions / count noul / state——明确「匹配 criteria 角色，Recent context 同伴自介不能覆盖角色」；示例含写代码→单 mN、查资料→多 research。已移除 `capableIDsFromRoleMatch` / `who_can_role_match` 覆盖 SystemOne 结果的路径。
 
-**PASS / 二次 fail-open（who-can）**：有能力子集一经选出，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。
+**PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。这是结构安全，不是 keyword 纠偏。
 
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
 

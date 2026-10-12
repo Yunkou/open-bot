@@ -75,6 +75,7 @@ func decisionEffectiveK(k, memberCount int, allHands bool, countHint int) int {
 // autoPickDecision asks org decision model (choice + optional count) for members.
 // Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
 // count noul → how many (1..members); specialty soft K; multi/all-hands may raise to members.
+// Trusts model choice+count+probs (no keyword role-match remap).
 // On any soft failure the caller should fail-open to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
@@ -124,22 +125,8 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
-	// Who-can: when SystemOne parks mass on "all", mN ranks are often noise (e.g. coder > researchers).
-	// Prefer role-match capable census over diluted mN top-N / under-pick / incapable extras.
-	if ok && whoCan && !allSelected {
-		if heur := capableIDsFromRoleMatch(userText, members, agents, synopsis); len(heur) > 0 {
-			if whoCanPreferRoleMatch(choiceKey, ids, heur, probs) {
-				ids = orderIDsByMembers(heur, members)
-				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
-					conf = pAll
-				}
-				if conf < autoPickConfidenceFloor {
-					conf = 0.55
-				}
-				log.Printf("auto_pick=decision note=who_can_role_match ids=%v choice=%s count=%d probs=%v", ids, choiceKey, countHint, probs)
-			}
-		}
-	}
+	// Trust model choice+count+probs (no keyword / role-match remap). Who-can structural
+	// safety below still forbids PASS→second-wave dump of incapable peers.
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
@@ -224,9 +211,16 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"unless a single specialist is clearly intended."
 	}
 	if whoCan {
-		instr += " The user is asking who can do something (capability census): do NOT pick \"all\" unless every member fits. " +
-			"Pick the best matching specialist as choice, set count to how many members share that capability, " +
-			"and put high probabilities on every capable member so the multi subset includes them all (e.g. both researchers)."
+		instr += " CAPABILITY CENSUS (who-can): the user asks who can do X. " +
+			"Match X ONLY to the role labels in criteria (m0, m1, …) — not to Recent-context chat intros. " +
+			"Do NOT choose \"all\" unless EVERY member's role can do X. " +
+			"Choose the best matching capable member as choice (an mN key). " +
+			"Set count to the number of members whose roles share that capability (1 if only one fits; 2 if two researchers fit; etc.). " +
+			"Put HIGH probabilities on EVERY capable mN and LOW on incapable ones. " +
+			"Examples: ask=write/code/编程/写代码 → only members whose role is coding; choice=that mN, count≈1, high prob on coder only. " +
+			"Ask=research/查资料/搜索 → every member whose role is research/资料; choice=one of them, count=how many researchers, high probs on all researchers, low on coder. " +
+			"Never pick \"all\" or pad count to the full roster when only a subset is capable. " +
+			"Never let a peer's self-intro in Recent context override the criteria role labels."
 	}
 	memberN := len(keyToID)
 	frac2 := 0.0
@@ -239,6 +233,16 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"near 1 → all %d members. Example: for exactly 2 of %d, use about %.2f.",
 		memberN, memberN, frac2,
 	)
+	if whoCan {
+		countInstr = fmt.Sprintf(
+			"CAPABILITY CENSUS count: how many members' roles can do what the user asked? "+
+				"Output noul in [0,1] mapped as 1 + round(noul*(%d-1)) → member count. "+
+				"If only ONE member can (e.g. only the coder for 写代码), use near 0 (→1). "+
+				"If exactly TWO share the skill (e.g. two researchers for 查资料), use about %.2f (→2). "+
+				"Use near 1 ONLY when every member is capable. Do not inflate count to the full roster when only a subset fits.",
+			memberN, frac2,
+		)
+	}
 	questions = map[string]any{
 		autoPickDecisionQKey: map[string]any{
 			"type":         "choice",
@@ -253,8 +257,12 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	var b strings.Builder
 	b.WriteString("User message:\n")
 	b.WriteString(strings.TrimSpace(userText))
+	b.WriteString("\n\nMember roles are in the pick criteria keys (m0, m1, …). Match capability to those role labels.")
+	if whoCan {
+		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros that merely mention skills.")
+	}
 	if syn := strings.TrimSpace(synopsis); syn != "" {
-		b.WriteString("\n\nRecent context:\n")
+		b.WriteString("\n\nRecent context (prior chat only — not an override of criteria roles):\n")
 		b.WriteString(syn)
 	}
 	return keyToID, questions, b.String()
@@ -438,132 +446,6 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 	}
 	return ids, conf, false, true
 }
-
-
-// capableIDsFromRoleMatch returns members with a strong specialty score for the ask (capable census).
-// Scores the user message only — Recent-context synopsis often repeats peer intros
-// (「我是44，主要负责查资料…」) and would mark every 「负责…」 bot capable via generic tokens.
-// Empty when nothing matches.
-func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Agent, synopsis string) []string {
-	_ = synopsis // intentionally unused: capable census must not absorb chat-context role bleed
-	haystack := strings.ToLower(strings.TrimSpace(userText))
-	if haystack == "" || len(members) == 0 {
-		return nil
-	}
-	byID := map[string]*db.Agent{}
-	for _, a := range agents {
-		if a != nil {
-			byID[a.ID] = a
-		}
-	}
-	type scored struct {
-		id    string
-		score int
-	}
-	var ranked []scored
-	for _, id := range members {
-		a := byID[id]
-		name := id
-		role := ""
-		if a != nil {
-			if n := strings.TrimSpace(a.Name); n != "" {
-				name = n
-			}
-			role = groupParticipationRoleHint(a)
-		}
-		sc := scoreAutoPickMatch(haystack, name, role)
-		if sc > 0 {
-			ranked = append(ranked, scored{id: id, score: sc})
-		}
-	}
-	if len(ranked) == 0 {
-		return nil
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		if ranked[i].score != ranked[j].score {
-			return ranked[i].score > ranked[j].score
-		}
-		return ranked[i].id < ranked[j].id
-	})
-	floor := capableScoreFloor(ranked[0].score)
-	filtered := ranked[:0]
-	for _, e := range ranked {
-		if e.score >= floor {
-			filtered = append(filtered, e)
-		}
-	}
-	ranked = filtered
-	capN := decisionMemberCap(len(members))
-	if len(ranked) > capN {
-		ranked = ranked[:capN]
-	}
-	out := make([]string, 0, len(ranked))
-	for _, e := range ranked {
-		out = append(out, e.id)
-	}
-	return out
-}
-
-// whoCanPreferRoleMatch is true when decision mapping under-picks, includes incapable members,
-// or choice=all with diluted mN probs that disagree with the role-match capable set.
-func whoCanPreferRoleMatch(choiceKey string, mapped, heur []string, probs map[string]float64) bool {
-	if len(heur) == 0 {
-		return false
-	}
-	heurSet := map[string]struct{}{}
-	for _, id := range heur {
-		heurSet[id] = struct{}{}
-	}
-	for _, id := range mapped {
-		if _, ok := heurSet[id]; !ok {
-			return true // includes someone role-match does not consider capable
-		}
-	}
-	if len(mapped) < len(heur) {
-		return true // under-pick vs capable census
-	}
-	if strings.EqualFold(choiceKey, autoPickDecisionAllKey) && mNProbsDilutedByAll(probs) {
-		return !sameStringSet(mapped, heur)
-	}
-	return false
-}
-
-func mNProbsDilutedByAll(probs map[string]float64) bool {
-	if len(probs) == 0 {
-		return false
-	}
-	pAll := probs[autoPickDecisionAllKey]
-	maxM := 0.0
-	for k, p := range probs {
-		if strings.EqualFold(k, autoPickDecisionAllKey) {
-			continue
-		}
-		if p > maxM {
-			maxM = p
-		}
-	}
-	if pAll < 0.25 {
-		return false
-	}
-	return maxM < pAll*0.45 || maxM < 0.18
-}
-
-func sameStringSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := map[string]struct{}{}
-	for _, id := range a {
-		seen[id] = struct{}{}
-	}
-	for _, id := range b {
-		if _, ok := seen[id]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 
 // mapCapableMultiFromProbs picks top-N opaque mN members by probability for who-can / subset-all.
 // When countHint >= 2, takes that many; otherwise keeps members within 40% of the best mN prob.
