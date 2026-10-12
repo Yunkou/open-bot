@@ -74,11 +74,12 @@ func decisionEffectiveK(k, memberCount int, countHint int) int {
 // autoPickDecision asks org decision model (choice + optional count) for members.
 // Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
 // count noul → how many (1..members); specialty soft K; multi/count may raise to members.
-// Trusts model choice+count+probs for who-can/all-hands (no keyword remap / underpick expand).
-// All-hands vs who-can vs specialty is classified by the decide prompt (no isAllHandsIntent
-// phrase gate). Thin structural safety: choice=all / full roster → LeadFallback on selected;
-// who-can may remap choice=all → capable subset; specialty mismatch may fail-open heuristic.
-// On any soft failure the caller should fail-open to heuristic (not lead-only).
+// Trusts model choice+count+probs. Decide state always feeds Member capability profiles;
+// the prompt classifies ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no isAllHandsIntent
+// phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: choice=all /
+// full roster → LeadFallback; count-expand only when probs[all] is meaningful; who-can may
+// remap choice=all → capable subset; specialty mismatch (core role synonyms) may fail-open
+// heuristic. On soft failure the caller fail-opens to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	whoCan := isWhoCanIntent(userText)
@@ -126,19 +127,14 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
-	// Thin structural safety (no all-hands phrase table): full-roster count on a
-	// non-who-can / non-specialty ask means the model wanted everyone even when it
-	// parked primary on mN (underpick). Trust count over a single-mN primary.
-	// Langfuse/tests: choice=m0 + count=N + diluted mN probs → only lead spoke.
-	// Specialty follow-up trap (trace 4b43 「再来个哭脸」): inflated noul≈1 with an mN
-	// primary and weak probs[all] must NOT expand to everyone when Recent context still
-	// carries a prior specialty USER ask (existing role-synonym needles on synopsis —
-	// not a new keyword specialty纠偏 on the current utterance).
-	skipCountExpand := userTextHitsRoleSynonym(synopsis) &&
-		!strings.EqualFold(choiceKey, autoPickDecisionAllKey) &&
-		probs[autoPickDecisionAllKey] < 0.25
-	if ok && !whoCan && !userTextHitsRoleSynonym(userText) && !skipCountExpand && countHint >= len(members) && len(members) > 1 {
-		if len(ids) < len(members) || !allSelected {
+	// Thin structural safety (no specialty/anaphora needle tables): full-roster count
+	// expands an underpick mN primary only when the model also put meaningful mass on
+	// "all" (intro underpick). Weak probs[all] (<0.20) keeps the mapped specialty subset even
+	// if noul was inflated. Current-utterance specialty synonym still blocks expand.
+	if ok && !whoCan && !allSelected && !userTextHitsRoleSynonym(userText) &&
+		countHint >= len(members) && len(members) > 1 &&
+		probs[autoPickDecisionAllKey] >= 0.20 {
+		if len(ids) < len(members) {
 			ids = orderedDecisionMemberIDs(members, keyToID)
 			allSelected = true
 			if conf < autoPickConfidenceFloor {
@@ -151,17 +147,6 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 			}
 			log.Printf("auto_pick=decision note=full_roster_count_expand choice=%s count=%d ids=%v", choiceKey, countHint, ids)
 		}
-	}
-	// Specialty FOLLOW-UP safety (prompt-primary; no role-keyword needles on current text):
-	// Model often parks choice=all on short anaphora (「再来个哭脸」) even when Recent context
-	// still has the prior specialty USER ask. Rejecting into heuristic (which blends synopsis)
-	// recovers the specialty bot — but only when anaphora markers fire AND synopsis already
-	// hits a role synonym. Do NOT reject bare choice=all without that context (all-hands).
-	if ok && (allSelected || strings.EqualFold(choiceKey, autoPickDecisionAllKey)) &&
-		!whoCan && !userTextHitsRoleSynonym(userText) &&
-		userTextHitsRoleSynonym(synopsis) && looksLikeSpecialtyFollowUp(userText) {
-		log.Printf("auto_pick=decision note=specialty_followup_all_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
-		return groupAutoPickResult{}, false
 	}
 	// Who-can structural safety below still forbids PASS→second-wave dump of incapable peers.
 	// Specialty: do not trust a mapped set that includes role-mismatched members (e.g. coder
@@ -239,6 +224,11 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	} else {
 		criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, address-everyone / roast-everyone, or explicit all-hands)"
 	}
+
+	type memberProfile struct {
+		key, name, role string
+	}
+	var profiles []memberProfile
 	for i, id := range members {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -259,46 +249,38 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		}
 		keyToID[key] = id
 		criteria[key] = label
+		profiles = append(profiles, memberProfile{key: key, name: name, role: role})
 	}
 	if len(keyToID) == 0 {
 		return nil, nil, ""
 	}
 
-	// Always teach the model to classify (no isAllHandsIntent phrase gate). Decision mode
-	// is the product path for intro / roast-everyone; who-can / specialty stay subsets.
-	instr := "Who should reply this turn? First classify the user message, then pick one opaque key as primary.\n" +
-		"Before ALL-HANDS: if this is a short follow-up (再来个/再画/another) continuing a prior USER specialty ask in Recent context " +
-		"(e.g. coded SVG smile → 「再来个哭脸」), treat as SPECIALTY FOLLOW-UP — keep that specialty mN, never choice=\"all\".\n" +
-		"ALL-HANDS / EVERYONE-SPEAK: the utterance addresses the whole room — self-intro, round-robin, address-everyone, or roast-everyone " +
-		"(e.g. 「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「各位都是…」「introduce yourselves」「all of you are…」). " +
-		"You MUST set choice=\"all\" — never a single mN as primary. Set count to the full roster (noul near 1). " +
-		"Put HIGH probability mass on \"all\" and keep every mN probability high/even; never concentrate mass on one mN. " +
-		"Do not pick a specialist primary for collective intro / round-robin / roast / address-everyone asks.\n" +
-		"WHO-CAN / CAPABILITY CENSUS: the user asks who among members can do X (e.g. 「谁会写代码」「谁会查资料」「who can code」). " +
-		"Match X ONLY to the role labels in criteria (m0, m1, …) — not to Recent-context chat intros. " +
-		"Do NOT choose \"all\" unless EVERY member's role can do X. Choose a capable mN as choice; " +
-		"set count to how many members' roles share that capability; HIGH probabilities on EVERY capable mN; " +
-		"NEAR-ZERO on incapable ones and on \"all\". Hard examples: 「谁会写代码」→ ONLY coding-role mN (noul near 0); " +
-		"「谁会查资料」→ every research/资料-role mN (count=how many researchers).\n" +
-		"SPECIALTY TASK (do-the-job, not who-can / not intro): when the user asks bots to perform work " +
-		"(e.g. 「帮我查下…」「查一下…发展/资料」「搜索/调研/research/look up»; or 「修 bug」「写代码」/code; " +
-		"or markup/UI code 「用svg写个笑脸图标」「写个html页面」「做个可交互页面」), " +
-		"match the task to criteria role labels — never park on \"all\" and never pick an unrelated specialty. " +
-		"Research/lookup → every research/资料/搜索-role mN; coding/debug/SVG/HTML/CSS/JS → ONLY the coding-role mN (not the writer/文案). " +
-		"Hard example: 「帮我查下2026年优锘科技的发展」/ look up a company → research mNs only (e.g. 22+44), not the coder, not all. " +
-		"Hard example: 「用svg给我写一个笑脸图标」/ 「来个html页面选心情生成图标」 → coding-role mN only (noul near 0), never choice=\"all\" and never the writer. " +
-		"SPECIALTY FOLLOW-UP / ANAPHORA: short continuations that refer to the prior specialty turn " +
-		"(e.g. 「再来个哭脸」「再画一个」「换个颜色」「要html」「改成html」「another one」「same again but crying」) " +
-		"KEEP the same specialty role mN(s) from Recent-context prior USER asks — never switch to choice=\"all\". " +
-		"Hard example: prior user asked to code/draw a smile (SVG) with 代码 → current 「再来个哭脸」/「要html」 → coding-role mN only (not all, not intro, not writer). " +
-		"Reserve choice=\"all\" for introductions / round-robin / address-everyone / roast-everyone / explicit everyone — not for a concrete specialty task or its anaphoric follow-up.\n" +
-		"SINGLE / vague: prefer one specialist when the request matches their role, or the generalist for vague single-responder requests. " +
-		"When several specialists fit, pick the best primary — also set count and probabilities so extras can be included (multi subset, not only all-or-one)."
+	// Product path: model classifies task type from Member capability profiles + Recent
+	// context — not from ever-growing SVG/HTML/anaphora keyword needles.
+	instr := "Who should reply this turn? Classify the user message into exactly one task type, then pick opaque keys.\n" +
+		"1) ALL-HANDS: addresses the whole room (self-intro, round-robin, address-everyone, roast-everyone; " +
+		"e.g. 「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「introduce yourselves」). " +
+		"choice MUST be \"all\", count = full roster (noul near 1), HIGH probability on \"all\", even mass on every mN — never a single mN as primary.\n" +
+		"2) WHO-CAN: asks who among members can do X (「谁会写代码」「谁会查资料」「who can code」). " +
+		"Match X ONLY to Member capability profiles / criteria role labels — not Recent-context chat. " +
+		"choice = a capable mN; count = how many profiles share that capability; HIGH probs on every capable mN; " +
+		"NEAR-ZERO on incapable mNs and on \"all\" unless EVERY profile can do X.\n" +
+		"3) SPECIALTY: asks bots to perform work (lookup/research, coding/debug, writing, translate, …). " +
+		"Match the task to Member capability profiles — never park on \"all\", never pick an unrelated role. " +
+		"Research/lookup → research/资料/搜索 profiles; coding/debug/implementation → coding/写代码/排障 profiles only; " +
+		"writing/文案 → writer profiles only. Set count to how many matching profiles should reply.\n" +
+		"4) FOLLOW-UP: a short continuation of prior work (anaphora / same-task tweak). " +
+		"Use Recent context: prior USER turns + \"Last answered by\" (which bot replied last). " +
+		"Keep that same specialty role mN(s) — usually the last answering bot when their profile still fits; " +
+		"choice = that mN; count near one specialist; NEVER choice=\"all\". " +
+		"Member capability profiles remain authoritative if last answerer was a mismatch.\n" +
+		"SINGLE / vague: one best-matching profile, or the generalist. When several specialists fit, set count and probabilities for a multi subset (not only all-or-one). " +
+		"Reserve choice=\"all\" for ALL-HANDS only — not SPECIALTY or FOLLOW-UP."
 	if whoCan {
-		instr += " THIS MESSAGE IS A CAPABILITY CENSUS (who-can): follow the WHO-CAN branch only — never treat it as ALL-HANDS. " +
+		instr += " THIS MESSAGE IS A CAPABILITY CENSUS (who-can): follow WHO-CAN only — never treat it as ALL-HANDS. " +
 			"You MUST choose a capable mN as choice — never park on \"all\" for a specialty census. " +
-			"Never pick \"all\" or pad count/noul to the full roster when only a subset is capable. " +
-			"Never let a peer's self-intro in Recent context override the criteria role labels."
+			"Never pad count/noul to the full roster when only a subset is capable. " +
+			"Never let a peer's self-intro in Recent context override Member capability profiles."
 	}
 
 	memberN := len(keyToID)
@@ -308,24 +290,19 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	}
 	countInstr := fmt.Sprintf(
 		"How many members should reply this turn? Output noul in [0,1]: near 0 → one specialist; "+
-			"around 0.5 → several complementary specialists (multi subset, not necessarily everyone); "+
-			"near 1 → all %d members. "+
-			"ALL-HANDS / intro / roast / address-everyone (「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」) → noul near 1 (full roster). "+
-			"WHO-CAN census: 「谁会写代码」/ only the coder → near 0 (→1); 「谁会查资料」/ two researchers → about %.2f (→2); "+
-			"near 1 ONLY when every member's role is capable. "+
-			"SPECIALTY task: research with two researchers → about %.2f (→2); coding/SVG/HTML with one coder → near 0 (→1). "+
-			"SPECIALTY follow-up/anaphora (「再来个哭脸」/「要html」/再画 after a coding/SVG turn) → noul MUST stay near 0 (one specialist); FORBIDDEN to raise noul toward 1. "+
-			"FORBIDDEN: noul near 1 / full roster when only a specialty or who-can subset fits.",
-		memberN, frac2, frac2,
+			"around 0.5 → several complementary specialists (multi subset); near 1 → all %d members. "+
+			"ALL-HANDS → noul near 1 (full roster). "+
+			"WHO-CAN: one capable → near 0 (→1); two capable → about %.2f (→2); near 1 ONLY when every profile is capable. "+
+			"SPECIALTY / FOLLOW-UP → noul for matching profiles only (often near 0 for one specialist); FORBIDDEN to raise noul toward 1 when only a subset fits.",
+		memberN, frac2,
 	)
 	if whoCan {
 		countInstr = fmt.Sprintf(
-			"CAPABILITY CENSUS count: how many members' roles can do what the user asked? "+
+			"CAPABILITY CENSUS count: how many Member capability profiles can do what the user asked? "+
 				"Output noul in [0,1] mapped as 1 + round(noul*(%d-1)) → member count. "+
-				"「谁会写代码」/ only the coder → near 0 (→1). "+
-				"「谁会查资料」/ two researchers → about %.2f (→2). "+
-				"Use near 1 ONLY when every member's role is capable. "+
-				"FORBIDDEN: noul near 1 / full roster when the ask is a specialty census (写代码, 查资料 subset).",
+				"One capable → near 0 (→1). Two capable → about %.2f (→2). "+
+				"Use near 1 ONLY when every profile is capable. "+
+				"FORBIDDEN: noul near 1 / full roster when only a specialty subset fits.",
 			memberN, frac2,
 		)
 	}
@@ -344,35 +321,28 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	var b strings.Builder
 	b.WriteString("User message:\n")
 	b.WriteString(strings.TrimSpace(userText))
-	b.WriteString("\n\nMember roles are in the pick criteria keys (m0, m1, …). Match capability to those role labels.")
-	b.WriteString(" FIRST check SPECIALTY FOLLOW-UP: if Recent context has a prior USER specialty ask ")
-	b.WriteString("(code/draw/查资料/research/…) and this message is a short anaphoric continuation ")
-	b.WriteString("(再来个/再画一个/换个…/another one/same again), you MUST keep that specialty role mN — ")
-	b.WriteString("choice=that mN, count near one specialist, NEVER choice=\"all\". ")
-	b.WriteString("Example: Recent「用代码画个笑脸」+ now「再来个哭脸」→ the criteria mN whose role is 写代码/排障/coding (NOT research/资料, NOT all).\n")
-	b.WriteString("Otherwise classify: ALL-HANDS (intro/roast/address-everyone) → choice must be \"all\", count=full roster, never a single mN; ")
-	b.WriteString("WHO-CAN → capable mN subset only; SPECIALTY task → matching role mNs only (not all).")
+	b.WriteString("\n\nMember capability profiles (authoritative — match tasks to these roles):\n")
+	for _, p := range profiles {
+		if p.role != "" {
+			b.WriteString(fmt.Sprintf("- %s: %s — %s\n", p.key, p.name, p.role))
+		} else {
+			b.WriteString(fmt.Sprintf("- %s: %s\n", p.key, p.name))
+		}
+	}
+	b.WriteString("Classify task type then pick: ALL-HANDS → choice=\"all\" + full-roster count; ")
+	b.WriteString("WHO-CAN → capable mN subset only; SPECIALTY → matching-role mNs only (not all); ")
+	b.WriteString("FOLLOW-UP → continue via Recent context (prior USER turns + Last answered by); same role mN, never choice=\"all\".")
 	if whoCan {
-		b.WriteString(" This turn is WHO-CAN: capable = role matches the asked skill; ignore peer self-intros. " +
-			"「谁会写代码」→ coding mN only (choice=mN, noul≈0); never choice=all / never full-roster count. " +
-			"「谁会查资料」→ research mNs only (count=how many researchers).")
+		b.WriteString(" This turn is WHO-CAN: capable = profile matches the asked skill; ignore peer self-intros. ")
+		b.WriteString("Never choice=all / never full-roster count when only a subset is capable.")
 	}
 	if syn := strings.TrimSpace(synopsis); syn != "" {
-		b.WriteString("\n\nRecent context (prior USER turns preferred — use them for specialty follow-up continuity; not an override of criteria roles):\n")
+		b.WriteString("\n\nRecent context (prior USER turns + Last answered by — for FOLLOW-UP continuity; do not override Member capability profiles):\n")
 		b.WriteString(syn)
 	}
 	return keyToID, questions, b.String()
 }
 
-// mapDecisionChoiceToAgentIDs reads answers.pick (choice) and optional probabilities for multi.
-// Opaque "all" → every member in channel order — except who-can / count-subset census, which
-// remaps to top-N mN by probability (capable multi, not literally everyone).
-// Only mN keys in keyToID are accepted otherwise.
-// k is the already-clamped / raised effective K (may exceed autoPickMaxK for multi / all-hands).
-// When soft K is 1 but several mN probs clear the threshold, still returns a multi subset
-// (top-N by probability) without requiring choice=all — e.g. 2 of 3 specialists.
-// whoCan + countHint steer census asks (「都谁会查资料」) onto capable members even when
-// SystemOne returns choice=all with diluted per-member probs and a low confidence field.
 func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int, allowMultiFromProbs bool, whoCan bool, countHint int) (ids []string, conf float64, allSelected bool, ok bool) {
 	if k <= 0 {
 		k = autoPickDefaultK
@@ -707,29 +677,6 @@ func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Age
 		out = append(out, e.id)
 	}
 	return out
-}
-
-// looksLikeSpecialtyFollowUp detects short anaphoric continuations (再来个/再画/another…)
-// used only as a thin gate with synopsis role-synonym context — not a specialty role needle list.
-func looksLikeSpecialtyFollowUp(userText string) bool {
-	t := strings.ToLower(strings.TrimSpace(userText))
-	if t == "" {
-		return false
-	}
-	// Keep short: long utterances are new tasks / intros, not anaphora.
-	if len([]rune(t)) > 24 {
-		return false
-	}
-	markers := []string{
-		"再来个", "再来一", "再画", "再做", "再写", "换个", "换成",
-		"another one", "same again", "one more", "draw another", "make another",
-	}
-	for _, m := range markers {
-		if m != "" && strings.Contains(t, m) {
-			return true
-		}
-	}
-	return false
 }
 
 // specialtyPicksIncapable is true when decision mapped at least one agent outside the

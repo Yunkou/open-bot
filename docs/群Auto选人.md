@@ -67,9 +67,9 @@ resolveGroupSendTargets / planSendTargets
 
 ### B 档细节
 
-- **State**：`User message:` + 可选 `Recent context:`（synopsis；**优先近期 user 话**，跳过本轮刚落库的 user；长 bot SVG/HTML 不占槽，向前看以保留专长追问上下文，如「用代码画个笑脸」→「再来个哭脸」）
+- **State（三项输入）**：① `User message:`；② **Member capability profiles**（成员能力画像，每 mN 的显示名 — 角色）；③ `Recent context:`（chat history for follow-ups：优先近期 **USER** 话 + **Last answered by** 上轮作答 bot 名/角色；跳过本轮刚落库的 user；bot 正文若为 SVG/HTML 不占文本槽，但仍记录作答者身份）
 - **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
-- **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集；**SPECIALTY follow-up / anaphora**（「再来个/再画…」接在专长任务后）→ 保持原专长 mN，**禁止** `choice=all`（靠 decide prompt，非 keyword specialty 纠偏）
+- **指令（任务类型）**：模型先分类 **ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP** 再选 mN；集体介绍 / 轮流 / roast → `all`；能力普查 → 有能力子集；专长做事 → 匹配画像；**FOLLOW-UP** 靠 Recent 里 prior USER + Last answered by 延续专长，**禁止** `choice=all`（**不**靠 SVG/HTML/哭脸 keyword 针表）
 - **映射**：`choice=all` → 频道顺序展开全部 `agent_id`（**who-can 例外**：按 mN 概率 + `count` 取有能力子集，不展开全员）；否则仅接受 `mN`；按 probability 降序、≥ θ（who-can 用相对阈值）取 top-N；`count` noul→1..N 定人数；无 count / who-can 时可由多路高概率推断多人（不必 `all`）
 - **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）；**无**短语抬 K
 - **置信度**：`max(confidence, probs[choice])`；who-can 从 `all` 重映射时再考虑 `probs[all]` / 所选 mN 合计，避免低 `confidence` 字段误 fail-open；再否则 0.55
@@ -96,7 +96,7 @@ resolveGroupSendTargets / planSendTargets
 **薄结构安全（非 all-hands 短语表）**：
 
 - 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。
-- **信任全员 count**：非 who-can、非 specialty（`userTextHitsRoleSynonym`）且 `count ≥ 成员数` 时，即使 primary 落在单个 mN（underpick），也展开全员 + LeadFallback。
+- **信任全员 count**：非 who-can、非 specialty（核心 role synonym，非 SVG/HTML 针表）且 `count ≥ 成员数` **且** `probs[all]` 有实质质量（≥0.20）时，underpick mN 才展开全员 + LeadFallback。
 - decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员 + LeadFallback**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」）。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
 - decide 客户端超时约 **20s**（原 8s 曾与 ~7.3s Laya 完成竞态）。
@@ -131,9 +131,7 @@ resolveGroupSendTargets / planSendTargets
 
 **PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `LeadFallback` + `AllowSecondFailOpen=false`。否则会出现「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST「写个js的代码…」即此（Langfuse `a32fde27` / obs `5808f45a`）。heuristic 与 decision 成功路径均适用。
 
-**专长追问准确度（prompt + synopsis，非 keyword 纠偏）**：短回指「再来个哭脸」「再画一个」等 anaphora 在 Recent context 有先前专长 user 话（如「用代码画个笑脸」）时应保持 coding（或原专长）mN，不得因无「代码」字样塌成 `choice=all`。靠 decide prompt 的 SPECIALTY FOLLOW-UP 示例 + synopsis 优先 user；**不**把「再来个/哭脸」扩进 `userTextHitsRoleSynonym`，也**不**对 `choice=all` 做 specialty 拒收→fail-open-all。薄安全：若 synopsis 仍含专长同义词、primary 为 mN 且 `probs[all]` 偏低，则**跳过** full-roster count 展开；若模型仍 `choice=all` 且当前句是短 anaphora（再来个/再画…）且 synopsis 含专长同义词，则 fail-open heuristic（synopsis 混合打分选专长 bot），并禁止 decision→heuristic 单人结果再被抬成全员。
-
-**SVG/HTML 专长（channel 333 / 2026-10-12 16:56–16:59 CST）**：「用svg给我写一个笑脸图标」「要html」「来个html页面…」SystemOne 常 `choice=all` / 高 noul 或 mN+全员 count（Langfuse `6aa69f96` / `7a1d93b8` / `22e8cc7a`），all-hands 置信度抬升会让文章+代码双答。coding 同义词补 `svg`/`html`/`css`/… 后走已有 specialty mismatch → heuristic（仅代码）；synopsis 含 SVG 时跳过 count 展开。prompt 增 SVG/HTML→coding 与「要html」追问示例。仍非新建 all 拒收陷阱。
+**专长追问 / FOLLOW-UP（能力画像 + 任务类型 + 作答连续性，非 keyword 针表）**：decide state **始终**写入成员能力画像；prompt 要求分类 ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP。Recent context 提供 prior USER 话 + **Last answered by**（上轮谁答了，含角色短标签）——即使 bot 回了 SVG/HTML，也不丢作答者身份。短追问应延续该专长 mN，不得塌成 `choice=all`。**已剪除** SVG/HTML/哭脸式 synonym / anaphora 针表与 follow-up 拒收补丁；结构层信任 choice/count（`probs[all]` 有实质质量时才做 full-roster count 展开；choice=all → LeadFallback；decide 失败 fail-open 谨慎，synopsis 专长命中不抬成全员）。
 
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 

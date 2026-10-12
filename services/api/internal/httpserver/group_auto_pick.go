@@ -392,8 +392,7 @@ var roleSynonymBuckets = []struct {
 	roleNeedles []string
 }{
 	{
-		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "function", "api", "脚本", "单元测试", "写个函数", "修一下",
-			"svg", "html", "css", "javascript", "网页", "前端", "jsx", "tsx", "写js", "用js"},
+		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "function", "api", "脚本", "单元测试", "写个函数", "修一下"},
 		roleNeedles: []string{"码", "程序", "代码", "编程", "开发", "工程", "排障", "tech", "code", "engineer", "软件", "后端", "前端"},
 	},
 	{
@@ -627,8 +626,8 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 		// timeout) does not collapse the room to a single lead reply.
 		h := autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
 		// Lead-only still expands to all (cf23 all-hands decide timeout). A single
-		// specialty hit recovered via Recent-context synopsis (「再来个哭脸」+ prior「用代码…」)
-		// must NOT be dumped to everyone — that is the fail-open-all trap.
+		// specialty hit recovered via Recent-context synopsis (FOLLOW-UP + prior specialty
+		// USER ask) must NOT be dumped to everyone — that is the fail-open-all trap.
 		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText) && !userTextHitsRoleSynonym(synopsis)) {
 			out := copyStringSlice(members)
 			leadFB := map[string]bool{}
@@ -651,17 +650,24 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 	}
 }
 
-// recentMessagesSynopsis builds a short optional synopsis for decide state.
-// Prefer recent USER turns so specialty follow-ups (「再来个哭脸」) still see the
-// prior ask (「用代码画个笑脸」). Skip the trailing current-user message (already in
-// "User message:"). Long bot SVG/markup must not occupy the only history slot —
-// look further back for user text instead of taking the last N chronological msgs.
-func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
+// recentMessagesSynopsis builds Recent context for decide state:
+// prior USER turns + last answering bot(s) (name — role). Not raw keyword needles —
+// FOLLOW-UP continuity comes from who spoke last and what the user asked before.
+// Skip the trailing current-user message (already in "User message:"). Markup-heavy
+// bot bodies are omitted from text slots, but the answering bot identity is still
+// recorded so decide sees specialty continuity (e.g. coder answered with SVG).
+func recentMessagesSynopsis(msgs []db.Message, maxMsgs int, agents []*db.Agent) string {
 	if maxMsgs <= 0 {
 		maxMsgs = 2
 	}
 	if len(msgs) == 0 {
 		return ""
+	}
+	byID := map[string]*db.Agent{}
+	for _, a := range agents {
+		if a != nil {
+			byID[a.ID] = a
+		}
 	}
 	end := len(msgs)
 	// Just-saved current turn is already the decide "User message:"; omit it so
@@ -683,7 +689,8 @@ func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
 	window := msgs[start:end]
 
 	var userParts []string
-	var otherParts []string
+	var lastAnswerers []string // newest-first display labels
+	seenAnswerer := map[string]struct{}{}
 	for i := len(window) - 1; i >= 0; i-- {
 		m := window[i]
 		c := strings.TrimSpace(m.Content)
@@ -691,39 +698,72 @@ func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
 			continue
 		}
 		role := strings.ToLower(strings.TrimSpace(m.Role))
-		if role != "user" && synopsisIsMarkupHeavy(c) {
-			// Bot SVG/HTML smile etc. — never burn a synopsis slot on markup.
-			continue
-		}
-		snippet := synopsisClip(c, role)
-		if snippet == "" {
-			continue
-		}
 		if role == "user" {
-			userParts = append(userParts, snippet)
+			snippet := synopsisClip(c, role)
+			if snippet == "" {
+				continue
+			}
+			userParts = append(userParts, "User: "+snippet)
 			if len(userParts) >= maxMsgs {
-				break
+				// Still scan remaining for last answerers if we have none yet.
+				if len(lastAnswerers) > 0 {
+					break
+				}
 			}
 			continue
 		}
-		if len(otherParts) < maxMsgs {
-			otherParts = append(otherParts, snippet)
-		}
-	}
-	parts := userParts
-	if len(parts) < maxMsgs {
-		for _, o := range otherParts {
-			if len(parts) >= maxMsgs {
-				break
+		// Assistant / bot turn: record who answered (even if body is markup-heavy).
+		aid := strings.TrimSpace(m.AgentID)
+		if aid != "" {
+			if _, did := seenAnswerer[aid]; !did {
+				seenAnswerer[aid] = struct{}{}
+				lastAnswerers = append(lastAnswerers, synopsisAgentLabel(aid, byID[aid]))
 			}
-			parts = append(parts, o)
+		}
+		if len(userParts) >= maxMsgs && len(lastAnswerers) > 0 {
+			break
 		}
 	}
-	// Collected newest-first; emit chronological.
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
+
+	var parts []string
+	// Chronological user turns first (collected newest-first).
+	for i := len(userParts) - 1; i >= 0; i-- {
+		parts = append(parts, userParts[i])
+	}
+	if len(lastAnswerers) > 0 {
+		// lastAnswerers is newest-first; show up to 2 for multi-reply turns.
+		n := len(lastAnswerers)
+		if n > 2 {
+			n = 2
+		}
+		// Emit oldest-of-these first for stable reading.
+		ans := make([]string, n)
+		for i := 0; i < n; i++ {
+			ans[n-1-i] = lastAnswerers[i]
+		}
+		parts = append(parts, "Last answered by: "+strings.Join(ans, ", "))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func synopsisAgentLabel(id string, a *db.Agent) string {
+	name := id
+	role := ""
+	if a != nil {
+		if n := strings.TrimSpace(a.Name); n != "" {
+			name = n
+		}
+		role = strings.TrimSpace(groupParticipationRoleHint(a))
+	}
+	if role == "" {
+		return name
+	}
+	// Keep label short for synopsis budget.
+	runes := []rune(role)
+	if len(runes) > 24 {
+		role = string(runes[:24]) + "…"
+	}
+	return name + " — " + role
 }
 
 func synopsisClip(content, role string) string {
@@ -736,17 +776,4 @@ func synopsisClip(content, role string) string {
 		return string(runes[:limit]) + "…"
 	}
 	return content
-}
-
-// synopsisIsMarkupHeavy detects assistant replies that are mostly SVG/HTML so they
-// do not crowd out prior user specialty asks in Recent context.
-func synopsisIsMarkupHeavy(c string) bool {
-	lower := strings.ToLower(c)
-	if strings.Contains(lower, "<svg") || strings.Contains(lower, "</svg>") {
-		return true
-	}
-	if strings.Count(c, "<") >= 3 && strings.Count(c, ">") >= 3 {
-		return true
-	}
-	return false
 }
