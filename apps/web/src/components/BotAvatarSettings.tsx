@@ -4,6 +4,7 @@ import { listMachines } from "../api";
 import { isLoginOnlyMachine, machinePresenceLabel, preferHostMachines } from "../lib/clientEnv";
 import {
   AVATAR_COLOR_PALETTE,
+  AVATAR_SHAPE_LABELS,
   AVATAR_SHAPES,
   resolveAvatarColor,
   resolveAvatarShape,
@@ -42,7 +43,7 @@ function machineHint(m: Machine): string {
  */
 export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   const sheetForm = useSheetFormUi();
-  const [shape, setShape] = useState<AvatarShape>("cloud");
+  const [shape, setShape] = useState<AvatarShape>("rectangle");
   const [color, setColor] = useState("#457b9d");
   const [machineId, setMachineId] = useState("");
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -196,10 +197,11 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                     type="button"
                     className={`bot-avatar-shape-opt${shape === s ? " active" : ""}`}
                     onClick={() => setShape(s)}
-                    title={s}
-                    aria-label={s}
+                    title={AVATAR_SHAPE_LABELS[s]}
+                    aria-label={AVATAR_SHAPE_LABELS[s]}
                   >
                     <AgentAvatar id={agent.id} name={agent.name} size={36} shape={s} color={color} />
+                    <span className="bot-avatar-shape-label">{AVATAR_SHAPE_LABELS[s]}</span>
                   </button>
                 ))}
               </div>
