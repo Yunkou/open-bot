@@ -1289,3 +1289,50 @@ func TestAutoPickHeuristicResearchLookupYouNuo(t *testing.T) {
 		t.Fatalf("want research 22+44 only (not lead/coder 33), got %#v", got.AgentIDs)
 	}
 }
+
+
+// Production 2026-10-12 12:35 CST Langfuse peek/obs=3569c5ef947ad07a (trace 38cb71ea…):
+// 「帮我查下2025年格灵深瞳的年报」— c5c5231 SPECIALTY TASK prompt was loaded, but SystemOne
+// still chose m0=coder (pick-prob 0.61, calibrated conf 0.23, count noul≈0.99).
+// Specialty mismatch vs role-capable 22+44 → fail-open heuristic (not trust m0).
+// Companion run peek/obs=f258fadb… / trace 042ffb71… answered by 33.
+func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m0", // coder 33
+					"confidence": 0.2288,
+					"probabilities": map[string]any{
+						"all": 0.1798, "m0": 0.6116, "m1": 0.1388, "m2": 0.0698,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9883},
+			}, nil
+		},
+	}
+	synopsis := "要的。你刚才问的是谁不会写代码：22 和 44 主要负责查资料与总结；33 负责写代码与排障。"
+	got := runAutoPickByMode(db.AutoPickDecision, "帮我查下2025年格灵深瞳的年报", members, agents, "33", 1, synopsis, deps)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("want decision->heuristic fail-open, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
+	}
+	if len(got.AgentIDs) != 2 {
+		t.Fatalf("research specialty want 22+44, got %#v", got.AgentIDs)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["22"] || !set["44"] || set["33"] {
+		t.Fatalf("want research 22+44 only (not coder 33), got %#v", got.AgentIDs)
+	}
+}
+

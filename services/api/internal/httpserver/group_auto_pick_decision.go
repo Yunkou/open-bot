@@ -75,7 +75,9 @@ func decisionEffectiveK(k, memberCount int, allHands bool, countHint int) int {
 // autoPickDecision asks org decision model (choice + optional count) for members.
 // Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
 // count noul → how many (1..members); specialty soft K; multi/all-hands may raise to members.
-// Trusts model choice+count+probs (no keyword role-match remap; no all-hands underpick→roster expand).
+// Trusts model choice+count+probs for who-can/all-hands (no keyword remap / underpick expand).
+// Specialty do-the-job (「帮我查下…」): if mapped ids include anyone outside role-match capable
+// set → fail-open to heuristic (c5c5231 needles expand to research multi; Langfuse 3569c5ef 格灵深瞳).
 // All-hands intent is prompt-driven (choice=all + full count); who-can stays a capable subset.
 // On any soft failure the caller should fail-open to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
@@ -126,11 +128,20 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
-	// Trust model choice+count+probs (no keyword / role-match remap). Who-can structural
-	// safety below still forbids PASS→second-wave dump of incapable peers.
+	// Who-can structural safety below still forbids PASS→second-wave dump of incapable peers.
+	// Specialty: do not trust a mapped set that includes role-mismatched members (e.g. coder
+	// for 「帮我查下…」) — fail-open so heuristic research needles pick 22+44.
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
+	}
+	if !allHands && !whoCan && userTextHitsRoleSynonym(userText) {
+		if heur := capableIDsFromRoleMatch(userText, members, agents, ""); len(heur) > 0 {
+			if specialtyPicksIncapable(ids, heur) {
+				log.Printf("auto_pick=decision note=specialty_mismatch_failopen_heuristic ids=%v capable=%v choice=%s count=%d probs=%v", ids, heur, choiceKey, countHint, probs)
+				return groupAutoPickResult{}, false
+			}
+		}
 	}
 	if conf < autoPickConfidenceFloor {
 		log.Printf("auto_pick=decision ids=%v conf=%.2f choice=%s count=%d probs=%v note=low_conf_failopen_heuristic", ids, conf, choiceKey, countHint, probs)
@@ -589,6 +600,88 @@ func mapCapableMultiFromProbs(probs map[string]float64, keyToID map[string]strin
 		conf = pAll
 	}
 	return ids, conf
+}
+
+
+// capableIDsFromRoleMatch returns members with a strong specialty score for the ask.
+// Scores the user message only — Recent-context synopsis often repeats peer intros
+// and would falsely mark the wrong role capable. Empty when nothing matches.
+func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Agent, synopsis string) []string {
+	_ = synopsis // intentionally unused: capable census must not absorb chat-context role bleed
+	haystack := strings.ToLower(strings.TrimSpace(userText))
+	if haystack == "" || len(members) == 0 {
+		return nil
+	}
+	byID := map[string]*db.Agent{}
+	for _, a := range agents {
+		if a != nil {
+			byID[a.ID] = a
+		}
+	}
+	type scored struct {
+		id    string
+		score int
+	}
+	var ranked []scored
+	for _, id := range members {
+		a := byID[id]
+		name := id
+		role := ""
+		if a != nil {
+			if n := strings.TrimSpace(a.Name); n != "" {
+				name = n
+			}
+			role = groupParticipationRoleHint(a)
+		}
+		sc := scoreAutoPickMatch(haystack, name, role)
+		if sc > 0 {
+			ranked = append(ranked, scored{id: id, score: sc})
+		}
+	}
+	if len(ranked) == 0 {
+		return nil
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].id < ranked[j].id
+	})
+	floor := capableScoreFloor(ranked[0].score)
+	filtered := ranked[:0]
+	for _, e := range ranked {
+		if e.score >= floor {
+			filtered = append(filtered, e)
+		}
+	}
+	ranked = filtered
+	capN := decisionMemberCap(len(members))
+	if len(ranked) > capN {
+		ranked = ranked[:capN]
+	}
+	out := make([]string, 0, len(ranked))
+	for _, e := range ranked {
+		out = append(out, e.id)
+	}
+	return out
+}
+
+// specialtyPicksIncapable is true when decision mapped at least one agent outside the
+// role-match capable set (e.g. coder for a research lookup specialty task).
+func specialtyPicksIncapable(mapped, capable []string) bool {
+	if len(capable) == 0 || len(mapped) == 0 {
+		return false
+	}
+	capSet := map[string]struct{}{}
+	for _, id := range capable {
+		capSet[id] = struct{}{}
+	}
+	for _, id := range mapped {
+		if _, ok := capSet[id]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func orderIDsByMembers(ids []string, memberOrder []string) []string {
