@@ -147,6 +147,7 @@ import {
   type MachineExecPolicy,
 } from "./lib/userSettings";
 import { startHostExecSession, hostWritesEnabled, setHostWritesEnabled, classifyHostExecReview, setHostExecUserSettings, setHostExecMachinePolicy, type HostExecRequest } from "./lib/hostExec";
+import { isGroupDecisionPending, resolveRunFaceAgentId } from "./lib/runFace";
 import { parseHostConfirm } from "./components/HostConfirmCard";
 import {
   ALWAYS_ALLOW_TOAST,
@@ -1427,19 +1428,54 @@ export default function App() {
     [runActiveTool, hostActivity],
   );
 
+  /** True while viewing a channel conversation (group), before activeChannel memo. */
+  const inGroupChat = Boolean(conversation?.channel_id);
+
+  /**
+   * Group AutoPick / decision window: run live, no agent_start yet.
+   * Do not paint list-focus activeAgent — that looks like a random member answering.
+   */
+  const groupDecisionPending = useMemo(
+    () =>
+      isGroupDecisionPending({
+        isGroup: inGroupChat,
+        faceAgentId: runFaceAgentId,
+        runLive: sending || taskBusy || viewingRunActive,
+      }),
+    [inGroupChat, runFaceAgentId, sending, taskBusy, viewingRunActive],
+  );
+
   /**
    * In-chat RunStatus face: prefer SSE presence of the answering bot (agent_start),
    * not the list-focus bot — otherwise group chat shows another bot's robot-heads.
+   * Group decision phase (no faceAgentId): working + searchingHint (generic), not a member.
    * If idle while a run is live, fall back to working/thinking.
    */
   const runStatusFace = useMemo((): BotPresenceStatus => {
-    const faceId = (runFaceAgentId || activeAgent?.id || "").trim();
+    if (groupDecisionPending) {
+      // Generic searching animation until a real answering bot starts.
+      return "working";
+    }
+    const faceId = resolveRunFaceAgentId(runFaceAgentId, {
+      isGroup: inGroupChat,
+      activeAgentId: activeAgent?.id,
+    });
     const fromSse = faceId ? normalizePresenceStatus(presenceByAgent[faceId]) : "idle";
     if (fromSse !== "idle") return fromSse;
     if (!(sending || taskBusy || viewingRunActive)) return "idle";
     if (runActiveTool) return "working";
     return "thinking";
-  }, [runFaceAgentId, activeAgent, presenceByAgent, sending, taskBusy, viewingRunActive, runActiveTool]);
+  }, [
+    groupDecisionPending,
+    runFaceAgentId,
+    inGroupChat,
+    activeAgent,
+    presenceByAgent,
+    sending,
+    taskBusy,
+    viewingRunActive,
+    runActiveTool,
+  ]);
 
   const onboardingKey = useMemo(
     () => onboardingStorageKey(conversation?.id, agentId),
@@ -1628,27 +1664,33 @@ export default function App() {
       .filter((a): a is Agent => Boolean(a));
   }, [activeChannel, agents]);
 
-  /** Resolve shape/color/name for RunStatus AgentAvatar by answering agent_id. */
+  /**
+   * Resolve shape/color/name for RunStatus AgentAvatar by answering agent_id.
+   * Group decision / AutoPick (empty faceAgentId): undefined → neutral generic face
+   * (never list-focus activeAgent — that was the random-member animation bug).
+   * DM still falls back to activeAgent.
+   */
   const runFaceAgent = useMemo(() => {
-    const id = (runFaceAgentId || "").trim();
-    if (id) {
-      const fromGroup = (groupMentionMembers || []).find((a) => a.id === id);
-      if (fromGroup) return fromGroup;
-      const a = agents.find((x) => x.id === id);
-      if (a) return a;
-      const p = activeChannel?.member_profiles?.find((x) => x.agent_id === id);
-      if (p) {
-        return {
-          id,
-          name: p.name || agentNameById.get(id) || id,
-          avatar_shape: p.avatar_shape,
-          avatar_color: p.avatar_color,
-        } as Agent;
-      }
-      return { id, name: agentNameById.get(id) || id } as Agent;
+    const id = resolveRunFaceAgentId(runFaceAgentId, {
+      isGroup: inGroupChat,
+      activeAgentId: activeAgent?.id,
+    });
+    if (!id) return undefined;
+    const fromGroup = (groupMentionMembers || []).find((a) => a.id === id);
+    if (fromGroup) return fromGroup;
+    const a = agents.find((x) => x.id === id);
+    if (a) return a;
+    const p = activeChannel?.member_profiles?.find((x) => x.agent_id === id);
+    if (p) {
+      return {
+        id,
+        name: p.name || agentNameById.get(id) || id,
+        avatar_shape: p.avatar_shape,
+        avatar_color: p.avatar_color,
+      } as Agent;
     }
-    return activeAgent;
-  }, [runFaceAgentId, groupMentionMembers, agents, activeChannel, agentNameById, activeAgent]);
+    return { id, name: agentNameById.get(id) || id } as Agent;
+  }, [runFaceAgentId, inGroupChat, groupMentionMembers, agents, activeChannel, agentNameById, activeAgent]);
 
   const composerMentionItems = useMemo((): ComposerMentionItem[] => {
     const items: ComposerMentionItem[] = [];
@@ -4420,7 +4462,9 @@ export default function App() {
                           status={presenceByAgent[focus.id] || "idle"}
                           searchingHint={
                             Boolean(
-                              (runFaceAgentId ? focus.id === runFaceAgentId : activeAgent && focus.id === activeAgent.id) &&
+                              (runFaceAgentId
+                                ? focus.id === runFaceAgentId
+                                : !activeChannel && activeAgent && focus.id === activeAgent.id) &&
                                 searchingHintNow,
                             )
                           }
@@ -4546,7 +4590,9 @@ export default function App() {
                     status={presenceByAgent[a.id] || "idle"}
                     searchingHint={
                       Boolean(
-                        (runFaceAgentId ? a.id === runFaceAgentId : activeAgent && a.id === activeAgent.id) &&
+                        (runFaceAgentId
+                          ? a.id === runFaceAgentId
+                          : !activeChannel && activeAgent && a.id === activeAgent.id) &&
                           searchingHintNow,
                       )
                     }
@@ -4977,12 +5023,15 @@ export default function App() {
               <RunStatus
                 label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
                 agentId={runFaceAgent?.id}
-                agentName={runFaceAgent?.name ?? "助手"}
+                agentName={runFaceAgent?.name ?? (groupDecisionPending ? "选人中" : "助手")}
                 shape={runFaceAgent?.avatar_shape}
                 avatarColor={runFaceAgent?.avatar_color}
-                color={resolveAvatarColor(runFaceAgent?.id || runFaceAgent?.name || "open-bot", runFaceAgent?.avatar_color)}
+                color={resolveAvatarColor(
+                  runFaceAgent?.id || runFaceAgent?.name || (groupDecisionPending ? "open-bot-group-pick" : "open-bot"),
+                  runFaceAgent?.avatar_color,
+                )}
                 status={runStatusFace}
-                searchingHint={searchingHintNow}
+                searchingHint={searchingHintNow || groupDecisionPending}
               />
             ) : null
           ) : null}
