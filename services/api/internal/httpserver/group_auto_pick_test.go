@@ -393,14 +393,14 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
 	pick2 := q2["pick"].(map[string]any)
 	instr2 := fmt.Sprint(pick2["instructions"])
-	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN", "HIGH probability"} {
+	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", "在座的各位都是辣鸡", `choice="all"`, "never a single mN", "HIGH probability"} {
 		if !strings.Contains(instr2, needle) {
 			t.Fatalf("all-hands instructions missing %q: %s", needle, instr2)
 		}
 	}
 	count2 := q2[autoPickDecisionCountKey].(map[string]any)
 	countInstr2 := fmt.Sprint(count2["instructions"])
-	for _, needle := range []string{"ALL-HANDS count", "near 1", "都介绍下自己"} {
+	for _, needle := range []string{"ALL-HANDS count", "near 1", "都介绍下自己", "在座的各位都是辣鸡"} {
 		if !strings.Contains(countInstr2, needle) {
 			t.Fatalf("all-hands count instructions missing %q: %s", needle, countInstr2)
 		}
@@ -496,9 +496,15 @@ func TestIsAllHandsIntent(t *testing.T) {
 		"大家都说说",
 		"每人介绍一下",
 		"轮流介绍",
+		"在座的各位都是辣鸡",
+		"在座的各位",
+		"各位都是笨蛋",
+		"大家都是天才",
+		"你们都是辣鸡",
 		"everyone introduce yourselves",
 		"Please all introduce yourselves",
 		"everybody introduce",
+		"all of you are trash",
 	}
 	for _, p := range positives {
 		if !isAllHandsIntent(p) {
@@ -514,12 +520,129 @@ func TestIsAllHandsIntent(t *testing.T) {
 		"都很好",
 		"大家好",
 		"随便聊聊天气",
+		"东西都是坏的", // bare 都+都是, no strong address collective
 		"@码农 介绍一下",
 	}
 	for _, n := range negatives {
 		if isAllHandsIntent(n) {
 			t.Fatalf("want NOT all-hands for %q", n)
 		}
+	}
+}
+
+
+// Production 2026-10-12 15:30 CST Langfuse decision span=53cd5422 / trace=7abb3a17:
+// 「在座的各位都是辣鸡」 was framed as SPECIALTY (isAllHandsIntent miss) → choice=m0
+// noul≈0.98 / conf field 0.055 / only 文章 answered. Address/roast must be all-hands:
+// prompt forces choice=all; heuristic short-circuits; LeadFallback on roster; no specialty.
+func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
+	const utterance = "在座的各位都是辣鸡"
+	if !isAllHandsIntent(utterance) {
+		t.Fatalf("want all-hands for roast address-everyone %q", utterance)
+	}
+	if isWhoCanIntent(utterance) {
+		t.Fatalf("roast must not be who-can: %q", utterance)
+	}
+
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+
+	// Heuristic: phrase short-circuit → all + LeadFallback.
+	gotH := runAutoPickByMode(db.AutoPickHeuristic, utterance, members, agents, "writer", 1, "", nil)
+	if gotH.Method != "heuristic->all_hands" || len(gotH.AgentIDs) != 2 {
+		t.Fatalf("heuristic all-hands: %#v", gotH)
+	}
+	if !gotH.LeadFallback["writer"] || !gotH.LeadFallback["coder"] || gotH.AllowSecondFailOpen {
+		t.Fatalf("heuristic LeadFallback both, no second-wave: %#v", gotH)
+	}
+
+	var sawAllHandsPrompt bool
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick := questions["pick"].(map[string]any)
+			instr := fmt.Sprint(pick["instructions"])
+			st := fmt.Sprint(state)
+			if !strings.Contains(instr, "ALL-HANDS") || !strings.Contains(instr, "在座的各位都是辣鸡") {
+				t.Fatalf("roast must get all-hands prompt, not specialty; instr=%s", instr)
+			}
+			if strings.Contains(st, "SPECIALTY TASK") || strings.Contains(st, "For specialty tasks") {
+				t.Fatalf("roast must not use specialty state framing: %q", st)
+			}
+			if !strings.Contains(st, `choice must be "all"`) {
+				t.Fatalf("all-hands state missing: %q", st)
+			}
+			sawAllHandsPrompt = true
+			// Healthy model response after prompt fix.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":          "choice",
+					"choice":        "all",
+					"probabilities": map[string]any{"all": 0.82, "m0": 0.09, "m1": 0.09},
+					"confidence":    0.12, // diluted field; mapping should lift via probs[all]
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.98},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", deps)
+	if !sawAllHandsPrompt {
+		t.Fatal("decide must see all-hands-strengthened payload for roast")
+	}
+	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 2 {
+		t.Fatalf("decision roast → all members, got %#v", got)
+	}
+	if !got.LeadFallback["writer"] || !got.LeadFallback["coder"] || got.AllowSecondFailOpen {
+		t.Fatalf("all-hands LeadFallback + no second-wave: %#v", got)
+	}
+	if got.Confidence < autoPickConfidenceFloor {
+		t.Fatalf("diluted conf should lift above floor, got %.2f", got.Confidence)
+	}
+
+	// Production underpick shape (choice=m0, noul≈1, low conf field): still all-hands
+	// prompt path; trust model (no structural expand); low conf → fail-open all_hands OK.
+	depsUnder := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// Mirror Langfuse 53cd5422 output.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.2446, "m0": 0.5023, "m1": 0.2531,
+					},
+					"confidence": 0.0551,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9778},
+			}, nil
+		},
+	}
+	gotU := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", depsUnder)
+	// Prompt-only: either decision trusts underpick (possibly 1 id) OR low-conf/heuristic
+	// fail-open → all_hands roster. Must never silently specialty-pick without all-hands path.
+	if gotU.Method == "decision" {
+		// Underpick trusted: LeadFallback on selected; must have gone through allHands branch.
+		if len(gotU.AgentIDs) == 0 {
+			t.Fatalf("empty decision ids: %#v", gotU)
+		}
+		for _, id := range gotU.AgentIDs {
+			if !gotU.LeadFallback[id] {
+				t.Fatalf("all-hands decision must LeadFallback selected, got %#v", gotU)
+			}
+		}
+		if gotU.AllowSecondFailOpen {
+			t.Fatalf("all-hands must disable second fail-open: %#v", gotU)
+		}
+	} else if strings.Contains(gotU.Method, "all_hands") {
+		if len(gotU.AgentIDs) != 2 || !gotU.LeadFallback["writer"] || !gotU.LeadFallback["coder"] {
+			t.Fatalf("fail-open all_hands roster: %#v", gotU)
+		}
+	} else {
+		t.Fatalf("roast underpick must stay on all-hands path, got %#v", gotU)
 	}
 }
 
@@ -1191,7 +1314,7 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 			countQ := questions[autoPickDecisionCountKey].(map[string]any)
 			countInstr := fmt.Sprint(countQ["instructions"])
 			st := fmt.Sprint(state)
-			for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN"} {
+			for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", "在座的各位都是辣鸡", `choice="all"`, "never a single mN"} {
 				if !strings.Contains(instr, needle) {
 					t.Fatalf("all-hands pick instructions missing %q: %s", needle, instr)
 				}

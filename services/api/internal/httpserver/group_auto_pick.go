@@ -551,8 +551,9 @@ func orgAutoPickEnabled(flagsJSON string) bool {
 	return orgAutoPickMode(flagsJSON) != db.AutoPickOff
 }
 
-// isAllHandsIntent detects no-@ phrasing that asks every member to speak
-// (self-intro / round-robin), e.g. 「都介绍下自己」「大家介绍一下」「everyone introduce」.
+// isAllHandsIntent detects no-@ phrasing that asks every member to speak or be
+// addressed as a group (self-intro / round-robin / address-everyone / roast-everyone),
+// e.g. 「都介绍下自己」「在座的各位都是辣鸡」「everyone introduce」.
 // MVP: heuristic substring / collective+action match — enough to avoid decision/heuristic
 // collapsing to K=1 when the user clearly wants all bots.
 func isAllHandsIntent(userText string) bool {
@@ -580,6 +581,22 @@ func isAllHandsIntent(userText string) bool {
 			return true
 		}
 	}
+	// Address-everyone / roast: strong room markers (在座/各位/大家/你们) + collective judgment.
+	// Bare 「都」+「都是」is too broad (「东西都是坏的」); require a stronger collective.
+	hasAddressCollective := false
+	for _, c := range allHandsAddressCollectiveMarkers {
+		if c != "" && strings.Contains(text, strings.ToLower(c)) {
+			hasAddressCollective = true
+			break
+		}
+	}
+	if hasAddressCollective {
+		for _, a := range allHandsAddressActionMarkers {
+			if a != "" && strings.Contains(text, strings.ToLower(a)) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -595,15 +612,20 @@ var allHandsFixedPhrases = []string{
 	"逐个介绍", "轮流介绍", "全员介绍", "所有人介绍",
 	"都来介绍", "一起来介绍", "都来自我介绍",
 	"轮流发言", "每人发言", "各自发言",
+	// Address-everyone / roast-everyone (Langfuse 53cd5422 / 15:30 CST 「在座的各位都是辣鸡」).
+	"在座的各位", "在座各位", "在座的都",
+	"各位都是", "大家都是", "你们都是", "在座都是",
+	"各位全都是", "大家全都是", "你们全都是",
 	"introduce yourselves", "everyone introduce", "everybody introduce",
 	"all introduce", "all of you introduce", "each of you introduce",
 	"everyone introduce yourselves", "introduce yourself everyone",
+	"all of you are", "you all are", "everyone here is", "everybody here is",
 }
 
 // Collective markers that must co-occur with an action marker.
 var allHandsCollectiveMarkers = []string{
 	"都", "大家", "各位", "各自", "每人", "每位", "每个人", "每一位",
-	"所有人", "全员", "轮流", "逐个",
+	"所有人", "全员", "轮流", "逐个", "在座",
 	"everyone", "everybody", "all of you", "each of you",
 }
 
@@ -611,6 +633,18 @@ var allHandsCollectiveMarkers = []string{
 var allHandsActionMarkers = []string{
 	"介绍", "自我介绍", "说说", "说一下", "讲讲", "讲一下", "发言",
 	"introduce", "say hi", "say hello",
+}
+
+// Stronger collectives for address/roast judgments (not bare 「都」).
+var allHandsAddressCollectiveMarkers = []string{
+	"在座", "各位", "大家", "你们", "所有人", "全员",
+	"everyone", "everybody", "all of you", "you all",
+}
+
+// Collective judgment / roast actions (paired with address collectives only).
+var allHandsAddressActionMarkers = []string{
+	"都是", "全都是", "都给我", "都过来", "都来",
+	"are all", "all suck", "all trash",
 }
 
 

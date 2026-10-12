@@ -207,7 +207,7 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	if whoCan {
 		criteria[autoPickDecisionAllKey] = "ONLY if EVERY member's role can do X — rare for specialty skills (写代码/coding). Prefer capable mN keys; never use all to mean the whole channel when only a subset fits"
 	} else {
-		criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, or explicit all-hands)"
+		criteria[autoPickDecisionAllKey] = "Everyone — all members should reply (self-intro, round-robin, address-everyone / roast-everyone, or explicit all-hands)"
 	}
 	for i, id := range members {
 		id = strings.TrimSpace(id)
@@ -240,12 +240,12 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"prefer the generalist only for vague single-responder requests. " +
 		"When several specialists fit, pick the best primary — also set count and probabilities so extras can be included (multi subset, not only all-or-one)."
 	if allHands {
-		instr += " ALL-HANDS / EVERYONE-SPEAK (intro-everyone): the user asks every member to introduce or speak " +
-			"(e.g. 「都介绍下自己」「大家都介绍一下」「introduce yourselves」). " +
+		instr += " ALL-HANDS / EVERYONE-SPEAK (intro / address-everyone / roast-everyone): the user asks every member to introduce, speak, or be addressed as a group " +
+			"(e.g. 「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「各位都是…」「introduce yourselves」). " +
 			"You MUST set choice=\"all\" — never a single mN as primary. " +
 			"Set count to the full roster (noul near 1). Put HIGH probability mass on \"all\" " +
 			"and keep every mN probability high/even; never concentrate mass on one mN. " +
-			"Do not pick a specialist primary for collective intro / round-robin asks."
+			"Do not pick a specialist primary for collective intro / round-robin / roast / address-everyone asks."
 	}
 	if whoCan {
 		instr += " CAPABILITY CENSUS (who-can): the user asks who can do X (e.g. 「谁会写代码」「谁会查资料」「who can code」). " +
@@ -267,7 +267,7 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"count=how many researchers; HIGH probs on all researchers; NEAR-ZERO on coding-role and on \"all\". " +
 			"Coding/debug asks → ONLY the coding-role mN; count near 1 (noul≈0); high mass on coder; low on research and all. " +
 			"Hard example: 「帮我查下2026年优锘科技的发展」/ look up a company → research mNs only (e.g. 22+44), not the coder, not all. " +
-			"Reserve choice=\"all\" for introductions / round-robin / explicit everyone — not for a concrete specialty task. " +
+			"Reserve choice=\"all\" for introductions / round-robin / address-everyone / roast-everyone / explicit everyone — not for a concrete specialty task. " +
 			"Recent-context peer intros do not override criteria roles."
 	}
 
@@ -284,9 +284,9 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	)
 	if allHands {
 		countInstr = fmt.Sprintf(
-			"ALL-HANDS count: every member should reply (intro-everyone / round-robin). "+
+			"ALL-HANDS count: every member should reply (intro-everyone / round-robin / address-everyone / roast). "+
 				"Output noul near 1 → all %d members. Do not use near 0 (single specialist) "+
-				"for 「都介绍下自己」「大家都介绍一下」 / introduce-yourselves asks.",
+				"for 「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」 / introduce-yourselves asks.",
 			memberN,
 		)
 	}
@@ -329,7 +329,7 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 	b.WriteString(strings.TrimSpace(userText))
 	b.WriteString("\n\nMember roles are in the pick criteria keys (m0, m1, …). Match capability to those role labels.")
 	if allHands {
-		b.WriteString(" For all-hands / intro-everyone asks: choice must be \"all\", count=full roster; never a single mN.")
+		b.WriteString(" For all-hands / intro-everyone / address-everyone / roast asks: choice must be \"all\", count=full roster; never a single mN.")
 	}
 	if whoCan {
 		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros. " +
