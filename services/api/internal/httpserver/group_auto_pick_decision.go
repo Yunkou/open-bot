@@ -78,8 +78,9 @@ func decisionEffectiveK(k, memberCount int, countHint int) int {
 // the prompt classifies ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no isAllHandsIntent
 // phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: choice=all /
 // full roster → LeadFallback; count-expand only when probs[all] is meaningful; who-can may
-// remap choice=all → capable subset; specialty mismatch (core role synonyms) may fail-open
-// heuristic. On soft failure the caller fail-opens to heuristic (not lead-only).
+// remap choice=all → capable subset; who-can / specialty mismatch vs Member capability
+// profiles (core role synonyms) rematches or fail-opens. On soft failure the caller
+// fail-opens to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	whoCan := isWhoCanIntent(userText)
@@ -148,12 +149,25 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 			log.Printf("auto_pick=decision note=full_roster_count_expand choice=%s count=%d ids=%v", choiceKey, countHint, ids)
 		}
 	}
-	// Who-can structural safety below still forbids PASS→second-wave dump of incapable peers.
-	// Specialty: do not trust a mapped set that includes role-mismatched members (e.g. coder
-	// for 「帮我查下…」) — fail-open so heuristic research needles pick 22+44.
+	// Who-can / specialty structural safety vs Member capability profiles (not SVG/HTML needles).
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
+	}
+	// WHO-CAN: when profiles clearly identify who can do X, never keep a mapped set that
+	// includes an incapable member (channel 333 17:38 CST 「who can coding」→文章 m0 @0.53).
+	// Rematch to capable profiles — same direction as 09009b3 Member capability profiles.
+	if whoCan {
+		if heur := capableIDsFromRoleMatch(userText, members, agents, ""); len(heur) > 0 {
+			if specialtyPicksIncapable(ids, heur) {
+				ids = orderIDsByMembers(heur, members)
+				allSelected = false
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
+				log.Printf("auto_pick=decision note=who_can_profile_match ids=%v capable=%v choice=%s count=%d probs=%v", ids, heur, choiceKey, countHint, probs)
+			}
+		}
 	}
 	if !whoCan && userTextHitsRoleSynonym(userText) {
 		if heur := capableIDsFromRoleMatch(userText, members, agents, ""); len(heur) > 0 {
@@ -261,8 +275,9 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"1) ALL-HANDS: addresses the whole room (self-intro, round-robin, address-everyone, roast-everyone; " +
 		"e.g. 「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「introduce yourselves」). " +
 		"choice MUST be \"all\", count = full roster (noul near 1), HIGH probability on \"all\", even mass on every mN — never a single mN as primary.\n" +
-		"2) WHO-CAN: asks who among members can do X (「谁会写代码」「谁会查资料」「who can code」). " +
+		"2) WHO-CAN: asks who among members can do X (「谁会写代码」「谁会查资料」「who can code」「who can coding」). " +
 		"Match X ONLY to Member capability profiles / criteria role labels — not Recent-context chat. " +
+		"coding/写代码/排障/debug ≠ writing/文案/写东西/改稿 — never pick a writer profile for a coding census. " +
 		"choice = a capable mN; count = how many profiles share that capability; HIGH probs on every capable mN; " +
 		"NEAR-ZERO on incapable mNs and on \"all\" unless EVERY profile can do X.\n" +
 		"3) SPECIALTY: asks bots to perform work (lookup/research, coding/debug, writing, translate, …). " +
@@ -280,6 +295,8 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		instr += " THIS MESSAGE IS A CAPABILITY CENSUS (who-can): follow WHO-CAN only — never treat it as ALL-HANDS. " +
 			"You MUST choose a capable mN as choice — never park on \"all\" for a specialty census. " +
 			"Never pad count/noul to the full roster when only a subset is capable. " +
+			"Hard: 「who can coding」/「谁会写代码」→ ONLY coding/写代码/排障 profiles; " +
+			"writer/文案/写东西/改稿 profiles are incapable for coding — NEAR-ZERO on them. " +
 			"Never let a peer's self-intro in Recent context override Member capability profiles."
 	}
 

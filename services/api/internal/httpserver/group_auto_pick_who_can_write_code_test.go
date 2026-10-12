@@ -64,3 +64,72 @@ func TestIsWhoCanIntentWriteCode(t *testing.T) {
 		t.Fatal(`want who-can for "谁会写代码"`)
 	}
 }
+
+func TestIsWhoCanIntentWhoCanCoding(t *testing.T) {
+	if !isWhoCanIntent("who can coding") {
+		t.Fatal(`want who-can for "who can coding"`)
+	}
+	if !userTextHitsRoleSynonym("who can coding") {
+		t.Fatal(`"coding" must hit coding role synonym bucket (not only substring "code")`)
+	}
+}
+
+// Channel 333 17:38 CST: members ORDER BY agent_id → 文章=m0, 代码=m1.
+// SystemOne chose writer m0 @0.53 for 「who can coding」; must rematch to coder via
+// Member capability profiles (who_can_profile_match), not accept the wrong mN.
+func TestAutoPickDecisionWhoCanCodingRejectsWriter(t *testing.T) {
+	writer := "b82b2fbe-c621-4943-aff0-f59e7fc075b6" // sorts before coder → m0
+	coder := "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"  // m1
+	members := []string{writer, coder}
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。远程 SSH 先 load_skill host-ssh。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// Production 17:38 shape: primary writer, weak mass on coder, conf above floor.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.3096, "m0": 0.5318, "m1": 0.1586,
+					},
+					"confidence": 0.53,
+				},
+				"count": map[string]any{"type": "noul", "noul": 1.0}, // model said count=2
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "who can coding", members, agents, writer, 1, "", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision (profile rematch, not fail-open)", got.Method)
+	}
+	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != coder {
+		t.Fatalf("want only coder 代码, got %#v", got.AgentIDs)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can capable pick must not AllowSecondFailOpen")
+	}
+	if !got.LeadFallback[coder] {
+		t.Fatalf("coder must be leadFallback, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback[writer] {
+		t.Fatalf("writer must not be leadFallback after profile rematch, got %#v", got.LeadFallback)
+	}
+}
+
+func TestCapableIDsFromRoleMatchWhoCanCoding(t *testing.T) {
+	writer := "b82b2fbe-c621-4943-aff0-f59e7fc075b6"
+	coder := "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"
+	members := []string{writer, coder}
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	got := capableIDsFromRoleMatch("who can coding", members, agents, "")
+	if len(got) != 1 || got[0] != coder {
+		t.Fatalf("want only coder, got %#v", got)
+	}
+}

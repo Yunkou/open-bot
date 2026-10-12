@@ -120,10 +120,10 @@ resolveGroupSendTargets / planSendTargets
 
 | 模式 | 行为 |
 |---|---|
-| **decision** | **完全信任决策模型** choice+count+probs（**无** keyword / role-match 纠偏）。Prompt 要求：按 criteria 里各 mN 的角色标签做能力普查——写代码→仅 coder；查资料→全部 research；**禁止**在仅子集能做时选 `all` 或把 count 抬到全员。映射：`choice=all` + who-can → 按 mN 概率 + `count` 取有能力子集（不字面展开全员）；`choice=mN` → 主选 + 相对高概率同伴。置信度取 `max(confidence, probs[choice], probs[all], …)`，避免低 `confidence` 字段误 fail-open |
-| **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1`（decision 失败 fail-open 时仍用） |
+| **decision** | 信任决策模型 choice+count+probs + **Member capability profiles 薄结构安全**。Prompt 分类 WHO-CAN：按画像角色做能力普查——写代码/coding→仅 coder；查资料→全部 research；**禁止**把 writer/文案 当成 coding。映射：`choice=all` + who-can → 按 mN 概率 + `count` 取子集；`choice=mN` → 主选 + 相对高概率同伴。若映射集含画像判定的无能成员 → `who_can_profile_match` 重映射到有能力子集（channel 333「who can coding」误选文章）。置信度取 `max(confidence, probs[choice], …)` |
+| **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1`（decision 失败 fail-open 时仍用）；英文 `coding` 与 `code` 同属 coding 桶 |
 
-**Prompt 驱动（who-can）**：`buildAutoPickDecisionPayload` 在 who-can 时强化 instructions / count noul / state / `criteria[all]`——明确「匹配 criteria 角色，Recent context 同伴自介不能覆盖角色」；硬例「谁会写代码」→仅 coding mN + noul≈0（禁止 `all`/全员 count），「谁会查资料」→多 research。已移除 `capableIDsFromRoleMatch` / `who_can_role_match` 覆盖 SystemOne 结果的路径。
+**Prompt 驱动（who-can）**：`buildAutoPickDecisionPayload` 在 who-can 时强化 instructions / count noul / state / `criteria[all]`——匹配 Member capability profiles；硬例「谁会写代码」/「who can coding」→仅 coding 画像（writer/文案/写东西 ≠ coding）。薄结构安全：`capableIDsFromRoleMatch` 在 who-can 映射含无能成员时 `who_can_profile_match` 重映射（**不**堆 SVG/HTML 针表）。
 
 **映射硬化（who-can，已批准的 all→capable 重映射）**：`choice=all` + `count≥成员数`（SystemOne 把 noul 抬到全员，如 Langfuse `21ed840c` / 12:18 CST「谁会写代码」）时**不**信任该 count，改为按 mN 相对概率推断有能力子集（与 count 省略/undershoot 同一路径）。不是 keyword role-match，也不是 all-hands underpick→全员展开。
 
