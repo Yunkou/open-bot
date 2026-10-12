@@ -99,7 +99,7 @@ var onboardingPresets = map[string]struct {
 	},
 	"D": {
 		Description:  "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。远程 SSH 先 load_skill host-ssh。",
-		SystemPrompt: "你主攻写代码与排障。优先小步修改与可验证结果；本机项目用 host_*。复杂流程先 load_skill：排障 diagnosing-bugs、测试先行 tdd、按规格落地 implement、审 diff 用 code-review；入口说明见 dev-assist。远程先 load_skill host-ssh 再 host_ssh_*。",
+		SystemPrompt: "你主攻写代码与排障。优先小步修改与可验证结果；本机项目用 host_*。复杂编码流程先 load_skill dev-assist（再按需加载排障/TDD/实现/评审等）。远程先 load_skill host-ssh。",
 		Skills: []string{
 			"dev-assist",
 			"diagnosing-bugs",

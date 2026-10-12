@@ -531,8 +531,10 @@ def guide_tool_result(name: str, result: str) -> str:
 SYSTEM_PERSONA_BASE = (
     "你是自主 agent。用户给出目标后，自己决定下一步：调用工具，看结果，再继续或结束。"
     "工具失败时根据错误换一条再调，不要重复同一条命令；不要编造工具结果或文件名。"
-    "需要操作电脑、SSH 或查本机文件时，先 load_skill 加载对应技能，再按说明执行。"
+    # Host skill names / must-load detail live in ## 工具路由 and ## 环境.
+    "需要操作电脑、SSH 或查本机文件时，先 load_skill 再按说明执行。"
     "结果若在等待则尚未执行；denied 即用户拒绝——不要声称已跑完。"
+    # Full sandbox opacity lives in ## 环境; keep a short user-facing bit here.
     "给用户的回复用中文，短；不要提 sandbox/Docker/容器或内部路径，不要假装调用工具。"
     "调用工具时正文默认可空或一句短进展，勿逐步解说每一步；阶段性进展可偶发短句；完成后再给结果。"
 )
@@ -1158,10 +1160,10 @@ def build_system_prompt_parts(
         )
         if routing:
             static_parts.append(routing)
-        skills_header = "## 可用技能（仅目录；需要全文时调用 load_skill）"
+        skills_header = "## 可用技能（仅目录；需要全文时 load_skill；目录匹配不上时 load_skill find-skills 做生态深搜/安装指引）"
     else:
         static_parts.append(TOOLS_DISABLED_RULE)
-        skills_header = "## 可用技能（仅目录；当前未启用工具，勿调用 load_skill）"
+        skills_header = "## 可用技能（仅目录；当前未启用工具，勿调用 load_skill；深搜指引见 find-skills）"
 
     persona = (persona_override or "").strip()
     if persona:
