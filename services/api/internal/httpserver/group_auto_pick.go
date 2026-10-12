@@ -151,8 +151,10 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 
 	haystack := strings.ToLower(strings.TrimSpace(userText))
-	// Who-can census must not absorb Recent-context role language (e.g. peer 「负责查资料」).
-	if !isWhoCanIntent(userText) {
+	// Who-can census / specialty-from-user-text must not absorb Recent-context role language
+	// (e.g. peer 「负责查资料」 or prior 「写代码」 talk) — that falsely marks the wrong role capable.
+	// Production 12:28 CST 「帮我查下优锘…」 fail-opened with synopsis mentioning 写代码 → lead/coder 33.
+	if !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText) {
 		if syn := strings.TrimSpace(synopsis); syn != "" {
 			haystack = haystack + "\n" + strings.ToLower(syn)
 		}
@@ -199,8 +201,9 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 
 	n := k
-	// Capability census (「谁会/都谁会/who can」): every strong match should reply, not soft K=1.
-	if isWhoCanIntent(userText) && len(ranked) > 0 {
+	// Capability census (「谁会/都谁会/who can」) or specialty-from-user-text (「帮我查下…」):
+	// every strong role match should reply, not soft K=1 (e.g. both research bots).
+	if (isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText)) && len(ranked) > 0 {
 		best := ranked[0].score
 		floor := capableScoreFloor(best)
 		filtered := ranked[:0]
@@ -387,7 +390,7 @@ var roleSynonymBuckets = []struct {
 		roleNeedles: []string{"写", "文案", "写作", "编辑", "内容", "诗人", "作家"},
 	},
 	{
-		userNeedles: []string{"查资料", "查下资料", "查一下资料", "搜一下", "搜索", "研究", "调研", "检索", "百科"},
+		userNeedles: []string{"查资料", "查下资料", "查一下资料", "查下", "帮我查", "查一查", "搜一下", "搜索", "研究", "调研", "检索", "百科", "look up", "research"},
 		roleNeedles: []string{"研究", "调研", "资料", "搜索", "分析"},
 	},
 	{
@@ -431,6 +434,25 @@ func scoreRoleSynonyms(haystack, roleBlob string) int {
 		}
 	}
 	return score
+}
+
+
+// userTextHitsRoleSynonym reports whether the user ask itself matches a specialty
+// synonym bucket (research/coding/…). When true, heuristic scoring must not blend
+// Recent-context role chatter into the haystack.
+func userTextHitsRoleSynonym(userText string) bool {
+	hay := strings.ToLower(strings.TrimSpace(userText))
+	if hay == "" {
+		return false
+	}
+	for _, b := range roleSynonymBuckets {
+		for _, n := range b.userNeedles {
+			if n != "" && strings.Contains(hay, strings.ToLower(n)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func copyStringSlice(in []string) []string {

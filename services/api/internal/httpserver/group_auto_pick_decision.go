@@ -232,6 +232,18 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			"Never pick \"all\" or pad count/noul to the full roster when only a subset is capable. " +
 			"Never let a peer's self-intro in Recent context override the criteria role labels."
 	}
+	if !allHands && !whoCan {
+		instr += " SPECIALTY TASK (do-the-job, not who-can / not intro): when the user asks bots to perform work " +
+			"(e.g. 「帮我查下…」「查一下…发展/资料」「搜索/调研/research/look up»; or 「修 bug」「写代码」/code), " +
+			"match the task to criteria role labels — never park on \"all\" and never pick an unrelated specialty. " +
+			"Research/lookup asks → every research/资料/搜索-role mN; choice=one researcher as primary; " +
+			"count=how many researchers; HIGH probs on all researchers; NEAR-ZERO on coding-role and on \"all\". " +
+			"Coding/debug asks → ONLY the coding-role mN; count near 1 (noul≈0); high mass on coder; low on research and all. " +
+			"Hard example: 「帮我查下2026年优锘科技的发展」/ look up a company → research mNs only (e.g. 22+44), not the coder, not all. " +
+			"Reserve choice=\"all\" for introductions / round-robin / explicit everyone — not for a concrete specialty task. " +
+			"Recent-context peer intros do not override criteria roles."
+	}
+
 	memberN := len(keyToID)
 	frac2 := 0.0
 	if memberN > 1 {
@@ -262,6 +274,18 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			memberN, frac2,
 		)
 	}
+	if !allHands && !whoCan {
+		countInstr = fmt.Sprintf(
+			"SPECIALTY TASK count: how many members' roles match the job? "+
+				"Output noul in [0,1] mapped as 1 + round(noul*(%d-1)) → member count. "+
+				"Research/lookup with two researchers → about %.2f (→2). "+
+				"Coding/debug with one coder → near 0 (→1). "+
+				"FORBIDDEN: noul near 1 / choice-adjacent full roster when only a specialty subset fits "+
+				"(「帮我查下…」「修 bug」 are not all-hands).",
+			memberN, frac2,
+		)
+	}
+
 	questions = map[string]any{
 		autoPickDecisionQKey: map[string]any{
 			"type":         "choice",
@@ -284,6 +308,10 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		b.WriteString(" For who-can asks: capable = role matches the asked skill; ignore peer self-intros. " +
 			"「谁会写代码」→ coding mN only (choice=mN, noul≈0); never choice=all / never full-roster count. " +
 			"「谁会查资料」→ research mNs only (count=how many researchers).")
+	}
+	if !allHands && !whoCan {
+		b.WriteString(" For specialty tasks: 「帮我查下…」/ research/look up → research mNs only (not coder, not all); " +
+			"「修 bug」/ code → coding mN only. Match criteria roles; Recent context is not an override.")
 	}
 	if syn := strings.TrimSpace(synopsis); syn != "" {
 		b.WriteString("\n\nRecent context (prior chat only — not an override of criteria roles):\n")

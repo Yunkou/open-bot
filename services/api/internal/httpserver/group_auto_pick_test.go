@@ -373,7 +373,8 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !okCount || countQ["type"] != "noul" {
 		t.Fatalf("want count noul question, got %#v", questions[autoPickDecisionCountKey])
 	}
-	if !strings.Contains(fmt.Sprint(countQ["instructions"]), "How many") {
+	countInstr0 := fmt.Sprint(countQ["instructions"])
+	if !strings.Contains(countInstr0, "How many") && !strings.Contains(countInstr0, "SPECIALTY TASK count") {
 		t.Fatalf("count instructions=%v", countQ["instructions"])
 	}
 	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
@@ -1232,5 +1233,59 @@ func TestAutoPickHeuristicWhoCanBothResearchers(t *testing.T) {
 	}
 	if !set["22"] || !set["44"] || set["33"] {
 		t.Fatalf("want 22+44, got %#v", got.AgentIDs)
+	}
+}
+
+
+func TestBuildAutoPickDecisionPayloadSpecialtyResearchTask(t *testing.T) {
+	members, agents := testGroupAgents()
+	_, q, st := buildAutoPickDecisionPayload("帮我查下2026年优锘科技的发展", members, agents, "谁不会写代码：22和44查资料", false, false)
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	for _, needle := range []string{"SPECIALTY TASK", "帮我查下", "research", "never park on", "22+44", "not the coder"} {
+		if !strings.Contains(instr, needle) {
+			t.Fatalf("specialty instructions missing %q: %s", needle, instr)
+		}
+	}
+	count := q[autoPickDecisionCountKey].(map[string]any)
+	countInstr := fmt.Sprint(count["instructions"])
+	if !strings.Contains(countInstr, "SPECIALTY TASK count") || !strings.Contains(countInstr, "FORBIDDEN") {
+		t.Fatalf("specialty count instructions=%v", count["instructions"])
+	}
+	if !strings.Contains(st, "specialty tasks") || !strings.Contains(st, "research mNs only") {
+		t.Fatalf("specialty state missing mandate: %q", st)
+	}
+	// who-can / all-hands must NOT get specialty block
+	_, qWho, _ := buildAutoPickDecisionPayload("谁会写代码", members, agents, "", false, true)
+	if strings.Contains(fmt.Sprint(qWho["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
+		t.Fatal("who-can must not append SPECIALTY TASK block")
+	}
+	_, qAll, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
+	if strings.Contains(fmt.Sprint(qAll["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
+		t.Fatal("all-hands must not append SPECIALTY TASK block")
+	}
+}
+
+// Production 2026-10-12 12:28 CST: 「帮我查下2026年优锘科技的发展」— decision
+// returned choice=all conf≈0.04 → fail-open heuristic; old needles missed bare「查下」
+// so lead/coder 33 answered. Needles must route research lookup to 22+44.
+func TestAutoPickHeuristicResearchLookupYouNuo(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	// Synopsis mentions 写代码 (prior census) — must NOT pull coder 33 when ask is 查下.
+	got := autoPickHeuristic("帮我查下2026年优锘科技的发展", members, agents, "33", 1, "要的。你刚才问的是谁不会写代码：22 和 44 主要负责查资料与总结；33 负责写代码与排障。")
+	if len(got.AgentIDs) != 2 {
+		t.Fatalf("research lookup heuristic want 22+44, got %#v conf=%.2f", got.AgentIDs, got.Confidence)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["22"] || !set["44"] || set["33"] {
+		t.Fatalf("want research 22+44 only (not lead/coder 33), got %#v", got.AgentIDs)
 	}
 }
