@@ -239,6 +239,10 @@ export type AgentSkill = {
   custom?: boolean;
   /** Account-level toggle from settings「技能」. */
   account_enabled?: boolean;
+  /** Curated role=always_on discovery entry (find-skills). */
+  always_on?: boolean;
+  /** API refuses disable; UI should lock the toggle. */
+  disable_blocked?: boolean;
 };
 
 export type SkillSource = "builtin" | "custom";

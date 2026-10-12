@@ -41,6 +41,13 @@ func (s *Server) handleSetAgentSkill(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
+			return
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -163,6 +170,7 @@ func (s *Server) handleAgentOnboarding(w http.ResponseWriter, r *http.Request) {
 		if skillArg == nil {
 			skillArg = []string{}
 		}
+		skillArg = db.EnsureAlwaysOnSkills(skillArg)
 	} else {
 		skillArg = nil // leave agent_skills unset → all user-enabled
 	}

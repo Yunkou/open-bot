@@ -196,7 +196,12 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill, o
                     <input
                       type="checkbox"
                       checked={s.enabled}
-                      disabled={locked}
+                      disabled={locked || Boolean(s.disable_blocked || s.always_on)}
+                      title={
+                        s.disable_blocked || s.always_on
+                          ? "find-skills 为技能发现入口，不可关闭"
+                          : undefined
+                      }
                       aria-label={`本 Bot 启用 ${s.name}`}
                       onChange={(e) => void toggleSkill(s, e.target.checked)}
                     />
@@ -210,7 +215,10 @@ export function BotSettingsPanel({ agent, busy, onSaved, onClone, onOpenSkill, o
                       ) : (
                         s.name
                       )}
-                      <span className="bot-skill-source">{s.custom ? "自建" : "内置"}</span>
+                      <span className="bot-skill-source">
+                        {s.custom ? "自建" : "内置"}
+                        {s.always_on || s.disable_blocked ? " · 技能发现" : ""}
+                      </span>
                     </div>
                     <div className="agent-desc">{s.description}</div>
                   </div>

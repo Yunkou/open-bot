@@ -1,15 +1,17 @@
 {
   "version": 1,
-  "description": "skills.sh curated builtins that are default-on for new bots. Not the full leaderboard. Existing first-party disk skills remain available; this file only governs the skills.sh batch.",
+  "description": "skills.sh curated builtins that are default-on for new bots. Not the full leaderboard. Existing first-party disk skills remain available; this file only governs the skills.sh batch. role=always_on (find-skills) is the discovery entry: always mounted, disable blocked; other curated remain toggleable.",
   "skills": [
     {
       "slug": "find-skills",
+      "role": "always_on",
       "package": "vercel-labs/skills",
       "skill": "find-skills",
       "repo": "https://github.com/vercel-labs/skills",
       "path": "skills/find-skills",
       "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
-      "install": "npx skills add https://github.com/vercel-labs/skills --skill find-skills"
+      "install": "npx skills add https://github.com/vercel-labs/skills --skill find-skills",
+      "note": "Discovery entry: always mounted for new bots; disable blocked (losing find-skills removes skill discovery)."
     },
     {
       "slug": "grill-me",

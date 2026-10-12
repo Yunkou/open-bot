@@ -70,6 +70,7 @@ function BotSkillsEditor({ botId }: { botId: string }) {
             <div key={s.name} style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <Checkbox
                 checked={s.enabled}
+                disabled={Boolean(s.disable_blocked || s.always_on)}
                 onChange={async (e) => {
                   const checked = e.target.checked;
                   try {
@@ -83,6 +84,7 @@ function BotSkillsEditor({ botId }: { botId: string }) {
               <Link to={`/skills/${encodeURIComponent(s.name)}`}>{s.name}</Link>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {s.custom ? "自建" : "内置"}
+                {s.always_on || s.disable_blocked ? " · 技能发现（不可关闭）" : ""}
               </Text>
             </div>
           ))}

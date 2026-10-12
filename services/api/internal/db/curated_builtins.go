@@ -2,15 +2,23 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 )
 
+// Curated role values in skills/curated-builtins.json.
+const (
+	CuratedRoleDefault  = ""          // default-on for new bots; toggleable
+	CuratedRoleAlwaysOn = "always_on" // discovery entry: always mounted; disable blocked
+)
+
 // CuratedBuiltin is one skills.sh skill that is default-on for new bots.
 type CuratedBuiltin struct {
 	Slug          string `json:"slug"`
+	Role          string `json:"role"`
 	Package       string `json:"package"`
 	Skill         string `json:"skill"`
 	Repo          string `json:"repo"`
@@ -26,10 +34,15 @@ type curatedManifest struct {
 }
 
 var (
-	curatedOnce  sync.Once
-	curatedSlugs []string
-	curatedSet   map[string]bool
+	curatedOnce   sync.Once
+	curatedSlugs  []string
+	curatedSet    map[string]bool
+	alwaysOnSlugs []string
+	alwaysOnSet   map[string]bool
 )
+
+// ErrSkillDisableBlocked is returned when disabling an always-on discovery skill.
+var ErrSkillDisableBlocked = errors.New("find-skills is always-on (skill discovery); disabling it is blocked")
 
 func curatedManifestPath() string {
 	return filepath.Join(SkillsRoot(), "curated-builtins.json")
@@ -38,6 +51,7 @@ func curatedManifestPath() string {
 func loadCuratedManifest() {
 	curatedOnce.Do(func() {
 		curatedSet = map[string]bool{}
+		alwaysOnSet = map[string]bool{}
 		data, err := os.ReadFile(curatedManifestPath())
 		if err != nil {
 			return
@@ -53,6 +67,11 @@ func loadCuratedManifest() {
 			}
 			curatedSlugs = append(curatedSlugs, slug)
 			curatedSet[slug] = true
+			role := strings.TrimSpace(strings.ToLower(s.Role))
+			if role == CuratedRoleAlwaysOn {
+				alwaysOnSlugs = append(alwaysOnSlugs, slug)
+				alwaysOnSet[slug] = true
+			}
 		}
 	})
 }
@@ -72,9 +91,47 @@ func IsCuratedBuiltin(name string) bool {
 	return curatedSet[strings.TrimSpace(name)]
 }
 
+// AlwaysOnBuiltinSlugs returns curated skills marked role=always_on (discovery entry).
+func AlwaysOnBuiltinSlugs() []string {
+	loadCuratedManifest()
+	out := make([]string, len(alwaysOnSlugs))
+	copy(out, alwaysOnSlugs)
+	return out
+}
+
+// IsAlwaysOnBuiltin reports whether name is an always-on discovery skill (disable blocked).
+func IsAlwaysOnBuiltin(name string) bool {
+	loadCuratedManifest()
+	return alwaysOnSet[strings.TrimSpace(name)]
+}
+
+// EnsureAlwaysOnSkills appends missing always-on slugs to names (deduped, order preserved).
+func EnsureAlwaysOnSkills(names []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(names)+len(AlwaysOnBuiltinSlugs()))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	for _, slug := range AlwaysOnBuiltinSlugs() {
+		if seen[slug] {
+			continue
+		}
+		seen[slug] = true
+		out = append(out, slug)
+	}
+	return out
+}
+
 // ResetCuratedBuiltinCacheForTest clears the sync.Once cache (tests only).
 func ResetCuratedBuiltinCacheForTest() {
 	curatedOnce = sync.Once{}
 	curatedSlugs = nil
 	curatedSet = nil
+	alwaysOnSlugs = nil
+	alwaysOnSet = nil
 }

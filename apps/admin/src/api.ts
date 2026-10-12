@@ -1021,6 +1021,8 @@ export type AdminSkill = {
   files?: AdminSkillFile[];
   created_at?: string;
   updated_at?: string;
+  always_on?: boolean;
+  disable_blocked?: boolean;
 };
 
 export type AdminBotSkill = {
@@ -1029,6 +1031,8 @@ export type AdminBotSkill = {
   enabled: boolean;
   custom?: boolean;
   account_enabled?: boolean;
+  always_on?: boolean;
+  disable_blocked?: boolean;
 };
 
 export type AdminUserSkill = {
@@ -1036,6 +1040,8 @@ export type AdminUserSkill = {
   description: string;
   enabled: boolean;
   custom: boolean;
+  always_on?: boolean;
+  disable_blocked?: boolean;
 };
 
 export async function adminListSkills(all = true): Promise<{ skills: AdminSkill[] }> {

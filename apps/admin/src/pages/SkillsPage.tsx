@@ -106,6 +106,12 @@ export default function SkillsPage() {
       render: (_, row) => (
         <Switch
           checked={row.enabled}
+          disabled={Boolean(row.disable_blocked || row.always_on)}
+          title={
+            row.disable_blocked || row.always_on
+              ? "find-skills 为技能发现入口，关闭后将失去技能发现能力"
+              : undefined
+          }
           onChange={async (checked) => {
             try {
               await adminPatchSkill(row.name, { enabled: checked });
