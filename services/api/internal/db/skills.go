@@ -880,7 +880,7 @@ type GlobalSkillRecord struct {
 
 const (
 	maxSkillFileBytes = 512 * 1024
-	maxSkillFiles     = 64
+	maxSkillFiles     = 128
 )
 
 // ValidSkillRelPath restricts package-relative paths (no .., absolute, or empty).

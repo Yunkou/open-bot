@@ -34,7 +34,7 @@ _SKIP_SUFFIXES = {
     ".bin",
 }
 _MAX_FILE_BYTES = 512 * 1024
-_MAX_FILES = 64
+_MAX_FILES = 128
 
 
 @dataclass
