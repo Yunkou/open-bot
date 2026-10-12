@@ -79,6 +79,7 @@ func decisionEffectiveK(k, memberCount int, allHands bool, countHint int) int {
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
 	allHands := isAllHandsIntent(userText)
+	whoCan := isWhoCanIntent(userText)
 	if deps == nil {
 		log.Printf("auto_pick=decision note=deps_nil_failopen_heuristic")
 		return groupAutoPickResult{}, false
@@ -93,7 +94,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		return groupAutoPickResult{}, false
 	}
 
-	keyToID, questions, state := buildAutoPickDecisionPayload(userText, members, agents, synopsis, allHands)
+	keyToID, questions, state := buildAutoPickDecisionPayload(userText, members, agents, synopsis, allHands, whoCan)
 	if len(keyToID) == 0 {
 		return groupAutoPickResult{}, false
 	}
@@ -111,15 +112,24 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	}
 	countHint := countHintFromAnswers(answers, len(members))
 	effectiveK := decisionEffectiveK(k, len(members), allHands, countHint)
-	// Explicit count (even 1) wins; only infer multi from probs when count was omitted.
-	allowMultiFromProbs := countHint == 0
-	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs)
+	// Who-can census: allow multi from mN probs even when count says 1 (model often undershoots).
+	// Explicit count still raises K; who-can also lifts K to member cap so mapping can keep all capable.
+	if whoCan {
+		capN := decisionMemberCap(len(members))
+		if effectiveK < capN {
+			effectiveK = capN
+		}
+	}
+	// Explicit count (even 1) wins for specialty; who-can / omitted count may infer multi from probs.
+	allowMultiFromProbs := countHint == 0 || whoCan
+	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
+	choiceKey, probs := decisionPickMeta(answers)
 	if !ok || len(ids) == 0 {
-		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic")
+		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
 	}
 	if conf < autoPickConfidenceFloor {
-		log.Printf("auto_pick=decision ids=%v conf=%.2f note=low_conf_failopen_heuristic", ids, conf)
+		log.Printf("auto_pick=decision ids=%v conf=%.2f choice=%s count=%d probs=%v note=low_conf_failopen_heuristic", ids, conf, choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
 	}
 
@@ -128,9 +138,9 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	if allSelected {
 		fallback = "all"
 		allowSecond = false
-		log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=all", method, ids, conf)
+		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
 	} else {
-		log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
+		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
 	}
 	return groupAutoPickResult{
 		AgentIDs:            ids,
@@ -142,7 +152,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	}, true
 }
 
-func buildAutoPickDecisionPayload(userText string, members []string, agents []*db.Agent, synopsis string, allHands bool) (keyToID map[string]string, questions map[string]any, state string) {
+func buildAutoPickDecisionPayload(userText string, members []string, agents []*db.Agent, synopsis string, allHands bool, whoCan bool) (keyToID map[string]string, questions map[string]any, state string) {
 	byID := map[string]*db.Agent{}
 	for _, a := range agents {
 		if a != nil {
@@ -187,6 +197,11 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		instr += " The user message looks like an all-hands / everyone-speak request: prefer choice \"all\" " +
 			"unless a single specialist is clearly intended."
 	}
+	if whoCan {
+		instr += " The user is asking who can do something (capability census): do NOT pick \"all\" unless every member fits. " +
+			"Pick the best matching specialist as choice, set count to how many members share that capability, " +
+			"and put high probabilities on every capable member so the multi subset includes them all (e.g. both researchers)."
+	}
 	memberN := len(keyToID)
 	frac2 := 0.0
 	if memberN > 1 {
@@ -220,11 +235,15 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 }
 
 // mapDecisionChoiceToAgentIDs reads answers.pick (choice) and optional probabilities for multi.
-// Opaque "all" → every member in channel order. Only mN keys in keyToID are accepted otherwise.
+// Opaque "all" → every member in channel order — except who-can / count-subset census, which
+// remaps to top-N mN by probability (capable multi, not literally everyone).
+// Only mN keys in keyToID are accepted otherwise.
 // k is the already-clamped / raised effective K (may exceed autoPickMaxK for multi / all-hands).
 // When soft K is 1 but several mN probs clear the threshold, still returns a multi subset
 // (top-N by probability) without requiring choice=all — e.g. 2 of 3 specialists.
-func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int, allowMultiFromProbs bool) (ids []string, conf float64, allSelected bool, ok bool) {
+// whoCan + countHint steer census asks (「都谁会查资料」) onto capable members even when
+// SystemOne returns choice=all with diluted per-member probs and a low confidence field.
+func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int, allowMultiFromProbs bool, whoCan bool, countHint int) (ids []string, conf float64, allSelected bool, ok bool) {
 	if k <= 0 {
 		k = autoPickDefaultK
 	}
@@ -255,6 +274,39 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 	}
 	conf = autoPickDecisionConfidence(raw, choiceKey, probs)
+
+	// Who-can / multi-subset: choice=all with count < members means "all who can", not every seat.
+	// Remap via mN probabilities + count so both capable specialists run (e.g. 22+44 research).
+	remapAllToCapable := strings.EqualFold(choiceKey, autoPickDecisionAllKey) && whoCan
+	if strings.EqualFold(choiceKey, autoPickDecisionAllKey) && !remapAllToCapable {
+		// True all-hands (or model insists on everyone without census intent).
+		if countHint > 0 && countHint < len(keyToID) && allowMultiFromProbs {
+			// Soft: count says subset — prefer mN multi over literal everyone.
+			remapAllToCapable = true
+		}
+	}
+	if remapAllToCapable {
+		ids, conf2 := mapCapableMultiFromProbs(probs, keyToID, memberOrder, k, countHint)
+		if len(ids) == 0 {
+			return nil, 0, false, false
+		}
+		if conf2 > conf {
+			conf = conf2
+		}
+		// Valid census multi: don't discard on diluted per-member probs / low confidence field.
+		if conf < autoPickConfidenceFloor && len(ids) >= 1 {
+			conf = autoPickDecisionConfidence(raw, choiceKey, probs)
+			if conf < autoPickConfidenceFloor {
+				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+					conf = pAll
+				}
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
+			}
+		}
+		return ids, conf, false, true
+	}
 
 	if strings.EqualFold(choiceKey, autoPickDecisionAllKey) {
 		ids = orderedDecisionMemberIDs(memberOrder, keyToID)
@@ -288,7 +340,12 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		if _, did := seen[id]; did {
 			continue
 		}
-		if p < autoPickConfidenceFloor {
+		// Who-can: accept relative matches (mass often sits on "all"); specialty keeps absolute floor.
+		if whoCan {
+			if p <= 0 {
+				continue
+			}
+		} else if p < autoPickConfidenceFloor {
 			continue
 		}
 		extra = append(extra, ranked{key: key, prob: p})
@@ -299,10 +356,42 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		}
 		return extra[i].key < extra[j].key
 	})
+	if whoCan && len(extra) > 0 {
+		maxP := probs[choiceKey]
+		for _, e := range extra {
+			if e.prob > maxP {
+				maxP = e.prob
+			}
+		}
+		if maxP <= 0 {
+			maxP = extra[0].prob
+		}
+		relFloor := maxP * 0.4
+		filtered := extra[:0]
+		for _, e := range extra {
+			if e.prob >= relFloor {
+				filtered = append(filtered, e)
+			}
+		}
+		extra = filtered
+	}
 
-	// Multi from top probabilities without requiring "all": if count was omitted and
-	// soft K is low but several specialists clear the threshold, raise want up to member cap.
+	// Multi from top probabilities without requiring "all": if count was omitted / who-can
+	// and soft K is low but several specialists clear the threshold, raise want up to member cap.
 	want := k
+	if countHint > 0 && countHint < want {
+		// Explicit smaller count still respected for specialty; who-can may keep raised want.
+		if !whoCan {
+			want = countHint
+		}
+	}
+	if countHint > want {
+		want = countHint
+		capN := decisionMemberCap(len(keyToID))
+		if want > capN {
+			want = capN
+		}
+	}
 	if allowMultiFromProbs && len(extra) > 0 {
 		multiFromProbs := 1 + len(extra) // primary + extras above floor
 		capN := decisionMemberCap(len(keyToID))
@@ -322,6 +411,129 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 		seen[id] = struct{}{}
 	}
 	return ids, conf, false, true
+}
+
+// mapCapableMultiFromProbs picks top-N opaque mN members by probability for who-can / subset-all.
+// When countHint >= 2, takes that many; otherwise keeps members within 40% of the best mN prob.
+func mapCapableMultiFromProbs(probs map[string]float64, keyToID map[string]string, memberOrder []string, k, countHint int) ([]string, float64) {
+	type ranked struct {
+		key  string
+		id   string
+		prob float64
+	}
+	var list []ranked
+	maxP := 0.0
+	for key, id := range keyToID {
+		p := probs[key]
+		list = append(list, ranked{key: key, id: id, prob: p})
+		if p > maxP {
+			maxP = p
+		}
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if list[i].prob != list[j].prob {
+			return list[i].prob > list[j].prob
+		}
+		return list[i].key < list[j].key
+	})
+	want := k
+	if countHint > 0 {
+		want = countHint
+	}
+	capN := decisionMemberCap(len(keyToID))
+	if want < 1 {
+		want = 1
+	}
+	if want > capN {
+		want = capN
+	}
+	if countHint < 2 && maxP > 0 {
+		// Infer capable set by relative probability (SystemOne often parks mass on "all").
+		relFloor := maxP * 0.4
+		n := 0
+		for _, e := range list {
+			if e.prob >= relFloor {
+				n++
+			}
+		}
+		if n > want {
+			want = n
+		}
+		if want > capN {
+			want = capN
+		}
+	}
+	ids := make([]string, 0, want)
+	seen := map[string]struct{}{}
+	var sum float64
+	for _, e := range list {
+		if len(ids) >= want {
+			break
+		}
+		if _, did := seen[e.id]; did {
+			continue
+		}
+		if countHint < 2 && maxP > 0 && e.prob < maxP*0.4 && len(ids) >= 1 {
+			break
+		}
+		seen[e.id] = struct{}{}
+		ids = append(ids, e.id)
+		sum += e.prob
+	}
+	// Prefer channel order for stability when reporting multi census.
+	if len(ids) > 1 && len(memberOrder) > 0 {
+		ids = orderIDsByMembers(ids, memberOrder)
+	}
+	conf := maxP
+	if sum > conf {
+		conf = sum
+		if conf > 1 {
+			conf = 1
+		}
+	}
+	if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+		conf = pAll
+	}
+	return ids, conf
+}
+
+func orderIDsByMembers(ids []string, memberOrder []string) []string {
+	want := map[string]struct{}{}
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	var out []string
+	for _, id := range memberOrder {
+		if _, ok := want[id]; ok {
+			out = append(out, id)
+			delete(want, id)
+		}
+	}
+	for _, id := range ids {
+		if _, ok := want[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// decisionPickMeta extracts choice + probabilities for auto_pick logs.
+func decisionPickMeta(answers map[string]any) (choice string, probs map[string]float64) {
+	probs = map[string]float64{}
+	if len(answers) == 0 {
+		return "", probs
+	}
+	raw, _ := answers[autoPickDecisionQKey].(map[string]any)
+	if raw == nil {
+		return "", probs
+	}
+	choice = strings.TrimSpace(fmt.Sprint(raw["choice"]))
+	if pRaw, okp := raw["probabilities"].(map[string]any); okp {
+		for pk, pv := range pRaw {
+			probs[pk] = asFloat64(pv)
+		}
+	}
+	return choice, probs
 }
 
 // countHintFromAnswers maps answers.count noul ∈ [0,1] → how many members (1..memberCount).
@@ -402,11 +614,20 @@ func orderedDecisionMemberIDs(memberOrder []string, keyToID map[string]string) [
 }
 
 func autoPickDecisionConfidence(raw map[string]any, choiceKey string, probs map[string]float64) float64 {
+	conf := 0.0
+	have := false
 	if c, ok := optionalFloat(raw["confidence"]); ok {
-		return c
+		conf = c
+		have = true
 	}
 	if p, ok := probs[choiceKey]; ok && p > 0 {
-		return p
+		if !have || p > conf {
+			conf = p
+		}
+		have = true
+	}
+	if have {
+		return conf
 	}
 	// Valid mapped choice without explicit conf → treat as moderate (above floor).
 	return 0.55

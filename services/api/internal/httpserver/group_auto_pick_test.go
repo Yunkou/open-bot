@@ -347,7 +347,7 @@ func TestAutoPickDecisionErrorsFailOpenHeuristic(t *testing.T) {
 
 func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	members, agents := testGroupAgents()
-	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false)
+	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false, false)
 	if keyToID["m0"] != "lead" || keyToID["m1"] != "coder" || keyToID["m2"] != "writer" {
 		t.Fatalf("keyToID=%#v", keyToID)
 	}
@@ -386,7 +386,7 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 		}
 	}
 	// allHands strengthens instructions
-	_, q2, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true)
+	_, q2, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
 	pick2 := q2["pick"].(map[string]any)
 	if !strings.Contains(fmt.Sprint(pick2["instructions"]), "all-hands") {
 		t.Fatalf("allHands instructions missing hint: %v", pick2["instructions"])
@@ -397,7 +397,7 @@ func TestMapDecisionChoiceRejectsAgentIDEcho(t *testing.T) {
 	keyToID := map[string]string{"m0": "lead", "m1": "coder"}
 	_, _, _, ok := mapDecisionChoiceToAgentIDs(map[string]any{
 		"pick": map[string]any{"choice": "coder", "confidence": 0.9},
-	}, keyToID, []string{"lead", "coder"}, 1, true)
+	}, keyToID, []string{"lead", "coder"}, 1, true, false, 0)
 	if ok {
 		t.Fatal("must reject raw agent id echo")
 	}
@@ -407,7 +407,7 @@ func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
 	keyToID := map[string]string{"m0": "lead", "m1": "coder", "m2": "writer"}
 	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
 		"pick": map[string]any{"choice": "all", "confidence": 0.91},
-	}, keyToID, []string{"lead", "coder", "writer"}, 1, true)
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, true, false, 0)
 	if !ok || !allSel {
 		t.Fatalf("ok=%v allSel=%v", ok, allSel)
 	}
@@ -634,7 +634,7 @@ func TestMapDecisionChoiceTwoOfThreeFromProbs(t *testing.T) {
 			},
 			"confidence": 0.7,
 		},
-	}, keyToID, []string{"lead", "coder", "writer"}, 1, true)
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, true, false, 0)
 	if !ok || allSel {
 		t.Fatalf("ok=%v allSel=%v", ok, allSel)
 	}
@@ -653,7 +653,7 @@ func TestMapDecisionChoiceTwoOfThreeFromProbs(t *testing.T) {
 			},
 			"confidence": 0.7,
 		},
-	}, keyToID, []string{"lead", "coder", "writer"}, 1, false)
+	}, keyToID, []string{"lead", "coder", "writer"}, 1, false, false, 1)
 	if !ok1 || allSel1 || len(ids1) != 1 || ids1[0] != "coder" {
 		t.Fatalf("count=1 must stay single, got %#v", ids1)
 	}
@@ -729,5 +729,131 @@ func TestAutoPickDecisionTwoOfThreeViaProbsNoCount(t *testing.T) {
 	}
 	if got.Fallback != "" {
 		t.Fatalf("fallback=%s want empty (not all)", got.Fallback)
+	}
+}
+
+func TestIsWhoCanIntent(t *testing.T) {
+	positives := []string{
+		"都谁会查资料",
+		"谁会查资料",
+		"谁能写代码",
+		"哪些人会搜索",
+		"哪位会写诗",
+		"who can research",
+		"which of you can code",
+		"both can",
+	}
+	for _, p := range positives {
+		if !isWhoCanIntent(p) {
+			t.Fatalf("want who-can for %q", p)
+		}
+	}
+	negatives := []string{
+		"",
+		"帮我写个函数",
+		"都介绍下自己",
+		"查一下资料",
+		"大家介绍一下",
+		"随便聊聊天气",
+	}
+	for _, n := range negatives {
+		if isWhoCanIntent(n) {
+			t.Fatalf("want NOT who-can for %q", n)
+		}
+	}
+}
+
+func TestMapDecisionWhoCanRemapsAllToCapableMulti(t *testing.T) {
+	// Production Unsloth response for 「谁会查资料」: choice=all, low confidence field,
+	// count≈0.25→2, mass on all + two researchers (m0/m2); coder m1 low.
+	keyToID := map[string]string{"m0": "22", "m1": "33", "m2": "44"}
+	ids, conf, allSel, ok := mapDecisionChoiceToAgentIDs(map[string]any{
+		"pick": map[string]any{
+			"type":   "choice",
+			"choice": "all",
+			"probabilities": map[string]any{
+				"all": 0.3913, "m0": 0.1618, "m1": 0.0786, "m2": 0.3683,
+			},
+			"confidence": 0.113,
+		},
+		"count": map[string]any{"type": "noul", "noul": 0.2511},
+	}, keyToID, []string{"22", "33", "44"}, 3, true, true, 2)
+	if !ok || allSel {
+		t.Fatalf("ok=%v allSel=%v (must not expand literally everyone)", ok, allSel)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("want 22+44 (2 capable), got %#v", ids)
+	}
+	got := map[string]bool{}
+	for _, id := range ids {
+		got[id] = true
+	}
+	if !got["22"] || !got["44"] || got["33"] {
+		t.Fatalf("want research 22+44 only, got %#v", ids)
+	}
+	if conf < autoPickConfidenceFloor {
+		t.Fatalf("conf=%.2f should clear floor after who-can remap", conf)
+	}
+}
+
+func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
+	members := []string{"22", "33", "44"}
+	agents := []*db.Agent{
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "all",
+					"probabilities": map[string]any{
+						"all": 0.5413, "m0": 0.1661, "m1": 0.0641, "m2": 0.2284,
+					},
+					"confidence": 0.1749,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.2675},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "都谁会查资料", members, agents, "22", 1, "", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision (not fail-open heuristic)", got.Method)
+	}
+	if got.Fallback == "all" {
+		t.Fatalf("who-can must not fallback=all, got %#v", got)
+	}
+	if len(got.AgentIDs) != 2 {
+		t.Fatalf("want both researchers, got %#v", got.AgentIDs)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["22"] || !set["44"] || set["33"] {
+		t.Fatalf("want 22+44, got %#v", got.AgentIDs)
+	}
+}
+
+func TestAutoPickHeuristicWhoCanBothResearchers(t *testing.T) {
+	members := []string{"22", "33", "44"}
+	agents := []*db.Agent{
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	got := autoPickHeuristic("都谁会查资料", members, agents, "22", 1, "")
+	if len(got.AgentIDs) != 2 {
+		t.Fatalf("who-can heuristic should pick both research bots, got %#v conf=%.2f", got.AgentIDs, got.Confidence)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["22"] || !set["44"] || set["33"] {
+		t.Fatalf("want 22+44, got %#v", got.AgentIDs)
 	}
 }

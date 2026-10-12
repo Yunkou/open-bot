@@ -1,6 +1,6 @@
 # 群 Auto 选人（轻量设计）
 
-日期：2026-10-11 · 状态：三策略已落地；decision **可返回多人子集**（opaque `all` + `count` noul + top-N probabilities；不限 all-or-one）；**生效模式仅跟 Admin 组织功能开关**（`feature_flags_json.auto_pick`）；客户端不配置群级 auto_pick  
+日期：2026-10-11 · 状态：三策略已落地；decision **可返回多人子集**（opaque `all` + `count` noul + top-N probabilities；**谁会/who can** 能力普查 → 有能力成员全选，不误成全员或 K=1）；**生效模式仅跟 Admin 组织功能开关**（`feature_flags_json.auto_pick`）；客户端不配置群级 auto_pick  
 对照现状：`resolveGroupSendTargets` — 有 `@` → 强制集合；无人 `@` → 按 org `auto_pick` 模式选人。
 
 ---
@@ -69,9 +69,9 @@ resolveGroupSendTargets / planSendTargets
 - **State**：`User message:` + 可选 `Recent context:`（synopsis）
 - **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
 - **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集
-- **映射**：`choice=all` → 频道顺序展开全部 `agent_id`；否则仅接受 `mN`；按 probability 降序、≥ θ 取 top-N；`count` noul→1..N 定人数；无 count 时也可由多路高概率推断多人（不必 `all`）
+- **映射**：`choice=all` → 频道顺序展开全部 `agent_id`（**who-can 例外**：按 mN 概率 + `count` 取有能力子集，不展开全员）；否则仅接受 `mN`；按 probability 降序、≥ θ（who-can 用相对阈值）取 top-N；`count` noul→1..N 定人数；无 count / who-can 时可由多路高概率推断多人（不必 `all`）
 - **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 全员意图 / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）
-- **置信度**：优先 `confidence`，否则所选 key 的 probability，再否则 0.55
+- **置信度**：`max(confidence, probs[choice])`；who-can 从 `all` 重映射时再考虑 `probs[all]` / 所选 mN 合计，避免低 `confidence` 字段误 fail-open；再否则 0.55
 - **调用路径**：API `planSendTargets` → runtime `POST /v1/decision/decide` → factory（Jev / Laya / Unsloth SystemOne）
 - **超时**：约 8s
 
@@ -110,6 +110,20 @@ resolveGroupSendTargets / planSendTargets
 **不命中（仍走专长选人）：** 「介绍一下」「介绍一下码农」「都很好」「帮我写个函数」。
 
 `@everyone` / `@all` 仍走强制全员（不可 PASS），与本路径无关。
+
+
+## 4.2 能力普查（who-can / 「都谁会 X」）
+
+无人 `@` 时，若用户在问**谁具备某能力**（「都谁会查资料」「谁会写代码」「who can research」「both」）：
+
+| 模式 | 行为 |
+|---|---|
+| **decision** | SystemOne 常误选 `choice=all` 且 `confidence` 很低（概率质量压在 `all` 上、mN 被稀释）。映射：**不**按字面展开全员；按 `count` noul + mN 概率取有能力多人子集（如 22+44）；置信度取 `max(confidence, probs[choice], probs[all], Σ selected)`，避免 low-conf fail-open 掉进 heuristic K=1 |
+| **heuristic** | 同能力关键词命中的成员**全部**入选（抬高有效 K），不只 soft `auto_pick_k=1` |
+
+**短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
+
+**日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
 
 ---
 

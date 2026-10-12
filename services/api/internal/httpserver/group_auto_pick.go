@@ -196,6 +196,14 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 
 	n := k
+	// Capability census (「谁会/都谁会/who can」): every positive match should reply, not soft K=1.
+	if isWhoCanIntent(userText) && len(ranked) > n {
+		n = len(ranked)
+		capN := decisionMemberCap(len(members))
+		if n > capN {
+			n = capN
+		}
+	}
 	if n > len(ranked) {
 		n = len(ranked)
 	}
@@ -528,6 +536,56 @@ var allHandsCollectiveMarkers = []string{
 var allHandsActionMarkers = []string{
 	"介绍", "自我介绍", "说说", "说一下", "讲讲", "讲一下", "发言",
 	"introduce", "say hi", "say hello",
+}
+
+
+// isWhoCanIntent detects capability-census asks: who among members can do X / both.
+// Distinct from all-hands (intro / everyone speak) — answerers are the capable subset.
+func isWhoCanIntent(userText string) bool {
+	text := strings.ToLower(strings.TrimSpace(userText))
+	if text == "" {
+		return false
+	}
+	for _, p := range whoCanFixedPhrases {
+		if p != "" && strings.Contains(text, strings.ToLower(p)) {
+			return true
+		}
+	}
+	// Collective/census marker + ability verb (会/能/can) — e.g. 「都谁会查资料」「谁能写代码」.
+	hasCensus := false
+	for _, c := range whoCanCensusMarkers {
+		if c != "" && strings.Contains(text, strings.ToLower(c)) {
+			hasCensus = true
+			break
+		}
+	}
+	if !hasCensus {
+		return false
+	}
+	for _, a := range whoCanAbilityMarkers {
+		if a != "" && strings.Contains(text, strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+var whoCanFixedPhrases = []string{
+	"都谁会", "都谁能", "都有谁会", "都有谁能",
+	"谁都会", // rare; still census-ish
+	"哪些人会", "哪些会", "哪几位会", "哪几个人会",
+	"哪位会", "哪位能", "谁可以", "都能谁",
+	"who can", "who all can", "which of you can", "which of you could",
+	"who among you can", "both of you who can", "both can",
+}
+
+var whoCanCensusMarkers = []string{
+	"谁会", "谁能", "谁可以", "都谁", "哪些人", "哪几位", "哪几个人", "哪位会", "哪位能",
+	"who can", "who could", "which of you", "who among",
+}
+
+var whoCanAbilityMarkers = []string{
+	"会", "能", "可以", "can", "could",
 }
 
 // autoPickAllCandidates returns every member as a non-forced candidate (same as auto_pick=off).
