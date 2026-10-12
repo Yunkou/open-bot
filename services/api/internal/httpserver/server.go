@@ -374,6 +374,12 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
+		// Reject soft-deleted accounts. JWT alone used to keep working after purge,
+		// so chat fell through to env OPENAI_MODEL (stale MiniMax → 503).
+		if _, err := s.db.GetUserByID(claims.UserID); err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
 		ctx := context.WithValue(r.Context(), userIDKey, claims.UserID)
 		next(w, r.WithContext(ctx))
 	}

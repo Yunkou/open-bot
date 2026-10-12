@@ -329,6 +329,10 @@ func (d *DB) SetDefaultLLM(userID, id string) (*LLMConnection, error) {
 //   1) user's personal default (is_default), else first personal connection
 //   2) org_settings default LLM (when configured)
 //   3) nil (none available)
+//
+// Soft-deleted users still resolve org LLM: requireAuth should reject them, but
+// JWT-only middleware historically allowed deleted tokens through. Falling through
+// to agent-runtime env OPENAI_MODEL then picked stale MiniMax and returned 503.
 func (d *DB) ResolveEffectiveLLM(userID string) (*LLMConnection, error) {
 	conn, err := d.GetDefaultLLM(userID)
 	if err != nil {
@@ -339,7 +343,14 @@ func (d *DB) ResolveEffectiveLLM(userID string) (*LLMConnection, error) {
 	}
 	u, err := d.GetUserByID(userID)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, ErrNotFound) {
+			return nil, err
+		}
+		// Soft-deleted (or purged-from-auth-view) user: still use org LLM if any.
+		u, err = d.GetUserByIDIncludingDeleted(userID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if strings.TrimSpace(u.OrgID) == "" {
 		return nil, nil
@@ -353,6 +364,10 @@ func (d *DB) ResolveEffectiveLLM(userID string) (*LLMConnection, error) {
 
 // OrgSettingsAsLLM builds an ephemeral LLMConnection from org_settings.
 // Returns nil when the org default is not configured.
+//
+// Model is required: a base_url/api_key without llm_model used to produce an
+// override with model="" and agent-runtime then fell back to env OPENAI_MODEL
+// (e.g. MiniMax), silently ignoring the admin LLM page.
 func OrgSettingsAsLLM(s *OrgSettings, userID string) *LLMConnection {
 	if s == nil {
 		return nil
@@ -360,7 +375,9 @@ func OrgSettingsAsLLM(s *OrgSettings, userID string) *LLMConnection {
 	base := strings.TrimSpace(s.LLMBaseURL)
 	model := strings.TrimSpace(s.LLMModel)
 	key := s.LLMAPIKey
-	if base == "" && model == "" && strings.TrimSpace(key) == "" {
+	// Model is the admin-selected chat id; required so we never attach an llm
+	// override with model="" (runtime would then use env OPENAI_MODEL).
+	if model == "" {
 		return nil
 	}
 	name := strings.TrimSpace(s.LLMName)
