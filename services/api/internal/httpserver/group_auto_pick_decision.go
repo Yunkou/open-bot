@@ -124,6 +124,22 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
+	// Who-can: when SystemOne parks mass on "all", mN ranks are often noise (e.g. coder > researchers).
+	// Prefer role-match capable census over diluted mN top-N / under-pick / incapable extras.
+	if ok && whoCan && !allSelected {
+		if heur := capableIDsFromRoleMatch(userText, members, agents, synopsis); len(heur) > 0 {
+			if whoCanPreferRoleMatch(choiceKey, ids, heur, probs) {
+				ids = orderIDsByMembers(heur, members)
+				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+					conf = pAll
+				}
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
+				log.Printf("auto_pick=decision note=who_can_role_match ids=%v choice=%s count=%d probs=%v", ids, choiceKey, countHint, probs)
+			}
+		}
+	}
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
@@ -412,6 +428,124 @@ func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]stri
 	}
 	return ids, conf, false, true
 }
+
+
+// capableIDsFromRoleMatch returns members with positive specialty score for the ask (capable census).
+// Same scoring as heuristic AutoPick; empty when nothing matches.
+func capableIDsFromRoleMatch(userText string, members []string, agents []*db.Agent, synopsis string) []string {
+	haystack := strings.ToLower(strings.TrimSpace(userText))
+	if syn := strings.TrimSpace(synopsis); syn != "" {
+		haystack = haystack + "\n" + strings.ToLower(syn)
+	}
+	if haystack == "" || len(members) == 0 {
+		return nil
+	}
+	byID := map[string]*db.Agent{}
+	for _, a := range agents {
+		if a != nil {
+			byID[a.ID] = a
+		}
+	}
+	type scored struct {
+		id    string
+		score int
+	}
+	var ranked []scored
+	for _, id := range members {
+		a := byID[id]
+		name := id
+		role := ""
+		if a != nil {
+			if n := strings.TrimSpace(a.Name); n != "" {
+				name = n
+			}
+			role = groupParticipationRoleHint(a)
+		}
+		sc := scoreAutoPickMatch(haystack, name, role)
+		if sc > 0 {
+			ranked = append(ranked, scored{id: id, score: sc})
+		}
+	}
+	if len(ranked) == 0 {
+		return nil
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].id < ranked[j].id
+	})
+	capN := decisionMemberCap(len(members))
+	if len(ranked) > capN {
+		ranked = ranked[:capN]
+	}
+	out := make([]string, 0, len(ranked))
+	for _, e := range ranked {
+		out = append(out, e.id)
+	}
+	return out
+}
+
+// whoCanPreferRoleMatch is true when decision mapping under-picks, includes incapable members,
+// or choice=all with diluted mN probs that disagree with the role-match capable set.
+func whoCanPreferRoleMatch(choiceKey string, mapped, heur []string, probs map[string]float64) bool {
+	if len(heur) == 0 {
+		return false
+	}
+	heurSet := map[string]struct{}{}
+	for _, id := range heur {
+		heurSet[id] = struct{}{}
+	}
+	for _, id := range mapped {
+		if _, ok := heurSet[id]; !ok {
+			return true // includes someone role-match does not consider capable
+		}
+	}
+	if len(mapped) < len(heur) {
+		return true // under-pick vs capable census
+	}
+	if strings.EqualFold(choiceKey, autoPickDecisionAllKey) && mNProbsDilutedByAll(probs) {
+		return !sameStringSet(mapped, heur)
+	}
+	return false
+}
+
+func mNProbsDilutedByAll(probs map[string]float64) bool {
+	if len(probs) == 0 {
+		return false
+	}
+	pAll := probs[autoPickDecisionAllKey]
+	maxM := 0.0
+	for k, p := range probs {
+		if strings.EqualFold(k, autoPickDecisionAllKey) {
+			continue
+		}
+		if p > maxM {
+			maxM = p
+		}
+	}
+	if pAll < 0.25 {
+		return false
+	}
+	return maxM < pAll*0.45 || maxM < 0.18
+}
+
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, id := range a {
+		seen[id] = struct{}{}
+	}
+	for _, id := range b {
+		if _, ok := seen[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 
 // mapCapableMultiFromProbs picks top-N opaque mN members by probability for who-can / subset-all.
 // When countHint >= 2, takes that many; otherwise keeps members within 40% of the best mN prob.

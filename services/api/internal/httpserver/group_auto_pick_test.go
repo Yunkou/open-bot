@@ -838,6 +838,49 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	}
 }
 
+
+func TestAutoPickDecisionWhoCanDilutedAllPrefersRoleMatch(t *testing.T) {
+	// Production 2026-10-12 10:35 CST: 「谁能帮我查下资料？」
+	// choice=all count≈2 but diluted mN ranked coder m0 above researchers → 33+22.
+	// Role-match must recover both research bots (22+44).
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "all",
+					"probabilities": map[string]any{
+						"all": 0.7891, "m0": 0.1401, "m1": 0.0454, "m2": 0.0254,
+					},
+					"confidence": 0.498,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.5872},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "谁能帮我查下资料？", members, agents, "22", 1, "22 和 44。", deps)
+	if got.Method != "decision" {
+		t.Fatalf("method=%s want decision", got.Method)
+	}
+	if got.Fallback == "all" {
+		t.Fatalf("who-can must not fallback=all, got %#v", got)
+	}
+	set := map[string]bool{}
+	for _, id := range got.AgentIDs {
+		set[id] = true
+	}
+	if !set["22"] || !set["44"] || set["33"] || len(got.AgentIDs) != 2 {
+		t.Fatalf("want research 22+44 only (not diluted mN 33+22), got %#v", got.AgentIDs)
+	}
+}
+
 func TestAutoPickHeuristicWhoCanBothResearchers(t *testing.T) {
 	members := []string{"22", "33", "44"}
 	agents := []*db.Agent{
