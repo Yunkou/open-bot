@@ -39,12 +39,14 @@ import { friendlyOpenError, parseSandboxHref, previewTitleFromPath } from "@/lib
 import { useRealtimeEvents } from "@/providers/realtime";
 import { useSecretPrompt } from "@/providers/secretPrompt";
 
-const STREAMING_ID = "__streaming__";
+const STREAMING_ID_PREFIX = "__streaming__:";
 
 /** 稳定空数组引用，避免 `?? []` 让下游 memo 每次都失效。 */
 const EMPTY_AGENTS: Agent[] = [];
 
-type Streaming = { text: string; agentId?: string; agentName?: string };
+/** Parallel group: one streaming slot per agent_id ("_" = unknown until agent_start). */
+type StreamPart = { text: string; agentName?: string };
+type StreamingByAgent = Record<string, StreamPart>;
 
 /**
  * 服务端消息 → 气泡用的形状。
@@ -67,6 +69,25 @@ function toUiMessage(m: Message): UiMessage {
   };
 }
 
+/** Stamp AgentAvatar shape/color/name from agents[] by message.agent_id. */
+function avatarPropsForMessage(
+  m: UiMessage,
+  agents: Agent[],
+  primaryAgent: Agent | null
+): {
+  avatarShape?: string;
+  avatarColor?: string;
+  fallbackAgentName?: string;
+} {
+  const aid = m.agent_id || primaryAgent?.id;
+  const a = aid ? agents.find((x) => x.id === aid) : undefined;
+  return {
+    ...(a?.avatar_shape ? { avatarShape: a.avatar_shape } : {}),
+    ...(a?.avatar_color ? { avatarColor: a.avatar_color } : {}),
+    ...(m.agent_id && !m.agent_name && a?.name ? { fallbackAgentName: a.name } : {}),
+  };
+}
+
 export default function ChatScreen(): JSX.Element {
   const insets = useSafeAreaInsets();
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -79,7 +100,7 @@ export default function ChatScreen(): JSX.Element {
   const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<PickedFile[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [streaming, setStreaming] = useState<Streaming | null>(null);
+  const [streamingByAgent, setStreamingByAgent] = useState<StreamingByAgent | null>(null);
   const [sending, setSending] = useState(false);
   const [runLabel, setRunLabel] = useState("");
   /** 已经完成首次加载的会话 id。loading 由它派生，避免在 effect 里同步 setState。 */
@@ -176,11 +197,26 @@ export default function ChatScreen(): JSX.Element {
         conversationId,
         {
           onAgentStart: (info) =>
-            setStreaming({ text: "", agentId: info.agent_id, agentName: info.agent_name }),
-          onToken: (t) =>
-            setStreaming((prev) => ({ ...(prev ?? { text: "" }), text: (prev?.text ?? "") + t })),
+            setStreamingByAgent((prev) => ({
+              ...(prev || {}),
+              [info.agent_id]: {
+                text: prev?.[info.agent_id]?.text ?? "",
+                agentName: info.agent_name ?? prev?.[info.agent_id]?.agentName,
+              },
+            })),
+          onToken: (t, info) =>
+            setStreamingByAgent((prev) => {
+              const base = prev || {};
+              let key = (info?.agent_id || "").trim();
+              if (!key) {
+                const keys = Object.keys(base);
+                key = keys.length === 1 ? keys[0]! : "_";
+              }
+              const cur = base[key] || { text: "" };
+              return { ...base, [key]: { ...cur, text: cur.text + t } };
+            }),
           onDone: () => {
-            setStreaming(null);
+            setStreamingByAgent(null);
             setSending(false);
             setRunLabel("");
             void refreshMessages().then(() => undefined);
@@ -255,8 +291,9 @@ export default function ChatScreen(): JSX.Element {
 
   // 流式输出时贴着底部
   useEffect(() => {
-    if (streaming?.text) scrollRef.current?.scrollToEnd({ animated: true });
-  }, [streaming?.text]);
+    const parts = streamingByAgent ? Object.values(streamingByAgent) : [];
+    if (parts.some((p) => p.text)) scrollRef.current?.scrollToEnd({ animated: true });
+  }, [streamingByAgent]);
 
   const visible = useMemo(() => {
     // 主时间线只留没有 thread_root_id 的消息，以及当前展开的那条线程的全部内容。
@@ -268,21 +305,24 @@ export default function ChatScreen(): JSX.Element {
     const base = threadRootId
       ? messages.filter((m) => m.id === threadRootId || m.thread_root_id === threadRootId)
       : mainline;
-    if (!streaming) return base;
-    const isSummary = streaming.text === "";
-    if (isSummary && base.length > 0) return base;
-    return [
-      ...base,
-      {
-        id: STREAMING_ID,
+    if (!streamingByAgent) return base;
+    const entries = Object.entries(streamingByAgent);
+    // Still thinking (no tokens yet): keep base so RunStatus can show; empty bubbles stay hidden.
+    if (entries.length === 0 || entries.every(([, p]) => !p.text)) {
+      return base;
+    }
+    const extras: UiMessage[] = entries
+      .filter(([, p]) => Boolean(p.text))
+      .map(([agentKey, p]) => ({
+        id: `${STREAMING_ID_PREFIX}${agentKey}`,
         role: "assistant",
-        content: streaming.text,
+        content: p.text,
         streaming: true,
-        ...(streaming.agentId ? { agent_id: streaming.agentId } : {}),
-        ...(streaming.agentName ? { agent_name: streaming.agentName } : {}),
-      },
-    ];
-  }, [messages, streaming, threadRootId]);
+        ...(agentKey !== "_" ? { agent_id: agentKey } : {}),
+        ...(p.agentName ? { agent_name: p.agentName } : {}),
+      }));
+    return [...base, ...extras];
+  }, [messages, streamingByAgent, threadRootId]);
 
   /** 每条根消息下面挂了几条线程回复，用来渲染「N 条回复」。 */
   const threadCounts = useMemo(() => {
@@ -473,7 +513,7 @@ export default function ChatScreen(): JSX.Element {
       // 否则下一条会莫名其妙继续挂在上一段对话下面。
       setReplyTo(null);
       setSending(true);
-      setStreaming({ text: "" });
+      setStreamingByAgent({});
       setRunLabel("正在思考…");
 
       // 本地先插一条，拿到即时的视觉反馈
@@ -496,16 +536,41 @@ export default function ChatScreen(): JSX.Element {
           content,
           {
             onAgentStart: (info) =>
-              setStreaming({ text: "", agentId: info.agent_id, agentName: info.agent_name }),
-            onToken: (t) =>
-              setStreaming((prev) => ({ ...(prev ?? { text: "" }), text: (prev?.text ?? "") + t })),
+              setStreamingByAgent((prev) => ({
+                ...(prev || {}),
+                [info.agent_id]: {
+                  text: prev?.[info.agent_id]?.text ?? "",
+                  agentName: info.agent_name ?? prev?.[info.agent_id]?.agentName,
+                },
+              })),
+            onToken: (t, info) =>
+              setStreamingByAgent((prev) => {
+                const base = prev || {};
+                let key = (info?.agent_id || "").trim();
+                if (!key) {
+                  const keys = Object.keys(base);
+                  key = keys.length === 1 ? keys[0]! : "_";
+                }
+                const cur = base[key] || { text: "" };
+                return { ...base, [key]: { ...cur, text: cur.text + t } };
+              }),
             onStatus: (data) => setRunLabel((cur) => deriveRunLabel(data, cur || "正在思考…")),
             onMeta: (meta) => {
               if (meta.phase === "cancelled") setRunLabel("已停止");
+              // Seal this agent's stream on message_saved so avatar cannot stick to another bot.
+              if (meta.phase === "message_saved" && typeof meta.agent_id === "string" && meta.agent_id) {
+                const aid = meta.agent_id;
+                setStreamingByAgent((prev) => {
+                  if (!prev || !(aid in prev)) return prev;
+                  const next = { ...prev };
+                  delete next[aid];
+                  return Object.keys(next).length ? next : null;
+                });
+              }
             },
             onError: (m) => setError(m),
             onDone: () => {
-              setStreaming(null);
+              setStreamingByAgent(null);
               setSending(false);
               setRunLabel("");
               // 以服务端落库结果为准，避免本地拼的消息缺 id / 时间戳
@@ -525,14 +590,14 @@ export default function ChatScreen(): JSX.Element {
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") {
           // 用户主动停止：服务端 run 仍在跑，重新拉一次拿最终结果
-          setStreaming(null);
+          setStreamingByAgent(null);
           setSending(false);
           setRunLabel("");
           void reload().catch(() => undefined);
         } else {
           setError(err instanceof Error ? err.message : "发送失败");
           setSending(false);
-          setStreaming(null);
+          setStreamingByAgent(null);
         }
       } finally {
         abortRef.current = null;
@@ -705,6 +770,7 @@ export default function ChatScreen(): JSX.Element {
             onRequestFeedback={(id) => openFeedback(id, "reaction_followup")}
             {...(primaryAgent ? { fallbackAgentId: primaryAgent.id } : {})}
             {...(primaryAgent ? { fallbackAgentName: primaryAgent.name } : {})}
+            {...avatarPropsForMessage(m, agents, primaryAgent)}
           />
         ))}
 

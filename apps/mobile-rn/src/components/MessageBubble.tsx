@@ -47,6 +47,9 @@ export type MessageBubbleProps = {
   /** 消息没带 agent_id 时回落到会话所属助手 */
   fallbackAgentId?: string;
   fallbackAgentName?: string;
+  /** robot-heads / silhouette: resolve from agents by message.agent_id */
+  avatarShape?: string | null;
+  avatarColor?: string | null;
   /** 群聊才需要逐条标注发言者；单聊里助手名每条都一样，是纯噪音 */
   showAgentName?: boolean;
   /** `sandbox:` 链接点击回调；不传则用系统浏览器打开 */
@@ -117,6 +120,8 @@ export function MessageBubble({
   message,
   fallbackAgentId,
   fallbackAgentName,
+  avatarShape,
+  avatarColor,
   showAgentName,
   onSandboxLink,
   quoted,
@@ -192,7 +197,13 @@ export function MessageBubble({
 
   return (
     <View className="flex-row items-start gap-2">
-      <AgentAvatar id={agentId} name={agentName || "AI"} size={28} />
+      <AgentAvatar
+        id={agentId}
+        name={agentName || "AI"}
+        size={28}
+        shape={avatarShape}
+        color={avatarColor}
+      />
 
       <View className="max-w-[85%] gap-1.5">
         {agentName ? (

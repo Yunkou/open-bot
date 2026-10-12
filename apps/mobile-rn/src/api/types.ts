@@ -253,8 +253,11 @@ export type StatusEvent = {
   [key: string]: unknown;
 };
 
+export type StreamTokenInfo = { agent_id?: string };
+
 export type StreamHandlers = {
-  onToken: (text: string) => void;
+  /** text plus optional agent_id so parallel group candidates route to the right bubble / avatar */
+  onToken: (text: string, info?: StreamTokenInfo) => void;
   onMeta?: (data: Record<string, unknown>) => void;
   onStatus?: (data: StatusEvent) => void;
   onError?: (message: string) => void;

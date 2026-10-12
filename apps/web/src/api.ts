@@ -1787,7 +1787,16 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
 ): T[] {
   if (!msg?.id) return prev;
   if (prev.some((m) => m.id === msg.id)) {
-    return prev.map((m) => (m.id === msg.id ? ({ ...m, ...msg, streaming: false } as T) : m));
+    return prev.map((m) => {
+      if (m.id !== msg.id) return m;
+      // Prefer server fields, but never wipe a known agent_id with an empty incoming one
+      // (WS/SSE merge must keep avatar attribution stable in parallel group turns).
+      const merged = { ...m, ...msg, streaming: false } as T;
+      const keep = (m.agent_id || "").trim();
+      const next = (msg.agent_id || "").trim();
+      if (keep && !next) merged.agent_id = keep;
+      return merged;
+    });
   }
   // Keep trailing streaming assistant placeholders last (tokens / stampSavedMessage own them).
   const beforeTrailingStreaming = () => {
@@ -1852,14 +1861,20 @@ export function mergeIncomingMessage<T extends MergeableMessage>(
     if (m.streaming && m.role === "assistant" && !(m.content ?? "").trim()) continue;
     const local = Boolean(m.streaming) || m.id.startsWith("local-");
     if (!local) break;
+    const localAgent = (m.agent_id || "").trim();
+    // Never fuzzy-adopt across different agent_ids (wrong avatar / robot-heads swap).
+    if (incomingAgent && localAgent && localAgent !== incomingAgent) continue;
+    if (incomingAgent && localAgent && localAgent === incomingAgent) {
+      // Same agent: adopt even if content diverged slightly (projection vs tokens).
+      return adopt(i);
+    }
     const same =
       m.content === msg.content ||
       (m.content === "" && !m.streaming) ||
       (m.content !== "" && msg.content.startsWith(m.content));
     if (!same) {
-      // Another agent's in-flight bubble — keep scanning (do not stop the walk).
-      const localAgent = (m.agent_id || "").trim();
-      if (incomingAgent && localAgent && localAgent !== incomingAgent) continue;
+      // Untagged or other in-flight bubble — keep scanning when agent-aware.
+      if (incomingAgent && !localAgent) continue;
       break;
     }
     return adopt(i);

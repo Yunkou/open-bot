@@ -39,7 +39,12 @@ export async function readSSEStream(
           data = { raw: dataStr };
         }
         if (eventName === "token" && typeof data.text === "string") {
-          handlers.onToken(data.text);
+          // Parallel group: stamp tokens with agent_id so avatars / bubbles do not swap.
+          const tokenInfo =
+            typeof data.agent_id === "string" && data.agent_id
+              ? { agent_id: data.agent_id }
+              : undefined;
+          handlers.onToken(data.text, tokenInfo);
         } else if (eventName === "meta") {
           if (data.phase === "agent_start" && typeof data.agent_id === "string") {
             handlers.onAgentStart?.({

@@ -330,6 +330,8 @@ type ConvRunState = {
   runLabel: string;
   /** Last tool name from stream onStatus phase=tool; cleared on thinking/tool_done. §8 searching hint. */
   activeTool: string;
+  /** Agent currently driving RunStatus / robot-heads face (from agent_start / tokens). */
+  faceAgentId?: string;
   selectionKey: string; // `agent:${id}` | `channel:${id}` for sidebar busy
 };
 
@@ -538,6 +540,8 @@ export default function App() {
   const [runLabel, setRunLabel] = useState("正在思考…");
   /** Current-view tool name for §8 searching animation variant (mirrors ConvRunState.activeTool). */
   const [runActiveTool, setRunActiveTool] = useState("");
+  /** Agent_id for in-chat RunStatus AgentAvatar (parallel group: answering bot, not list focus). */
+  const [runFaceAgentId, setRunFaceAgentId] = useState("");
   /** Durable HITL: request_id awaiting tool approval. */
   const [approvalGate, setApprovalGate] = useState<{
     conversationId: string;
@@ -1424,16 +1428,18 @@ export default function App() {
   );
 
   /**
-   * In-chat RunStatus face: prefer SSE presence; if idle while a run is live,
-   * fall back to working (tool) or thinking so RobotHead stays in sync with the row.
+   * In-chat RunStatus face: prefer SSE presence of the answering bot (agent_start),
+   * not the list-focus bot — otherwise group chat shows another bot's robot-heads.
+   * If idle while a run is live, fall back to working/thinking.
    */
   const runStatusFace = useMemo((): BotPresenceStatus => {
-    const fromSse = activeAgent ? normalizePresenceStatus(presenceByAgent[activeAgent.id]) : "idle";
+    const faceId = (runFaceAgentId || activeAgent?.id || "").trim();
+    const fromSse = faceId ? normalizePresenceStatus(presenceByAgent[faceId]) : "idle";
     if (fromSse !== "idle") return fromSse;
     if (!(sending || taskBusy || viewingRunActive)) return "idle";
     if (runActiveTool) return "working";
     return "thinking";
-  }, [activeAgent, presenceByAgent, sending, taskBusy, viewingRunActive, runActiveTool]);
+  }, [runFaceAgentId, activeAgent, presenceByAgent, sending, taskBusy, viewingRunActive, runActiveTool]);
 
   const onboardingKey = useMemo(
     () => onboardingStorageKey(conversation?.id, agentId),
@@ -1621,6 +1627,28 @@ export default function App() {
       })
       .filter((a): a is Agent => Boolean(a));
   }, [activeChannel, agents]);
+
+  /** Resolve shape/color/name for RunStatus AgentAvatar by answering agent_id. */
+  const runFaceAgent = useMemo(() => {
+    const id = (runFaceAgentId || "").trim();
+    if (id) {
+      const fromGroup = (groupMentionMembers || []).find((a) => a.id === id);
+      if (fromGroup) return fromGroup;
+      const a = agents.find((x) => x.id === id);
+      if (a) return a;
+      const p = activeChannel?.member_profiles?.find((x) => x.agent_id === id);
+      if (p) {
+        return {
+          id,
+          name: p.name || agentNameById.get(id) || id,
+          avatar_shape: p.avatar_shape,
+          avatar_color: p.avatar_color,
+        } as Agent;
+      }
+      return { id, name: agentNameById.get(id) || id } as Agent;
+    }
+    return activeAgent;
+  }, [runFaceAgentId, groupMentionMembers, agents, activeChannel, agentNameById, activeAgent]);
 
   const composerMentionItems = useMemo((): ComposerMentionItem[] => {
     const items: ComposerMentionItem[] = [];
@@ -2021,12 +2049,36 @@ export default function App() {
     if (!messageId) return;
     const run = runsRef.current.get(convId);
     const aid = (agentId || "").trim();
-    // Parallel group: stamp the bubble for this agent_id, not whichever agent last
-    // set run.assistantId (that bug left a streaming bubble + WS row as duplicates).
-    const localId =
-      (aid && run?.assistantIdsByAgent?.[aid]) || run?.assistantId || null;
     const rid = (requestId || "").trim();
+    // Parallel group: resolve the local bubble for THIS agent_id only.
+    // Never fall back to run.assistantId when aid is known but unmapped — that stamped
+    // another bot's streaming row and swapped AgentAvatar / robot-heads.
+    const resolveLocalId = (prev: UiMessage[]): string | null => {
+      if (aid && run?.assistantIdsByAgent?.[aid]) return run.assistantIdsByAgent[aid];
+      if (aid) {
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const m = prev[i];
+          if (m.role !== "assistant") continue;
+          const local = Boolean(m.streaming) || m.id.startsWith("local-");
+          if (!local) continue;
+          if ((m.agent_id || "").trim() === aid) return m.id;
+        }
+        for (let i = prev.length - 1; i >= 0; i--) {
+          const m = prev[i];
+          if (m.role !== "assistant") continue;
+          if (!(m.streaming || m.id.startsWith("local-"))) continue;
+          if ((m.agent_id || "").trim()) continue;
+          if ((m.content || "").trim()) continue;
+          return m.id;
+        }
+        return null;
+      }
+      return run?.assistantId || null;
+    };
+    let stampedLocalId: string | null = null;
     patchConvMessages(convId, (prev) => {
+      const localId = resolveLocalId(prev);
+      stampedLocalId = localId;
       const existing = prev.find((m) => m.id === messageId);
       if (existing) {
         const local = localId && localId !== messageId ? prev.find((m) => m.id === localId) : undefined;
@@ -2057,7 +2109,8 @@ export default function App() {
             ? {
                 ...m,
                 ...(rid && !m.request_id ? { request_id: rid } : {}),
-                ...(aid && !m.agent_id ? { agent_id: aid } : {}),
+                // Prefer explicit aid so avatar attribution cannot stick to a prior bot.
+                ...(aid ? { agent_id: aid } : {}),
               }
             : m,
         );
@@ -2074,11 +2127,12 @@ export default function App() {
           : m,
       );
     });
+    const localId = stampedLocalId;
     if (run && localId) {
       if (run.assistantId === localId) run.assistantId = messageId;
       if (aid) {
         if (!run.assistantIdsByAgent) run.assistantIdsByAgent = {};
-        if (run.assistantIdsByAgent[aid] === localId) {
+        if (run.assistantIdsByAgent[aid] === localId || !run.assistantIdsByAgent[aid]) {
           run.assistantIdsByAgent[aid] = messageId;
         }
       }
@@ -2249,6 +2303,7 @@ export default function App() {
       assistantId: null,
       runLabel: "正在思考…",
       activeTool: "",
+      faceAgentId: "",
       selectionKey: selectionKeyForConv(conv),
     });
     bumpRunBusy();
@@ -2256,6 +2311,7 @@ export default function App() {
       setSending(true);
       setRunLabel("正在思考…");
       setRunActiveTool("");
+      setRunFaceAgentId("");
     }
 
     const isRunCurrent = () => {
@@ -2272,6 +2328,11 @@ export default function App() {
       const run = runsRef.current.get(conv.id);
       if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
       if (isViewingStream()) setRunActiveTool(tool);
+    };
+    const setFaceAgentForStream = (agentId: string) => {
+      const run = runsRef.current.get(conv.id);
+      if (run && run.generation === gen && run.abort === ac) run.faceAgentId = agentId;
+      if (isViewingStream()) setRunFaceAgentId(agentId);
     };
     const ensureStreamingBubble = (agentId?: string, agentName?: string) => {
       const run = runsRef.current.get(conv.id);
@@ -2338,6 +2399,7 @@ export default function App() {
                 : nameLookup.get(info.agent_id)) ||
               info.agent_id;
             setRunLabelForStream(`${name} 正在回复…`);
+            if (info.agent_id) setFaceAgentForStream(info.agent_id);
             ensureStreamingBubble(info.agent_id, name);
           },
           onToken: (text, info) => {
@@ -2345,6 +2407,7 @@ export default function App() {
             ensureStreamingBubble(info?.agent_id);
             const run = runsRef.current.get(conv.id);
             const agentId = info?.agent_id;
+            if (agentId && !run?.faceAgentId) setFaceAgentForStream(agentId);
             const curId =
               (agentId && run?.assistantIdsByAgent?.[agentId]) || run?.assistantId || null;
             if (!curId) return;
@@ -2499,11 +2562,13 @@ export default function App() {
       setSending(true);
       setRunLabel(activeRun.runLabel || "正在思考…");
       setRunActiveTool(activeRun.activeTool || "");
+      setRunFaceAgentId(activeRun.faceAgentId || "");
       return;
     }
     setSending(false);
     setRunLabel("正在思考…");
     setRunActiveTool("");
+    setRunFaceAgentId("");
     if (apiMsgs) {
       const mapped = mapApiMessages(apiMsgs, nameLookup ?? agents);
       messagesByConvRef.current.set(conv.id, mapped);
@@ -2884,6 +2949,7 @@ export default function App() {
         assistantId,
         runLabel: "正在思考…",
         activeTool: "",
+        faceAgentId: "",
         selectionKey: selectionKeyForConv(conv),
       });
       bumpRunBusy();
@@ -2904,7 +2970,15 @@ export default function App() {
         if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
         if (isViewingStream()) setRunActiveTool(tool);
       };
-      if (isViewingStream()) setRunActiveTool("");
+      const setFaceAgentForStream = (agentId: string) => {
+        const run = runsRef.current.get(streamConvId!);
+        if (run && run.generation === gen && run.abort === ac) run.faceAgentId = agentId;
+        if (isViewingStream()) setRunFaceAgentId(agentId);
+      };
+      if (isViewingStream()) {
+        setRunActiveTool("");
+        setRunFaceAgentId("");
+      }
       await sendMessageStream(
         conv.id,
         sendContent,
@@ -2916,6 +2990,7 @@ export default function App() {
               agents.find((a) => a.id === info.agent_id)?.name ||
               info.agent_id;
             setRunLabelForStream(`${name} 正在回复…`);
+            if (info.agent_id) setFaceAgentForStream(info.agent_id);
             patchConvMessages(streamConvId!, (prev) => {
               const run = runsRef.current.get(streamConvId!);
               if (!run) return prev;
@@ -2964,6 +3039,7 @@ export default function App() {
             if (!isRunCurrent()) return;
             const run = runsRef.current.get(streamConvId!);
             const agentId = info?.agent_id;
+            if (agentId && !run?.faceAgentId) setFaceAgentForStream(agentId);
             const curId =
               (agentId && run?.assistantIdsByAgent?.[agentId]) || run?.assistantId || null;
             if (!curId) return;
@@ -4343,7 +4419,10 @@ export default function App() {
                           color={focus.avatar_color}
                           status={presenceByAgent[focus.id] || "idle"}
                           searchingHint={
-                            Boolean(activeAgent && focus.id === activeAgent.id && searchingHintNow)
+                            Boolean(
+                              (runFaceAgentId ? focus.id === runFaceAgentId : activeAgent && focus.id === activeAgent.id) &&
+                                searchingHintNow,
+                            )
                           }
                           online={isBotOnline(focus.id)}
                           onClick={() => openAvatarSettings(focus)}
@@ -4466,7 +4545,10 @@ export default function App() {
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
                     searchingHint={
-                      Boolean(activeAgent && a.id === activeAgent.id && searchingHintNow)
+                      Boolean(
+                        (runFaceAgentId ? a.id === runFaceAgentId : activeAgent && a.id === activeAgent.id) &&
+                          searchingHintNow,
+                      )
                     }
                     online={isBotOnline(a.id)}
                     onClick={() => openAvatarSettings(a)}
@@ -4775,7 +4857,12 @@ export default function App() {
                   shape={activeAgent?.avatar_shape}
                   color={activeAgent?.avatar_color}
                   status={(activeAgent && presenceByAgent[activeAgent.id]) || "idle"}
-                  searchingHint={searchingHintNow}
+                  searchingHint={
+                    Boolean(
+                      searchingHintNow &&
+                        (!runFaceAgentId || runFaceAgentId === activeAgent?.id),
+                    )
+                  }
                   online={isBotOnline(activeAgent?.id)}
                   onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
@@ -4889,11 +4976,11 @@ export default function App() {
             !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
               <RunStatus
                 label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
-                agentId={activeAgent?.id}
-                agentName={activeAgent?.name ?? "助手"}
-                shape={activeAgent?.avatar_shape}
-                avatarColor={activeAgent?.avatar_color}
-                color={resolveAvatarColor(activeAgent?.id || activeAgent?.name || "open-bot", activeAgent?.avatar_color)}
+                agentId={runFaceAgent?.id}
+                agentName={runFaceAgent?.name ?? "助手"}
+                shape={runFaceAgent?.avatar_shape}
+                avatarColor={runFaceAgent?.avatar_color}
+                color={resolveAvatarColor(runFaceAgent?.id || runFaceAgent?.name || "open-bot", runFaceAgent?.avatar_color)}
                 status={runStatusFace}
                 searchingHint={searchingHintNow}
               />
