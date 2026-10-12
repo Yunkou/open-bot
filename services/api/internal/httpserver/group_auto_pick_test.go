@@ -383,6 +383,9 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
 		t.Fatalf("state=%q", state)
 	}
+	if !strings.Contains(state, "Current user intent") || !strings.Contains(state, "用户想：修 bug") {
+		t.Fatalf("state must include Current user intent: %q", state)
+	}
 	// Must not put raw agent ids as criteria keys
 	for k := range crit {
 		if k == "coder" || k == "lead" || k == "writer" {
@@ -1683,10 +1686,61 @@ func TestBuildAutoPickDecisionPayloadCapabilityProfilesAndFollowUp(t *testing.T)
 	if !strings.Contains(st, "写代码") && !strings.Contains(st, "码农") {
 		t.Fatalf("coding capability profile missing: %q", st)
 	}
+	// Current user intent + interrupt: newest ask wins over unfinished prior work.
+	if !strings.Contains(st, "Current user intent") || !strings.Contains(st, "用户想：再来个哭脸") {
+		t.Fatalf("state must carry Current user intent summary: %q", st)
+	}
+	if !strings.Contains(st, "newest wins") {
+		t.Fatalf("state must teach interrupt/newest-wins: %q", st)
+	}
+	if !strings.Contains(instr, "INTERRUPT") || !strings.Contains(instr, "Current user intent") {
+		t.Fatalf("instructions must teach interrupt + Current user intent: %s", instr)
+	}
 	count := q[autoPickDecisionCountKey].(map[string]any)
 	countInstr := fmt.Sprint(count["instructions"])
 	if !strings.Contains(countInstr, "FOLLOW-UP") || !strings.Contains(countInstr, "FORBIDDEN") {
 		t.Fatalf("count must teach FOLLOW-UP noul bound, got %v", count["instructions"])
+	}
+}
+
+// Langfuse peek 38529ebd (2026-10-12 17:51 CST): 「通过选择不同心情生成不同svg」
+// with Recent 「谁会写代码 | 给我写个html | Last answered by: 文章, 代码」→ SystemOne
+// choice=all @0.55 / both bots ran. State must surface Current user intent so the
+// newest specialty ask wins over unfinished prior asks (no SVG keyword needle).
+func TestBuildAutoPickDecisionPayloadCurrentUserIntentInterrupt(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	ut := "通过选择不同心情生成不同svg"
+	syn := "User: 谁会写代码 | User: 给我写个html | Last answered by: 文章 — 负责写东西与改稿…, 代码 — 负责写代码与排障…"
+	_, q, st := buildAutoPickDecisionPayload(ut, members, agents, syn, false)
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	if !strings.Contains(st, "Current user intent") {
+		t.Fatalf("missing Current user intent block: %q", st)
+	}
+	if !strings.Contains(st, "用户想："+ut) {
+		t.Fatalf("intent summary must echo latest turn: %q", st)
+	}
+	if !strings.Contains(st, "newest wins") {
+		t.Fatalf("state must teach newest-wins interrupt: %q", st)
+	}
+	if !strings.Contains(st, syn) {
+		t.Fatalf("Recent context still present for FOLLOW-UP support: %q", st)
+	}
+	if !strings.Contains(instr, "INTERRUPT") {
+		t.Fatalf("instructions missing INTERRUPT: %s", instr)
+	}
+	if !strings.Contains(instr, "Current user intent") {
+		t.Fatalf("instructions missing Current user intent: %s", instr)
+	}
+	// No SVG/HTML specialty needle reintroduction.
+	for _, dead := range []string{"SVG/HTML/CSS/JS", "要html", "改成html"} {
+		if strings.Contains(instr, dead) {
+			t.Fatalf("must not restack specialty needles %q", dead)
+		}
 	}
 }
 

@@ -269,9 +269,9 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		return nil, nil, ""
 	}
 
-	// Product path: model classifies task type from Member capability profiles + Recent
-	// context — not from ever-growing SVG/HTML/anaphora keyword needles.
-	instr := "Who should reply this turn? Classify the user message into exactly one task type, then pick opaque keys.\n" +
+	// Product path: model classifies task type from Current user intent + Member capability
+	// profiles + Recent context — not from ever-growing SVG/HTML/anaphora keyword needles.
+	instr := "Who should reply this turn? Classify Current user intent into exactly one task type, then pick opaque keys.\n" +
 		"1) ALL-HANDS: addresses the whole room (self-intro, round-robin, address-everyone, roast-everyone; " +
 		"e.g. 「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「introduce yourselves」). " +
 		"choice MUST be \"all\", count = full roster (noul near 1), HIGH probability on \"all\", even mass on every mN — never a single mN as primary.\n" +
@@ -284,13 +284,15 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		"Match the task to Member capability profiles — never park on \"all\", never pick an unrelated role. " +
 		"Research/lookup → research/资料/搜索 profiles; coding/debug/implementation → coding/写代码/排障 profiles only; " +
 		"writing/文案 → writer profiles only. Set count to how many matching profiles should reply.\n" +
-		"4) FOLLOW-UP: a short continuation of prior work (anaphora / same-task tweak). " +
+		"4) FOLLOW-UP: only when Current user intent is a short continuation of prior work (anaphora / same-task tweak). " +
 		"Use Recent context: prior USER turns + \"Last answered by\" (which bot replied last). " +
 		"Keep that same specialty role mN(s) — usually the last answering bot when their profile still fits; " +
 		"choice = that mN; count near one specialist; NEVER choice=\"all\". " +
 		"Member capability profiles remain authoritative if last answerer was a mismatch.\n" +
+		"INTERRUPT: when Current user intent is a new ask (new SPECIALTY / WHO-CAN / ALL-HANDS), newest wins — " +
+		"ignore unfinished prior USER asks and do not pick \"all\" merely because Recent shows multiple Last-answered-by bots.\n" +
 		"SINGLE / vague: one best-matching profile, or the generalist. When several specialists fit, set count and probabilities for a multi subset (not only all-or-one). " +
-		"Reserve choice=\"all\" for ALL-HANDS only — not SPECIALTY or FOLLOW-UP."
+		"Classify task type from Current user intent first. Reserve choice=\"all\" for ALL-HANDS only — not SPECIALTY or FOLLOW-UP."
 	if whoCan {
 		instr += " THIS MESSAGE IS A CAPABILITY CENSUS (who-can): follow WHO-CAN only — never treat it as ALL-HANDS. " +
 			"You MUST choose a capable mN as choice — never park on \"all\" for a specialty census. " +
@@ -336,8 +338,15 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 		},
 	}
 	var b strings.Builder
+	utterance := strings.TrimSpace(userText)
 	b.WriteString("User message:\n")
-	b.WriteString(strings.TrimSpace(userText))
+	b.WriteString(utterance)
+	// Current user intent: concise 「用户想…」 from latest turn — authoritative vs stale Recent asks.
+	if utterance != "" {
+		b.WriteString("\n\nCurrent user intent (authoritative this turn — newest ask wins over unfinished prior asks):\n")
+		b.WriteString("用户想：")
+		b.WriteString(currentUserIntentSummary(utterance))
+	}
 	b.WriteString("\n\nMember capability profiles (authoritative — match tasks to these roles):\n")
 	for _, p := range profiles {
 		if p.role != "" {
@@ -346,18 +355,36 @@ func buildAutoPickDecisionPayload(userText string, members []string, agents []*d
 			b.WriteString(fmt.Sprintf("- %s: %s\n", p.key, p.name))
 		}
 	}
-	b.WriteString("Classify task type then pick: ALL-HANDS → choice=\"all\" + full-roster count; ")
+	b.WriteString("Classify from Current user intent then pick: ALL-HANDS → choice=\"all\" + full-roster count; ")
 	b.WriteString("WHO-CAN → capable mN subset only; SPECIALTY → matching-role mNs only (not all); ")
-	b.WriteString("FOLLOW-UP → continue via Recent context (prior USER turns + Last answered by); same role mN, never choice=\"all\".")
+	b.WriteString("FOLLOW-UP → only if intent is a short continuation (prior USER turns + Last answered by); same role mN, never choice=\"all\"; ")
+	b.WriteString("new ask interrupts unfinished prior work — newest wins.")
 	if whoCan {
 		b.WriteString(" This turn is WHO-CAN: capable = profile matches the asked skill; ignore peer self-intros. ")
 		b.WriteString("Never choice=all / never full-roster count when only a subset is capable.")
 	}
 	if syn := strings.TrimSpace(synopsis); syn != "" {
-		b.WriteString("\n\nRecent context (prior USER turns + Last answered by — for FOLLOW-UP continuity; do not override Member capability profiles):\n")
+		b.WriteString("\n\nRecent context (FOLLOW-UP support only when Current user intent is a short continuation; ")
+		b.WriteString("otherwise ignore unfinished prior asks / multi Last-answered-by from a different task; do not override Member capability profiles):\n")
 		b.WriteString(syn)
 	}
 	return keyToID, questions, b.String()
+}
+
+// currentUserIntentSummary formats the latest user turn as a concise 「用户想…」 clause
+// for decide state. Echoes the utterance (clipped) — no LLM paraphrase — so SystemOne
+// classifies the newest ask ahead of stale Recent-context unfinished work.
+func currentUserIntentSummary(userText string) string {
+	s := strings.TrimSpace(userText)
+	if s == "" {
+		return ""
+	}
+	runes := []rune(s)
+	const limit = 120
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return s
 }
 
 func mapDecisionChoiceToAgentIDs(answers map[string]any, keyToID map[string]string, memberOrder []string, k int, allowMultiFromProbs bool, whoCan bool, countHint int) (ids []string, conf float64, allSelected bool, ok bool) {
