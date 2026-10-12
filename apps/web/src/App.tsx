@@ -173,7 +173,7 @@ import { AgentAvatar } from "./components/AgentAvatar";
 import { FeedbackModal, type FeedbackTarget } from "./components/FeedbackModal";
 import { TrainPanel } from "./components/TrainPanel";
 import { NewChatPopover, type CreateBotInput, type NewChatMode } from "./components/NewChatPopover";
-import { normalizePresenceStatus, resolveAvatarColor } from "./components/avatarColor";
+import { normalizePresenceStatus, resolveAvatarColor, toolNameLooksLikeSearch } from "./components/avatarColor";
 import { BotAvatarSettings } from "./components/BotAvatarSettings";
 import { ConvActionSheet } from "./components/ConvActionSheet";
 import { CreateActionSheet } from "./components/CreateActionSheet";
@@ -328,6 +328,8 @@ type ConvRunState = {
   /** Parallel group: map agent_id → local streaming bubble id */
   assistantIdsByAgent?: Record<string, string>;
   runLabel: string;
+  /** Last tool name from stream onStatus phase=tool; cleared on thinking/tool_done. §8 searching hint. */
+  activeTool: string;
   selectionKey: string; // `agent:${id}` | `channel:${id}` for sidebar busy
 };
 
@@ -534,6 +536,8 @@ export default function App() {
   taskConvIdsRef.current = taskConvIds;
   const [, setStatus] = useState(""); // chat chrome status bar removed; keep setter for clear/error paths
   const [runLabel, setRunLabel] = useState("正在思考…");
+  /** Current-view tool name for §8 searching animation variant (mirrors ConvRunState.activeTool). */
+  const [runActiveTool, setRunActiveTool] = useState("");
   /** Durable HITL: request_id awaiting tool approval. */
   const [approvalGate, setApprovalGate] = useState<{
     conversationId: string;
@@ -1412,6 +1416,25 @@ export default function App() {
     [agents, agentId],
   );
 
+  /** §8: search/retrieve tool signal this turn (stream tool name or host_activity label). */
+  const searchingHintNow = useMemo(
+    () =>
+      toolNameLooksLikeSearch(runActiveTool) || toolNameLooksLikeSearch(hostActivity),
+    [runActiveTool, hostActivity],
+  );
+
+  /**
+   * In-chat RunStatus face: prefer SSE presence; if idle while a run is live,
+   * fall back to working (tool) or thinking so RobotHead stays in sync with the row.
+   */
+  const runStatusFace = useMemo((): BotPresenceStatus => {
+    const fromSse = activeAgent ? normalizePresenceStatus(presenceByAgent[activeAgent.id]) : "idle";
+    if (fromSse !== "idle") return fromSse;
+    if (!(sending || taskBusy || viewingRunActive)) return "idle";
+    if (runActiveTool) return "working";
+    return "thinking";
+  }, [activeAgent, presenceByAgent, sending, taskBusy, viewingRunActive, runActiveTool]);
+
   const onboardingKey = useMemo(
     () => onboardingStorageKey(conversation?.id, agentId),
     [conversation?.id, agentId],
@@ -2225,12 +2248,14 @@ export default function App() {
       generation: gen,
       assistantId: null,
       runLabel: "正在思考…",
+      activeTool: "",
       selectionKey: selectionKeyForConv(conv),
     });
     bumpRunBusy();
     if (conversationRef.current?.id === conv.id) {
       setSending(true);
       setRunLabel("正在思考…");
+      setRunActiveTool("");
     }
 
     const isRunCurrent = () => {
@@ -2242,6 +2267,11 @@ export default function App() {
       const run = runsRef.current.get(conv.id);
       if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
       if (isViewingStream()) setRunLabel(label);
+    };
+    const setActiveToolForStream = (tool: string) => {
+      const run = runsRef.current.get(conv.id);
+      if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
+      if (isViewingStream()) setRunActiveTool(tool);
     };
     const ensureStreamingBubble = (agentId?: string, agentName?: string) => {
       const run = runsRef.current.get(conv.id);
@@ -2333,6 +2363,7 @@ export default function App() {
             }
             if (meta.phase === "cancelled") {
               sealStreamingMessagesForConv(conv.id);
+              setActiveToolForStream("");
               // finally clears sending when this resume gen still owns the run.
               if (isViewingStream()) {
                 setRunLabel("正在思考…");
@@ -2365,6 +2396,11 @@ export default function App() {
             if (!isRunCurrent()) return;
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
+            if (phase === "tool") {
+              setActiveToolForStream(tool || data.label || "tool");
+            } else if (phase === "thinking" || phase === "tool_done") {
+              setActiveToolForStream("");
+            }
             if (typeof data.label === "string" && data.label.trim()) {
               if (phase === "tool" && tool) {
                 setRunLabelForStream(`${data.label} · ${tool}`);
@@ -2397,6 +2433,7 @@ export default function App() {
           onDone: () => {
             if (!isRunCurrent()) return;
             sealStreamingMessagesForConv(conv.id, false);
+            setActiveToolForStream("");
             setRunLabelForStream("正在思考…");
             void listMessages(conv.id)
               .then((msgs) => {
@@ -2461,10 +2498,12 @@ export default function App() {
       setMessages(buffered);
       setSending(true);
       setRunLabel(activeRun.runLabel || "正在思考…");
+      setRunActiveTool(activeRun.activeTool || "");
       return;
     }
     setSending(false);
     setRunLabel("正在思考…");
+    setRunActiveTool("");
     if (apiMsgs) {
       const mapped = mapApiMessages(apiMsgs, nameLookup ?? agents);
       messagesByConvRef.current.set(conv.id, mapped);
@@ -2844,6 +2883,7 @@ export default function App() {
         generation: gen,
         assistantId,
         runLabel: "正在思考…",
+        activeTool: "",
         selectionKey: selectionKeyForConv(conv),
       });
       bumpRunBusy();
@@ -2859,6 +2899,12 @@ export default function App() {
         if (run && run.generation === gen && run.abort === ac) run.runLabel = label;
         if (isViewingStream()) setRunLabel(label);
       };
+      const setActiveToolForStream = (tool: string) => {
+        const run = runsRef.current.get(streamConvId!);
+        if (run && run.generation === gen && run.abort === ac) run.activeTool = tool;
+        if (isViewingStream()) setRunActiveTool(tool);
+      };
+      if (isViewingStream()) setRunActiveTool("");
       await sendMessageStream(
         conv.id,
         sendContent,
@@ -2940,6 +2986,7 @@ export default function App() {
             }
             if (meta.phase === "cancelled") {
               sealStreamingMessagesForConv(streamConvId!);
+              setActiveToolForStream("");
               // Do not setSending(false) here: localOnly supersede keeps runsRef and
               // a newer turn may already own the processing indicator. finally clears
               // sending only when this gen+abort still owns the map entry.
@@ -3001,6 +3048,7 @@ export default function App() {
             const phase = String(data.phase || "");
             const tool = typeof data.tool === "string" ? data.tool : "";
             if (phase === "waiting_approval") {
+              setActiveToolForStream("");
               setRunLabelForStream(
                 typeof data.label === "string" && data.label.trim()
                   ? data.label
@@ -3011,6 +3059,11 @@ export default function App() {
                 setApprovalGate({ conversationId: streamConvId, requestId: rid });
               }
               return;
+            }
+            if (phase === "tool") {
+              setActiveToolForStream(tool || data.label || "tool");
+            } else if (phase === "thinking" || phase === "tool_done") {
+              setActiveToolForStream("");
             }
             if (typeof data.label === "string" && data.label.trim()) {
               if (phase === "tool" && tool) {
@@ -3030,6 +3083,7 @@ export default function App() {
             if (!isRunCurrent()) return;
             sendHadError = true;
             setStatus(`错误：${msg}`);
+            setActiveToolForStream("");
             setRunLabelForStream("正在思考…");
             const run = runsRef.current.get(streamConvId!);
             const agentId = info?.agent_id;
@@ -3075,6 +3129,7 @@ export default function App() {
                   return { ...m, streaming: false, content };
                 }),
             );
+            setActiveToolForStream("");
             if (data?.waiting_approval && streamConvId) {
               const rid =
                 (typeof data.request_id === "string" && data.request_id) ||
@@ -4287,6 +4342,9 @@ export default function App() {
                           shape={focus.avatar_shape}
                           color={focus.avatar_color}
                           status={presenceByAgent[focus.id] || "idle"}
+                          searchingHint={
+                            Boolean(activeAgent && focus.id === activeAgent.id && searchingHintNow)
+                          }
                           online={isBotOnline(focus.id)}
                           onClick={() => openAvatarSettings(focus)}
                         />
@@ -4407,6 +4465,9 @@ export default function App() {
                     shape={a.avatar_shape}
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
+                    searchingHint={
+                      Boolean(activeAgent && a.id === activeAgent.id && searchingHintNow)
+                    }
                     online={isBotOnline(a.id)}
                     onClick={() => openAvatarSettings(a)}
                   />
@@ -4691,6 +4752,7 @@ export default function App() {
                       shape={p.avatar_shape}
                       color={p.avatar_color}
                       status={presenceByAgent[p.agent_id] || "idle"}
+                      searchingHint={searchingHintNow && normalizePresenceStatus(presenceByAgent[p.agent_id]) === "working"}
                       online={isBotOnline(p.agent_id, p.online)}
                     />
                   ))}
@@ -4713,6 +4775,7 @@ export default function App() {
                   shape={activeAgent?.avatar_shape}
                   color={activeAgent?.avatar_color}
                   status={(activeAgent && presenceByAgent[activeAgent.id]) || "idle"}
+                  searchingHint={searchingHintNow}
                   online={isBotOnline(activeAgent?.id)}
                   onClick={activeAgent ? () => openAvatarSettings(activeAgent) : undefined}
                 />
@@ -4826,7 +4889,13 @@ export default function App() {
             !messages.some((m) => m.role === "assistant" && m.streaming && m.content) ? (
               <RunStatus
                 label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
+                agentId={activeAgent?.id}
+                agentName={activeAgent?.name ?? "助手"}
+                shape={activeAgent?.avatar_shape}
+                avatarColor={activeAgent?.avatar_color}
                 color={resolveAvatarColor(activeAgent?.id || activeAgent?.name || "open-bot", activeAgent?.avatar_color)}
+                status={runStatusFace}
+                searchingHint={searchingHintNow}
               />
             ) : null
           ) : null}

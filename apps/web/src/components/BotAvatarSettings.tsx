@@ -32,6 +32,10 @@ const PREVIEW_STATUSES: { id: BotPresenceStatus; label: string }[] = [
   { id: "error", label: "出错" },
 ];
 
+/** Local-only §8 preview: forces searching animation while product status stays working. */
+const SEARCHING_PREVIEW_ID = "searching_anim" as const;
+type PreviewMode = BotPresenceStatus | typeof SEARCHING_PREVIEW_ID;
+
 function machineHint(m: Machine): string {
   return machinePresenceLabel(m);
 }
@@ -48,7 +52,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   const [machineId, setMachineId] = useState("");
   const [machines, setMachines] = useState<Machine[]>([]);
   const [machinesLoaded, setMachinesLoaded] = useState(false);
-  const [previewStatus, setPreviewStatus] = useState<BotPresenceStatus>("idle");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -58,7 +62,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     setShape(resolveAvatarShape(seed, agent.avatar_shape));
     setColor(resolveAvatarColor(seed, agent.avatar_color));
     setMachineId(agent.machine_id || "");
-    setPreviewStatus("idle");
+    setPreviewMode("idle");
     setErr("");
     setMachinesLoaded(false);
     let cancelled = false;
@@ -172,21 +176,30 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                   size={64}
                   shape={shape}
                   color={color}
-                  status={previewStatus}
+                  status={previewMode === SEARCHING_PREVIEW_ID ? "working" : previewMode}
+                  searchingHint={previewMode === SEARCHING_PREVIEW_ID}
                 />
                 <div className="bot-avatar-status-toggles" role="group" aria-label="预览表情">
                   {PREVIEW_STATUSES.map((s) => (
                     <button
                       key={s.id}
                       type="button"
-                      className={`bot-avatar-status-opt${previewStatus === s.id ? " active" : ""}`}
-                      onClick={() => setPreviewStatus(s.id)}
+                      className={`bot-avatar-status-opt${previewMode === s.id ? " active" : ""}`}
+                      onClick={() => setPreviewMode(s.id)}
                     >
                       {s.label}
                     </button>
                   ))}
+                  <button
+                    type="button"
+                    className={`bot-avatar-status-opt${previewMode === SEARCHING_PREVIEW_ID ? " active" : ""}`}
+                    onClick={() => setPreviewMode(SEARCHING_PREVIEW_ID)}
+                    title="产品态仍为执行(working)，仅头动画切 searching"
+                  >
+                    检索动画
+                  </button>
                 </div>
-                <div className="muted small">预览五态（仅本地试看，不改真实 presence）</div>
+                <div className="muted small">预览五态 + 检索动画变体（仅本地试看，不改真实 presence）</div>
               </div>
 
               <label className="bot-avatar-label">形状</label>

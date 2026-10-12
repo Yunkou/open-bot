@@ -63,15 +63,24 @@ export const BOT_PRESENCE_STATUSES = [
 export type BotPresenceStatus = "idle" | "thinking" | "working" | "awaiting_approval" | "error";
 
 /**
- * robot-heads states used by this product (UE lock).
- * Do NOT map to searching / speaking / happy / sleeping.
+ * robot-heads display states used by this product.
+ * Product presence stays five-only (`BotPresenceStatus`); `searching` is a
+ * working-animation variant only (§8) — never a product / SSE status.
+ * Do NOT use speaking / happy / sleeping.
  */
-export type RobotHeadState = "idle" | "thinking" | "working" | "listening" | "error";
+export type RobotHeadState =
+  | "idle"
+  | "thinking"
+  | "working"
+  | "listening"
+  | "error"
+  | "searching";
 
 /**
  * Normalize any wire/UI status to one of the five product faces.
  * Empty / missing → idle; known five pass through; anything else → working
  * (product rule: unknown status shows as working, never throws).
+ * Never returns searching / speaking / happy / sleeping.
  */
 export function normalizePresenceStatus(status?: string | null): BotPresenceStatus {
   const s = (status ?? "").trim().toLowerCase();
@@ -82,14 +91,33 @@ export function normalizePresenceStatus(status?: string | null): BotPresenceStat
 }
 
 /**
- * Map BotPresenceStatus → RobotHead state (UE hard lock).
- * idle→idle, thinking→thinking, working→working,
+ * Heuristic: tool name / host-activity / run-label looks like search/retrieve.
+ * Used only to flip RobotHead working → searching animation (§8).
+ * Does not expand product presence.
+ */
+const SEARCH_TOOL_RE =
+  /search|web_?search|websearch|browse|browser|retrieve|retrieval|grep|web_fetch|webfetch|duckduck|serp|爬取|抓取|搜索|检索|联网/i;
+
+export function toolNameLooksLikeSearch(nameOrLabel?: string | null): boolean {
+  const s = (nameOrLabel ?? "").trim();
+  if (!s) return false;
+  return SEARCH_TOOL_RE.test(s);
+}
+
+/**
+ * Map BotPresenceStatus → RobotHead state (UE hard lock + §8 variant).
+ * idle→idle, thinking→thinking, working→working (or searching if hint),
  * awaiting_approval→listening, error→error.
  * Empty → idle; unknown non-empty → working.
+ * `searchingHint` only applies when the mapped face would be `working`.
  */
-export function presenceToRobotState(status?: string | null): RobotHeadState {
+export function presenceToRobotState(
+  status?: string | null,
+  searchingHint?: boolean,
+): RobotHeadState {
   const face = normalizePresenceStatus(status);
   if (face === "awaiting_approval") return "listening";
+  if (face === "working" && searchingHint) return "searching";
   return face; // idle | thinking | working | error
 }
 

@@ -18,6 +18,12 @@ type Props = {
   shape?: string | null;
   color?: string | null;
   status?: BotPresenceStatus | string;
+  /**
+   * §8 working-animation variant only: when product status maps to `working`
+   * and this is true, RobotHead renders `state="searching"`. Does not change
+   * product presence / CSS `status-*` class (stays working).
+   */
+  searchingHint?: boolean;
   /** Green online dot (bottom-right): server-computed bot online, independent of status face. */
   online?: boolean;
   onClick?: () => void;
@@ -37,6 +43,7 @@ export function AgentAvatar({
   shape,
   color,
   status = "idle",
+  searchingHint = false,
   online = false,
   onClick,
   title,
@@ -45,7 +52,7 @@ export function AgentAvatar({
   const bg = resolveAvatarColor(seedKey, color);
   const sh = resolveAvatarShape(seedKey, shape);
   const st = normalizeStatus(status);
-  const robotState = presenceToRobotState(status);
+  const robotState = presenceToRobotState(status, searchingHint);
   const clickable = Boolean(onClick);
   const seed = avatarSeed01(seedKey);
   const small = size <= 32;
