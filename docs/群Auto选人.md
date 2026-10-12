@@ -17,10 +17,10 @@
 | `@某人` / 多 `@` | 仅被点名者（forced，不可 PASS） | **不变** |
 | `@everyone` / `@all` | 全员 forced | **不变** |
 | **无人 `@`** | 按 org `auto_pick` 模式（见 §3） | **新增** |
-| 无人 `@` 且全员意图（「都介绍下自己」等） | **heuristic**：phrase 短路全员候选；**decision**：仍调 SystemOne（`all` / 抬高 K）→ 多人 | **见 §4.1** |
-| Auto 失败 / 超时 / 无把握 | decision → **heuristic**（全员意图则全员）；heuristic 无命中 → **lead** | **fail-open 链** |
+| 无人 `@` 且全员意图（「都介绍下自己」/ roast 等） | **decision**（产品路径）：prompt 分类 → `choice=all`；**heuristic**：无短语短路（弱，仅专长/角色） | **见 §4.1** |
+| Auto 失败 / 超时 / 无把握 | decision → **heuristic**；heuristic 无命中 → **lead** | **fail-open 链** |
 
-K 默认 **1**（org 级约定；专长上限 3）。全员意图时 decision 有效 K 可抬到 `min(成员数, 8)`。Lead 始终可作为兜底，不因 Auto 静默丢回复。
+K 默认 **1**（org 级约定；专长上限 3）。`count` noul / 多路高概率可将 decision 有效 K 抬到 `min(成员数, 8)`（含全员）。Lead 始终可作为兜底，不因 Auto 静默丢回复。
 
 ## 3. 三策略 `auto_pick`（仅组织功能开关）
 
@@ -45,9 +45,10 @@ resolveGroupSendTargets / planSendTargets
   ├─ @ / @everyone / explicit → 现状（forced）
   └─ no @ → org feature_flags.auto_pick（忽略 channel）
         auto_pick=off        → 全员候选（现状）
-        auto_pick=heuristic  → 若全员意图 → 全员候选；否则 AutoPick(K) A 档
-        auto_pick=decision   → 始终 SystemOne choice（含 opaque `all` + mN）；全员意图抬高 K；
-                               choice=all → 全员；失败 → heuristic（全员意图则全员）
+        auto_pick=heuristic  → AutoPick(K) A 档（专长/角色；无 all-hands 短语短路）
+        auto_pick=decision   → 始终 SystemOne choice（含 opaque `all` + mN）；
+                               prompt 分类 all-hands/who-can/specialty；
+                               choice=all / 全员映射 → 全员 + LeadFallback；失败 → heuristic
         heuristic 无命中      → [lead]（非 forced；lead 提示「你是兜底，请回答」）
 ```
 
@@ -70,7 +71,7 @@ resolveGroupSendTargets / planSendTargets
 - **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
 - **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集
 - **映射**：`choice=all` → 频道顺序展开全部 `agent_id`（**who-can 例外**：按 mN 概率 + `count` 取有能力子集，不展开全员）；否则仅接受 `mN`；按 probability 降序、≥ θ（who-can 用相对阈值）取 top-N；`count` noul→1..N 定人数；无 count / who-can 时可由多路高概率推断多人（不必 `all`）
-- **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 全员意图 / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）
+- **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）；**无**短语抬 K
 - **置信度**：`max(confidence, probs[choice])`；who-can 从 `all` 重映射时再考虑 `probs[all]` / 所选 mN 合计，避免低 `confidence` 字段误 fail-open；再否则 0.55
 - **调用路径**：API `planSendTargets` → runtime `POST /v1/decision/decide` → factory（Jev / Laya / Unsloth SystemOne）
 - **超时**：约 8s
@@ -83,38 +84,30 @@ resolveGroupSendTargets / planSendTargets
 
 ## 4.1 全员意图（all-hands）
 
-无人 `@` 时，若用户话术明确要求**每位成员发言**（自我介绍 / 轮流说）：
+无人 `@` 时，用户话术要求**每位成员发言**（自我介绍 / 轮流 / 面向全场吐槽）：
 
 | 模式 | 行为 |
 |---|---|
-| **heuristic** | phrase 短路 → 全员；每人 `LeadFallback`（须作答，禁止 candidacy `[PASS]`） |
-| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；**Prompt 强制** `choice=all`、count=全员、高概率质量压在 `all`（「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」）；**信任模型映射**（无 underpick→全员结构展开）。选出后每人 `LeadFallback` + `AllowSecondFailOpen=false`。与 who-can 子集互斥 |
+| **decision**（**产品路径**） | **调用** SystemOne；criteria 含 `all`；**prompt 始终**教模型分类 ALL-HANDS vs WHO-CAN vs SPECIALTY（示例含「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」）。模型应 `choice=all`、count=全员、高概率质量压在 `all`。**信任模型映射**（无 underpick→全员结构展开；**无** `isAllHandsIntent` 短语门控）。 |
+| **heuristic** | **无** all-hands 短语短路（弱路径，仅专长/角色匹配）。全员介绍 / roast 请用 decision 模式。 |
 
-**Prompt 驱动（all-hands）**：`buildAutoPickDecisionPayload` 在 all-hands 时强化 instructions / count noul / state——必须 `choice="all"`、noul near 1、禁止单 mN；示例含「都介绍下自己」「大家都介绍一下」「在座的各位都是辣鸡」「各位都是…」（address/roast）。已移除 `all_hands_expand` 在 choice≠all 时强制展开全员的路径。
+**Prompt 驱动（替代短语列表）**：`buildAutoPickDecisionPayload` **始终**写入 ALL-HANDS / WHO-CAN / SPECIALTY 分类指令与 count 规则——不再靠 `Contains` 短语列表切换 framing。已删除 `isAllHandsIntent` 及 fixed/collective/action 词表；已移除 heuristic `*->all_hands` 短路与 decision 失败时的 `*->all_hands` fail-open。
 
-**短语检测**（`isAllHandsIntent`）仍用于：heuristic 短路、decision 抬高 K / 加强指令、decision 失败时 fail-open 全员。
+**薄结构安全（非短语）**：
 
-**PASS / 二次 fail-open（all-hands，结构安全）**：全员介绍选出的每位成员标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「文章+代码都 PASS → 全员沉默」——14:25 CST「大家都介绍下自己」即此（Langfuse decision peek `f24b88df`，runs `9bd33f4a` / `aeb5cffa`）。decision 成功 / fail-open `*->all_hands` / heuristic 短路均适用。另：`choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
+- 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。
+- decision 解析失败 / 超时 / 低置信 → 普通 **heuristic** fail-open（`decision->heuristic`），**不**因话术展开全员。
+- `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
+
+否则会出现「文章+代码都 PASS → 全员沉默」——14:25 CST「大家都介绍下自己」（Langfuse peek `f24b88df`，runs `9bd33f4a` / `aeb5cffa`）。
 
 **日志：**
 
-- `auto_pick=heuristic->all_hands ids=[…] conf=1.00 fallback=all`
-- `auto_pick=decision ids=[…] conf=… fallback=all`（`choice=all`，已调 SystemOne）
-- `auto_pick=decision ids=[…] conf=… fallback=`（多人但非 `all`，如抬高 K + probabilities）
-- `auto_pick=decision->heuristic->all_hands …`（decision 失败 + 全员短语 → 全员）
+- `auto_pick=decision ids=[…] conf=… fallback=all`（`choice=all` / 全员映射）
+- `auto_pick=decision ids=[…] conf=… fallback=`（多人但非全员）
+- `auto_pick=decision->heuristic …`（decision 失败 → 普通 heuristic）
 
-**覆盖短语（示例，非穷尽）：**
-
-| 类 | 例子 |
-|---|---|
-| 集体 + 介绍 | 「都介绍下自己」「大家介绍一下」「各位介绍」「各自介绍」「每人介绍」「轮流介绍」 |
-| 集体 + 说说 | 「都说说」「大家都说一下」「轮流发言」 |
-| 在座 / 吐槽全员 | 「在座的各位都是辣鸡」「各位都是…」「大家都是…」「你们都是…」 |
-| 英文 | `everyone introduce` / `introduce yourselves` / `all of you are` |
-
-**不命中（仍走专长选人）：** 「介绍一下」「介绍一下码农」「都很好」「东西都是坏的」「帮我写个函数」。
-
-**已知漏检（2026-10-12 15:30 CST）**：Langfuse decision `53cd5422` / trace `7abb3a17`，「在座的各位都是辣鸡」未进 all-hands → specialty 框 → `choice=m0` 仅文章答。已扩 `isAllHandsIntent`（在座的各位 / 各位都是…）+ prompt 示例。
+**历史漏检（已用 prompt 方案取代短语扩表）**：2026-10-12 15:30 CST Langfuse `53cd5422` / `7abb3a17`，「在座的各位都是辣鸡」曾因短语漏检走 specialty → `choice=m0`。现靠 decide prompt 中的 roast/address-everyone 示例约束模型输出 `choice=all`，不再维护 roast 关键词列表。
 
 `@everyone` / `@all` 仍走强制全员（不可 PASS），与本路径无关。
 
@@ -136,7 +129,7 @@ resolveGroupSendTargets / planSendTargets
 
 **PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `LeadFallback` + `AllowSecondFailOpen=false`。否则会出现「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST「写个js的代码…」即此（Langfuse `a32fde27` / obs `5808f45a`）。heuristic 与 decision 成功路径均适用。
 
-**短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
+**短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 
 **日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
 
@@ -150,7 +143,7 @@ resolveGroupSendTargets / planSendTargets
 
 ## 6. 文案 / 可观测
 
-- 内部日志：`auto_pick=decision ids=… conf=… fallback=`（含 `fallback=all`）；失败时 `auto_pick=decision->heuristic …`；全员短语 + decision 失败 `decision->heuristic->all_hands`；heuristic 全员 `heuristic->all_hands`  
+- 内部日志：`auto_pick=decision ids=… conf=… fallback=`（含 `fallback=all`）；失败时 `auto_pick=decision->heuristic …`（无短语 `*->all_hands`）  
 - 用户侧不展示选人过程；可选调试：`show_reply_candidates`（默认关；无客户端群设置 UI 要求）。
 - **永不**在用户气泡泄漏 Auto / PASS 等内部词。
 
@@ -181,8 +174,8 @@ resolveGroupSendTargets / planSendTargets
 
 1. 「@码农 修 bug」→ 仅码农，无 Auto。  
 2. 「大家介绍自己」`@everyone` → 全员 forced。  
-2b. 「都介绍下自己」无人 `@` + **heuristic** → 全员候选，日志 `heuristic->all_hands`。  
-2c. 「都介绍下自己」无人 `@` + **decision** → **调用** SystemOne；`choice=all`（或抬高 K）→ 全员 / 多人；日志 `auto_pick=decision … fallback=all`；失败则 `decision->heuristic->all_hands`。  
+2b. 「都介绍下自己」无人 `@` + **heuristic** → **无**短语全员短路（弱路径）。  
+2c. 「都介绍下自己」无人 `@` + **decision** → **调用** SystemOne；prompt 分类 ALL-HANDS → 模型 `choice=all` → 全员 + LeadFallback；日志 `auto_pick=decision … fallback=all`；失败则 `decision->heuristic`。  
 3. 「帮我写个函数」无人 `@` + heuristic → 优先角色匹配的 1 人；其 PASS → lead 补答。  
 4. heuristic 无命中 → 仅 lead 答，不出现空回合。  
 5. org `auto_pick=off` → 与今日全员+PASS 一致。  

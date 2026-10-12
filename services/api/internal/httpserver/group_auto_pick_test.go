@@ -350,7 +350,7 @@ func TestAutoPickDecisionErrorsFailOpenHeuristic(t *testing.T) {
 
 func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	members, agents := testGroupAgents()
-	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false, false)
+	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false)
 	if keyToID["m0"] != "lead" || keyToID["m1"] != "coder" || keyToID["m2"] != "writer" {
 		t.Fatalf("keyToID=%#v", keyToID)
 	}
@@ -389,8 +389,8 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 			t.Fatalf("leaked agent id as key: %s", k)
 		}
 	}
-	// allHands strengthens instructions: must force choice=all / full roster / high mass on all
-	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
+	// Prompt always teaches ALL-HANDS classification (no phrase gate): choice=all / full roster / high mass on all
+	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", false)
 	pick2 := q2["pick"].(map[string]any)
 	instr2 := fmt.Sprint(pick2["instructions"])
 	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", "在座的各位都是辣鸡", `choice="all"`, "never a single mN", "HIGH probability"} {
@@ -400,7 +400,7 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	}
 	count2 := q2[autoPickDecisionCountKey].(map[string]any)
 	countInstr2 := fmt.Sprint(count2["instructions"])
-	for _, needle := range []string{"ALL-HANDS count", "near 1", "都介绍下自己", "在座的各位都是辣鸡"} {
+	for _, needle := range []string{"ALL-HANDS", "near 1", "都介绍下自己", "在座的各位都是辣鸡"} {
 		if !strings.Contains(countInstr2, needle) {
 			t.Fatalf("all-hands count instructions missing %q: %s", needle, countInstr2)
 		}
@@ -409,7 +409,7 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 		t.Fatalf("all-hands state missing roster mandate: %q", st2)
 	}
 	// who-can: prompt must drive specific mN + capable count (no role-match remap later)
-	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", false, true)
+	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", true)
 	pick3 := q3["pick"].(map[string]any)
 	instr3 := fmt.Sprint(pick3["instructions"])
 	for _, needle := range []string{"CAPABILITY CENSUS", "谁会写代码", "写代码", "查资料", "criteria", "never park on", "NEAR-ZERO"} {
@@ -463,83 +463,35 @@ func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
 	}
 }
 
-func TestDecisionEffectiveKAllHandsRaises(t *testing.T) {
-	if got := decisionEffectiveK(1, 5, false, 0); got != 1 {
+func TestDecisionEffectiveKCountHintRaises(t *testing.T) {
+	if got := decisionEffectiveK(1, 5, 0); got != 1 {
 		t.Fatalf("specialty k=1 → %d", got)
 	}
-	if got := decisionEffectiveK(2, 5, false, 0); got != 2 {
+	if got := decisionEffectiveK(2, 5, 0); got != 2 {
 		t.Fatalf("specialty k=2 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 5, true, 0); got != 5 {
-		t.Fatalf("all-hands 5 members → %d", got)
+	// No phrase-gated all-hands K bump: full roster comes from countHint / choice=all mapping.
+	if got := decisionEffectiveK(1, 5, 5); got != 5 {
+		t.Fatalf("countHint=5 of 5 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 12, true, 0); got != autoPickAllHandsMaxK {
-		t.Fatalf("all-hands 12 members capped → %d", got)
+	if got := decisionEffectiveK(1, 12, 12); got != autoPickAllHandsMaxK {
+		t.Fatalf("countHint=12 capped → %d", got)
 	}
-	if got := decisionEffectiveK(1, 3, false, 2); got != 2 {
+	if got := decisionEffectiveK(1, 3, 2); got != 2 {
 		t.Fatalf("countHint=2 of 3 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 3, false, 3); got != 3 {
+	if got := decisionEffectiveK(1, 3, 3); got != 3 {
 		t.Fatalf("countHint=3 of 3 → %d", got)
 	}
 }
 
-func TestIsAllHandsIntent(t *testing.T) {
-	positives := []string{
-		"都介绍下自己",
-		"都介绍一下自己",
-		"大家介绍一下",
-		"大家介绍自己",
-		"各位介绍一下",
-		"各自介绍一下",
-		"都说说",
-		"大家都说说",
-		"每人介绍一下",
-		"轮流介绍",
-		"在座的各位都是辣鸡",
-		"在座的各位",
-		"各位都是笨蛋",
-		"大家都是天才",
-		"你们都是辣鸡",
-		"everyone introduce yourselves",
-		"Please all introduce yourselves",
-		"everybody introduce",
-		"all of you are trash",
-	}
-	for _, p := range positives {
-		if !isAllHandsIntent(p) {
-			t.Fatalf("want all-hands for %q", p)
-		}
-	}
-	negatives := []string{
-		"",
-		"帮我写个函数",
-		"谁会写代码",
-		"介绍一下码农",
-		"介绍一下",
-		"都很好",
-		"大家好",
-		"随便聊聊天气",
-		"东西都是坏的", // bare 都+都是, no strong address collective
-		"@码农 介绍一下",
-	}
-	for _, n := range negatives {
-		if isAllHandsIntent(n) {
-			t.Fatalf("want NOT all-hands for %q", n)
-		}
-	}
-}
-
-
 // Production 2026-10-12 15:30 CST Langfuse decision span=53cd5422 / trace=7abb3a17:
-// 「在座的各位都是辣鸡」 was framed as SPECIALTY (isAllHandsIntent miss) → choice=m0
-// noul≈0.98 / conf field 0.055 / only 文章 answered. Address/roast must be all-hands:
-// prompt forces choice=all; heuristic short-circuits; LeadFallback on roster; no specialty.
+// 「在座的各位都是辣鸡」 was framed as SPECIALTY when phrase-gated isAllHandsIntent missed it.
+// New scheme: no phrase gate — decide prompt always teaches ALL-HANDS (roast examples);
+// healthy model returns choice=all → LeadFallback on full roster. Heuristic has no
+// all-hands keyword short-circuit (decision mode is the product path).
 func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
 	const utterance = "在座的各位都是辣鸡"
-	if !isAllHandsIntent(utterance) {
-		t.Fatalf("want all-hands for roast address-everyone %q", utterance)
-	}
 	if isWhoCanIntent(utterance) {
 		t.Fatalf("roast must not be who-can: %q", utterance)
 	}
@@ -550,13 +502,10 @@ func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
 		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
 	}
 
-	// Heuristic: phrase short-circuit → all + LeadFallback.
+	// Heuristic: no phrase short-circuit — does not expand to all via keyword lists.
 	gotH := runAutoPickByMode(db.AutoPickHeuristic, utterance, members, agents, "writer", 1, "", nil)
-	if gotH.Method != "heuristic->all_hands" || len(gotH.AgentIDs) != 2 {
-		t.Fatalf("heuristic all-hands: %#v", gotH)
-	}
-	if !gotH.LeadFallback["writer"] || !gotH.LeadFallback["coder"] || gotH.AllowSecondFailOpen {
-		t.Fatalf("heuristic LeadFallback both, no second-wave: %#v", gotH)
+	if strings.Contains(gotH.Method, "all_hands") {
+		t.Fatalf("heuristic must not phrase-gate all-hands, got %#v", gotH)
 	}
 
 	var sawAllHandsPrompt bool
@@ -567,16 +516,13 @@ func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
 			instr := fmt.Sprint(pick["instructions"])
 			st := fmt.Sprint(state)
 			if !strings.Contains(instr, "ALL-HANDS") || !strings.Contains(instr, "在座的各位都是辣鸡") {
-				t.Fatalf("roast must get all-hands prompt, not specialty; instr=%s", instr)
-			}
-			if strings.Contains(st, "SPECIALTY TASK") || strings.Contains(st, "For specialty tasks") {
-				t.Fatalf("roast must not use specialty state framing: %q", st)
+				t.Fatalf("roast must get all-hands prompt classification; instr=%s", instr)
 			}
 			if !strings.Contains(st, `choice must be "all"`) {
 				t.Fatalf("all-hands state missing: %q", st)
 			}
 			sawAllHandsPrompt = true
-			// Healthy model response after prompt fix.
+			// Healthy model response after prompt-driven classification.
 			return map[string]any{
 				"pick": map[string]any{
 					"type":          "choice",
@@ -590,20 +536,21 @@ func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", deps)
 	if !sawAllHandsPrompt {
-		t.Fatal("decide must see all-hands-strengthened payload for roast")
+		t.Fatal("decide must see always-on all-hands classification in payload")
 	}
 	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 2 {
 		t.Fatalf("decision roast → all members, got %#v", got)
 	}
 	if !got.LeadFallback["writer"] || !got.LeadFallback["coder"] || got.AllowSecondFailOpen {
-		t.Fatalf("all-hands LeadFallback + no second-wave: %#v", got)
+		t.Fatalf("choice=all LeadFallback + no second-wave: %#v", got)
 	}
 	if got.Confidence < autoPickConfidenceFloor {
 		t.Fatalf("diluted conf should lift above floor, got %.2f", got.Confidence)
 	}
 
-	// Production underpick shape (choice=m0, noul≈1, low conf field): still all-hands
-	// prompt path; trust model (no structural expand); low conf → fail-open all_hands OK.
+	// Production underpick shape (choice=m0, noul≈1, low conf field): trust model
+	// (no structural expand to roster). Low conf → ordinary heuristic fail-open
+	// (not phrase-gated all_hands).
 	depsUnder := &autoPickDecisionDeps{
 		Provider: "unsloth",
 		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
@@ -622,27 +569,26 @@ func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
 		},
 	}
 	gotU := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", depsUnder)
-	// Prompt-only: either decision trusts underpick (possibly 1 id) OR low-conf/heuristic
-	// fail-open → all_hands roster. Must never silently specialty-pick without all-hands path.
+	if strings.Contains(gotU.Method, "all_hands") {
+		t.Fatalf("must not phrase-gate fail-open to all_hands, got %#v", gotU)
+	}
 	if gotU.Method == "decision" {
-		// Underpick trusted: LeadFallback on selected; must have gone through allHands branch.
 		if len(gotU.AgentIDs) == 0 {
 			t.Fatalf("empty decision ids: %#v", gotU)
 		}
-		for _, id := range gotU.AgentIDs {
-			if !gotU.LeadFallback[id] {
-				t.Fatalf("all-hands decision must LeadFallback selected, got %#v", gotU)
+		// Full roster via multi/count → LeadFallback; underpick subset may or may not.
+		if len(gotU.AgentIDs) >= len(members) {
+			for _, id := range gotU.AgentIDs {
+				if !gotU.LeadFallback[id] {
+					t.Fatalf("full-roster decision must LeadFallback selected, got %#v", gotU)
+				}
+			}
+			if gotU.AllowSecondFailOpen {
+				t.Fatalf("full roster must disable second fail-open: %#v", gotU)
 			}
 		}
-		if gotU.AllowSecondFailOpen {
-			t.Fatalf("all-hands must disable second fail-open: %#v", gotU)
-		}
-	} else if strings.Contains(gotU.Method, "all_hands") {
-		if len(gotU.AgentIDs) != 2 || !gotU.LeadFallback["writer"] || !gotU.LeadFallback["coder"] {
-			t.Fatalf("fail-open all_hands roster: %#v", gotU)
-		}
-	} else {
-		t.Fatalf("roast underpick must stay on all-hands path, got %#v", gotU)
+	} else if !strings.HasPrefix(gotU.Method, "decision->heuristic") {
+		t.Fatalf("underpick low-conf should fail-open heuristic, got %#v", gotU)
 	}
 }
 
@@ -707,7 +653,8 @@ func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickAllHandsDecisionFailOpenAll(t *testing.T) {
+func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
+	// Decide failure fail-opens to ordinary heuristic — not phrase-gated all_hands roster.
 	members, agents := testGroupAgents()
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
@@ -716,19 +663,11 @@ func TestRunAutoPickAllHandsDecisionFailOpenAll(t *testing.T) {
 		},
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, "大家介绍一下", members, agents, "lead", 1, "", deps)
-	if got.Method != "decision->heuristic->all_hands" {
-		t.Fatalf("method=%s", got.Method)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("method=%s want decision->heuristic (no phrase all_hands)", got.Method)
 	}
-	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
-		t.Fatalf("want all members on fail-open, got %#v fallback=%s", got.AgentIDs, got.Fallback)
-	}
-	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("fail-open all-hands must LeadFallback %s, got %#v", id, got.LeadFallback)
-		}
-	}
-	if got.AllowSecondFailOpen {
-		t.Fatal("all-hands must not AllowSecondFailOpen")
+	if strings.Contains(got.Method, "all_hands") {
+		t.Fatalf("must not phrase-gate fail-open: %#v", got)
 	}
 }
 
@@ -763,7 +702,6 @@ func TestRunAutoPickAllHandsDecisionMultiViaRaisedK(t *testing.T) {
 		}
 	}
 }
-
 
 // Production 14:25 CST 「大家都介绍下自己」 (Langfuse decision peek=f24b88df,
 // runs 9bd33f4a/aeb5cffa): SystemOne choice=all + noul≈0.89 + confidence≈0.10 +
@@ -811,21 +749,15 @@ func TestAllHandsIntroLowConfStillLeadFallback(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickAllHandsHeuristic(t *testing.T) {
+func TestRunAutoPickHeuristicNoAllHandsPhraseShortCircuit(t *testing.T) {
+	// Heuristic is weak for intro/roast: no keyword short-circuit to full roster.
+	// Decision mode + prompt is the product path for all-hands.
 	members, agents := testGroupAgents()
 	got := runAutoPickByMode(db.AutoPickHeuristic, "大家介绍一下", members, agents, "lead", 1, "", nil)
-	if got.Method != "heuristic->all_hands" {
-		t.Fatalf("method=%s", got.Method)
+	if strings.Contains(got.Method, "all_hands") {
+		t.Fatalf("heuristic must not phrase-gate all-hands, got %#v", got)
 	}
-	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
-		t.Fatalf("want all members, got %#v fallback=%s", got.AgentIDs, got.Fallback)
-	}
-	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("heuristic all-hands must LeadFallback %s, got %#v", id, got.LeadFallback)
-		}
-	}
-	// Contrast: specialty question still picks coder, not all.
+	// Specialty question still picks coder, not all.
 	got2 := runAutoPickByMode(db.AutoPickHeuristic, "帮我写个函数", members, agents, "lead", 1, "", nil)
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "coder" {
 		t.Fatalf("specialty should still pick coder, got %#v", got2.AgentIDs)
@@ -1319,7 +1251,7 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 					t.Fatalf("all-hands pick instructions missing %q: %s", needle, instr)
 				}
 			}
-			if !strings.Contains(countInstr, "ALL-HANDS count") || !strings.Contains(countInstr, "near 1") {
+			if !strings.Contains(countInstr, "ALL-HANDS") || !strings.Contains(countInstr, "near 1") {
 				t.Fatalf("all-hands count instructions weak: %s", countInstr)
 			}
 			if !strings.Contains(st, `choice must be "all"`) {
@@ -1433,33 +1365,39 @@ func TestAutoPickHeuristicWhoCanBothResearchers(t *testing.T) {
 	}
 }
 
-
 func TestBuildAutoPickDecisionPayloadSpecialtyResearchTask(t *testing.T) {
 	members, agents := testGroupAgents()
-	_, q, st := buildAutoPickDecisionPayload("帮我查下2026年优锘科技的发展", members, agents, "谁不会写代码：22和44查资料", false, false)
+	_, q, st := buildAutoPickDecisionPayload("帮我查下2026年优锘科技的发展", members, agents, "谁不会写代码：22和44查资料", false)
 	pick := q["pick"].(map[string]any)
 	instr := fmt.Sprint(pick["instructions"])
-	for _, needle := range []string{"SPECIALTY TASK", "帮我查下", "research", "never park on", "22+44", "not the coder"} {
+	// Always-on classification prompt includes ALL-HANDS + WHO-CAN + SPECIALTY (no phrase gate).
+	for _, needle := range []string{"SPECIALTY TASK", "ALL-HANDS", "WHO-CAN", "帮我查下", "research", "never park on", "22+44", "not the coder"} {
 		if !strings.Contains(instr, needle) {
-			t.Fatalf("specialty instructions missing %q: %s", needle, instr)
+			t.Fatalf("classification instructions missing %q: %s", needle, instr)
 		}
 	}
 	count := q[autoPickDecisionCountKey].(map[string]any)
 	countInstr := fmt.Sprint(count["instructions"])
-	if !strings.Contains(countInstr, "SPECIALTY TASK count") || !strings.Contains(countInstr, "FORBIDDEN") {
+	if !strings.Contains(countInstr, "SPECIALTY") || !strings.Contains(countInstr, "FORBIDDEN") {
 		t.Fatalf("specialty count instructions=%v", count["instructions"])
 	}
-	if !strings.Contains(st, "specialty tasks") || !strings.Contains(st, "research mNs only") {
+	if !strings.Contains(st, "SPECIALTY") || !strings.Contains(st, "matching role mNs only") {
 		t.Fatalf("specialty state missing mandate: %q", st)
 	}
-	// who-can / all-hands must NOT get specialty block
-	_, qWho, _ := buildAutoPickDecisionPayload("谁会写代码", members, agents, "", false, true)
-	if strings.Contains(fmt.Sprint(qWho["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
-		t.Fatal("who-can must not append SPECIALTY TASK block")
+	// who-can still gets extra census emphasis (and criteria[all] discourage).
+	_, qWho, _ := buildAutoPickDecisionPayload("谁会写代码", members, agents, "", true)
+	whoInstr := fmt.Sprint(qWho["pick"].(map[string]any)["instructions"])
+	if !strings.Contains(whoInstr, "THIS MESSAGE IS A CAPABILITY CENSUS") {
+		t.Fatal("who-can must append census emphasis")
 	}
-	_, qAll, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
-	if strings.Contains(fmt.Sprint(qAll["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
-		t.Fatal("all-hands must not append SPECIALTY TASK block")
+	// Intro utterance (whoCan=false) still sees always-on ALL-HANDS classification.
+	_, qAll, stAll := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", false)
+	allInstr := fmt.Sprint(qAll["pick"].(map[string]any)["instructions"])
+	if !strings.Contains(allInstr, "ALL-HANDS") || !strings.Contains(allInstr, "在座的各位都是辣鸡") {
+		t.Fatalf("intro payload must teach ALL-HANDS, got %s", allInstr)
+	}
+	if !strings.Contains(stAll, `choice must be "all"`) {
+		t.Fatalf("intro state must mandate choice=all: %q", stAll)
 	}
 }
 
@@ -1486,7 +1424,6 @@ func TestAutoPickHeuristicResearchLookupYouNuo(t *testing.T) {
 		t.Fatalf("want research 22+44 only (not lead/coder 33), got %#v", got.AgentIDs)
 	}
 }
-
 
 // Production 2026-10-12 12:35 CST Langfuse peek/obs=3569c5ef947ad07a (trace 38cb71ea…):
 // 「帮我查下2025年格灵深瞳的年报」— c5c5231 SPECIALTY TASK prompt was loaded, but SystemOne
