@@ -123,6 +123,8 @@ resolveGroupSendTargets / planSendTargets
 
 **Role-match 纠偏（who-can）**：decision 映射后若含无能力成员 / 漏选 / `choice=all` 且 mN 被 `all` 稀释，改用 `capableIDsFromRoleMatch`（**仅 user 文本**打分，忽略 synopsis，过滤通用词「负责」等 + 相对分阈值），避免 Recent context 里同伴自介污染导致 coder 进普查。
 
+**PASS / 二次 fail-open（who-can）**：有能力子集一经选出，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。
+
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍（`isAllHandsIntent`）互斥场景：前者要**有能力子集**，后者要**每位发言**。
 
 **日志：** `auto_pick=decision ids=[…] conf=… choice=… count=… probs=map[…] fallback=`
@@ -132,7 +134,7 @@ resolveGroupSendTargets / planSendTargets
 ## 5. 与 PASS / 全员候选并存
 
 - 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑。  
-- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。  
+- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**who-can 例外**：有能力子集关闭二次 fail-open，并强制候选作答（见 §4.2）。  
 - 开关：仅 org `feature_flags_json.auto_pick` 三态；默认 **heuristic**。
 
 ## 6. 文案 / 可观测

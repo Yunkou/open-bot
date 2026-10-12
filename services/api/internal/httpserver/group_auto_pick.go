@@ -225,14 +225,23 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	for i := 0; i < n; i++ {
 		ids = append(ids, ranked[i].id)
 	}
+	leadFB := map[string]bool{}
+	allowSecond := true
+	if isWhoCanIntent(userText) {
+		// Same as decision who-can: capable must speak; no second-wave dump.
+		allowSecond = false
+		for _, id := range ids {
+			leadFB[id] = true
+		}
+	}
 	log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
 	return groupAutoPickResult{
 		AgentIDs:            ids,
 		Confidence:          conf,
 		Method:              method,
 		Fallback:            "",
-		LeadFallback:        map[string]bool{},
-		AllowSecondFailOpen: true,
+		LeadFallback:        leadFB,
+		AllowSecondFailOpen: allowSecond,
 	}
 }
 

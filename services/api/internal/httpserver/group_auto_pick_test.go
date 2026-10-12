@@ -836,7 +836,14 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	if !set["22"] || !set["44"] || set["33"] {
 		t.Fatalf("want 22+44, got %#v", got.AgentIDs)
 	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can must not AllowSecondFailOpen")
+	}
+	if !got.LeadFallback["22"] || !got.LeadFallback["44"] || got.LeadFallback["33"] {
+		t.Fatalf("leadFallback want 22+44, got %#v", got.LeadFallback)
+	}
 }
+
 
 
 func TestAutoPickDecisionWhoCanDilutedAllPrefersRoleMatch(t *testing.T) {

@@ -151,11 +151,21 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 
 	fallback := ""
 	allowSecond := true
+	leadFB := map[string]bool{}
 	if allSelected {
 		fallback = "all"
 		allowSecond = false
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=all", method, ids, conf, choiceKey, countHint, probs)
 	} else {
+		// Who-can census: capable picks must answer (leadFallback prompt) and must not
+		// second-fail-open into the remaining channel (incapable peers). Production
+		// 11:41 CST 「谁会写代码」mapped to 33 only, then 33 [PASS] → 22+44 spoke.
+		if whoCan {
+			allowSecond = false
+			for _, id := range ids {
+				leadFB[id] = true
+			}
+		}
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)
 	}
 	return groupAutoPickResult{
@@ -163,7 +173,7 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 		Confidence:          conf,
 		Method:              method,
 		Fallback:            fallback,
-		LeadFallback:        map[string]bool{},
+		LeadFallback:        leadFB,
 		AllowSecondFailOpen: allowSecond,
 	}, true
 }
