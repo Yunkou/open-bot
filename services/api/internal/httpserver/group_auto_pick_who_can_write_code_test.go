@@ -10,8 +10,8 @@ import (
 func TestAutoPickDecisionWhoCanWriteCodeOnlyCoder(t *testing.T) {
 	// Production 2026-10-12 11:41 CST needed only coder 33. Prompt now teaches SystemOne
 	// to pick that mN (not choice=all). Mock the desired model output; mapping must trust
-	// choice+count+probs (no role-match remap). Capable picks: AllowSecondFailOpen=false
-	// so a [PASS] cannot second-wave dump 22+44; no LeadFallback (candidacy PASS ok).
+	// choice+count+probs (no role-match remap). Capable picks: LeadFallback (forbid PASS)
+	// + AllowSecondFailOpen=false so a [PASS] cannot silence or second-wave dump 22+44.
 	coder := "635d1077-5611-41bb-9fcf-2a4454d43d5a"
 	r22 := "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf"
 	r44 := "f634df70-8e30-4f71-9415-c7f80a8c0ec3"
@@ -51,8 +51,11 @@ func TestAutoPickDecisionWhoCanWriteCodeOnlyCoder(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("who-can capable pick must not AllowSecondFailOpen (PASS must not dump peers)")
 	}
-	if got.LeadFallback[coder] || got.LeadFallback[r22] || got.LeadFallback[r44] {
-		t.Fatalf("who-can must not LeadFallback anyone, got %#v", got.LeadFallback)
+	if !got.LeadFallback[coder] {
+		t.Fatalf("coder must be LeadFallback so participation forbids PASS, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback[r22] || got.LeadFallback[r44] {
+		t.Fatalf("researchers must not be LeadFallback, got %#v", got.LeadFallback)
 	}
 }
 
@@ -109,8 +112,11 @@ func TestAutoPickDecisionWhoCanCodingRejectsWriter(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("who-can capable pick must not AllowSecondFailOpen")
 	}
-	if got.LeadFallback[coder] || got.LeadFallback[writer] {
-		t.Fatalf("who-can must not LeadFallback after rematch, got %#v", got.LeadFallback)
+	if !got.LeadFallback[coder] {
+		t.Fatalf("coder must be LeadFallback after rematch, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback[writer] {
+		t.Fatalf("writer must not be LeadFallback after rematch, got %#v", got.LeadFallback)
 	}
 }
 

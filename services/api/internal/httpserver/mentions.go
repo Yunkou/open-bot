@@ -284,9 +284,9 @@ func groupParticipationExtraSystemMode(forced, leadFallback bool, self *db.Agent
 	}
 	if leadFallback {
 		// Explicitly forbid [PASS] (same as forced). Soft "不要沉默" alone was not enough
-		// when models still emit [PASS] from training on true all-hands. Only applied when
-		// AutoPick marks LeadFallback (all-hands / intentional must-answer) — not who-can
-		// or specialty, where off-topic selected bots must still be allowed to [PASS].
+		// when models still emit [PASS] from training. Applied when AutoPick marks
+		// LeadFallback: all-hands, intentional must-answer (lead/second fail-open), and
+		// who-can capable picks. Specialty keeps candidacy [PASS] for mis-selected bots.
 		return "【群聊参与】你在群聊中。本回合需要你来回答用户。请直接给出有帮助的回复，不要输出 [PASS]，也不要只打招呼敷衍。"
 	}
 	selfID := ""

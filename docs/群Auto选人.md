@@ -95,7 +95,7 @@ resolveGroupSendTargets / planSendTargets
 
 **薄结构安全（非 all-hands 短语表）**：
 
-- 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。**仅此**（及 lead / 二次 fail-open）为硬 must-answer；who-can / specialty / 宽 fail-open-all **不**标 LeadFallback。
+- 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。另：who-can 有能力子集也标 `LeadFallback`（census 必答；否则 candidacy `[PASS]` + 关二次 fail-open → 沉默）。lead / 二次 fail-open 同样硬 must-answer。specialty / 宽 fail-open-all **不**标 LeadFallback。
 - **不信任 underpick count→全员**：`choice=mN` 即使 `count ≥ 成员数` 且 `probs[all]` 偏高也**不**展开全员（已移除 `full_roster_count_expand`）。**仅**显式 `choice=all`（或映射已覆盖全员）→ 全员 + LeadFallback。peek `a0233dbd`「写个html…canvas」靠关掉 count-expand 避免双 bot must-answer；若 wrong m0，specialty-mismatch 可再 fail-open 到 capable（次要，非主路径）。
 - decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员候选**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」），但 **不** LeadFallback——宽路径里无关 bot 仍可 candidacy `[PASS]`。成功 `choice=all` 才硬禁 PASS。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
@@ -127,7 +127,7 @@ resolveGroupSendTargets / planSendTargets
 
 **映射硬化（who-can，已批准的 all→capable 重映射）**：`choice=all` + `count≥成员数`（SystemOne 把 noul 抬到全员，如 Langfuse `21ed840c` / 12:18 CST「谁会写代码」）时**不**信任该 count，改为按 mN 相对概率推断有能力子集（与 count 省略/undershoot 同一路径）。不是 keyword role-match，也不是 all-hands underpick→全员展开。
 
-**PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，`AllowSecondFailOpen=false`（禁止「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」，Langfuse `a1f143e3` / obs `30796cdf`）。**不**标 `LeadFallback`：选中但无关 / 误选的 bot 仍走 candidacy，可 `[PASS]`。硬禁 PASS 只留给真全员 / 故意 must-answer。
+**PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，标 `LeadFallback`（硬禁 `[PASS]`，census 必答）+ `AllowSecondFailOpen=false`（禁止「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」，Langfuse `a1f143e3` / obs `30796cdf`）。fe5f9a6 曾去掉 who-can LeadFallback，导致唯一 coder candidacy `[PASS]` 后全员沉默；已恢复 423139b 行为。误选由 `who_can_profile_match` 重映射到有能力子集后再 LeadFallback。
 
 **PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `AllowSecondFailOpen=false`（否则「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST，Langfuse `a32fde27` / obs `5808f45a`）。**不** LeadFallback——无关选中 bot 可 PASS。heuristic 与 decision 成功路径均适用。
 
@@ -144,7 +144,7 @@ resolveGroupSendTargets / planSendTargets
 ## 5. 与 PASS / 全员候选并存
 
 - 选中的非 forced 候选：**保留** `[PASS]` 提示与「不落泡」逻辑（who-can / specialty 亦然）。  
-- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**例外**：who-can / specialty / **all-hands** 关闭二次 fail-open；其中仅 **all-hands**（`choice=all` / 全员映射）及 lead/二次 fail-open 标 `LeadFallback` 硬禁 `[PASS]`（见 §4.1 / §4.2）。  
+- 若 Autopick 的唯一候选也 PASS → 二次 fail-open：补跑 lead（或全员），避免「直接无返回」。**例外**：who-can / specialty / **all-hands** 关闭二次 fail-open；其中 **all-hands**（`choice=all` / 全员映射）、**who-can 有能力子集**、及 lead/二次 fail-open 标 `LeadFallback` 硬禁 `[PASS]`（见 §4.1 / §4.2）。specialty 不标 LeadFallback。  
 - 开关：仅 org `feature_flags_json.auto_pick` 三态；默认 **heuristic**。
 
 ## 6. 文案 / 可观测

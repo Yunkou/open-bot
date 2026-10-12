@@ -78,8 +78,9 @@ func decisionEffectiveK(k, memberCount int, countHint int) int {
 // the prompt classifies ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no isAllHandsIntent
 // phrase gate; no SVG/HTML/anaphora needle tables). Thin structural safety: explicit
 // choice=all (or mapping that already covers the full roster) → LeadFallback (hard
-// no-[PASS]); who-can / specialty close second-wave but do NOT LeadFallback (selected
-// off-topic bots may still [PASS]). Underpick choice=mN is never expanded to the full
+// no-[PASS]); who-can capable picks also LeadFallback (must answer) + close second-wave;
+// specialty closes second-wave but does NOT LeadFallback (selected off-topic bots may
+// still [PASS]). Underpick choice=mN is never expanded to the full
 // roster via count≈N + probs[all] mass — only choice=all means everyone. Who-can may
 // remap choice=all → capable subset; who-can / specialty mismatch vs Member capability
 // profiles rematches or fail-opens. On soft failure the caller fail-opens to heuristic
@@ -200,10 +201,15 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	} else {
 		// Who-can / specialty: close second-wave so PASS cannot dump incapable peers
 		// (11:41 CST 「谁会写代码」 33 PASS→22+44; 13:45 CST 5808f45a → 文档助手).
-		// Do NOT LeadFallback: selected bots keep candidacy [PASS] when off-topic /
-		// mis-selected. Hard no-PASS is only for true all-hands (above) or intentional
-		// must-answer (lead / second fail-open).
-		if whoCan || userTextHitsRoleSynonym(specialtyProbe) {
+		// Who-can capable picks: LeadFallback (forbid [PASS]) — candidacy alone let
+		// coder 33 [PASS] into silence when second-wave is closed (fe5f9a6 regression;
+		// restore 423139b). Specialty keeps candidacy [PASS] for mis-selected bots.
+		if whoCan {
+			allowSecond = false
+			for _, id := range ids {
+				leadFB[id] = true
+			}
+		} else if userTextHitsRoleSynonym(specialtyProbe) {
 			allowSecond = false
 		}
 		log.Printf("auto_pick=%s ids=%v conf=%.2f choice=%s count=%d probs=%v fallback=", method, ids, conf, choiceKey, countHint, probs)

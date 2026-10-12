@@ -24,9 +24,10 @@ type groupAutoPickResult struct {
 	Method     string // "heuristic"
 	Fallback   string // "" | "lead" | "all"
 	// LeadFallback marks agents that get the hard must-answer / no-[PASS] participation
-	// prompt. Only true all-hands (choice=all / full roster) or intentional must-answer
-	// (lead fail-open, second fail-open). Who-can / specialty / broad fail-open-all do
-	// NOT set this — selected bots keep candidacy [PASS] when off-topic.
+	// prompt. Set for: true all-hands (choice=all / full roster), intentional must-answer
+	// (lead fail-open, second fail-open), and who-can capable picks (census answerers must
+	// speak). Specialty / broad fail-open-all do NOT set this — selected bots keep
+	// candidacy [PASS] when off-topic / mis-selected.
 	LeadFallback map[string]bool
 	// AllowSecondFailOpen: if every AutoPick candidate PASS-es, run lead (or all).
 	// False for who-can / specialty / all-hands so PASS cannot dump incapable peers.
@@ -241,11 +242,17 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	leadFB := map[string]bool{}
 	allowSecond := true
 	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): close second-wave
-	// so PASS cannot dump incapable peers (13:45 CST 5808f45a → 文档助手). Do NOT
-	// LeadFallback / ban [PASS]: AutoPick may mis-select, and an off-topic selected
-	// bot must still PASS via candidacy. LeadFallback is reserved for true all-hands
-	// / intentional must-answer.
-	if isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText) {
+	// so PASS cannot dump incapable peers (13:45 CST 5808f45a → 文档助手).
+	// Who-can capable picks: also LeadFallback (forbid [PASS]) — otherwise the only
+	// coder can candidacy-[PASS] and AllowSecondFailOpen=false → silence
+	// (regression after fe5f9a6; restore 423139b who-can must-answer).
+	// Specialty does NOT LeadFallback: mis-selected bots may still PASS via candidacy.
+	if isWhoCanIntent(userText) {
+		allowSecond = false
+		for _, id := range ids {
+			leadFB[id] = true
+		}
+	} else if userTextHitsRoleSynonym(userText) {
 		allowSecond = false
 	}
 	log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)

@@ -49,6 +49,15 @@ func TestAutoPickHeuristicWhoWritesCodePicksCoder(t *testing.T) {
 	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
 		t.Fatalf("want coder(33) only, got %#v conf=%.2f fallback=%s", got.AgentIDs, got.Confidence, got.Fallback)
 	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can heuristic must close second-wave, got %#v", got)
+	}
+	if !got.LeadFallback["coder"] {
+		t.Fatalf("who-can heuristic coder must LeadFallback, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback["research"] {
+		t.Fatalf("research must not LeadFallback, got %#v", got.LeadFallback)
+	}
 }
 
 func TestAutoPickHeuristicFailOpenLead(t *testing.T) {
@@ -1111,8 +1120,11 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("who-can must not AllowSecondFailOpen")
 	}
-	if got.LeadFallback["22"] || got.LeadFallback["44"] || got.LeadFallback["33"] {
-		t.Fatalf("who-can must not LeadFallback (candidacy PASS ok), got %#v", got.LeadFallback)
+	if !got.LeadFallback["22"] || !got.LeadFallback["44"] {
+		t.Fatalf("who-can capable researchers must LeadFallback, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback["33"] {
+		t.Fatalf("coder must not be LeadFallback for research census, got %#v", got.LeadFallback)
 	}
 }
 
@@ -1245,8 +1257,8 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("structural safety: no second-wave, got %#v", got)
 	}
-	if got.LeadFallback["33"] {
-		t.Fatalf("who-can must not LeadFallback, got %#v", got.LeadFallback)
+	if !got.LeadFallback["33"] {
+		t.Fatalf("who-can coder must LeadFallback (forbid PASS), got %#v", got.LeadFallback)
 	}
 }
 
@@ -1332,8 +1344,8 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if got2.AllowSecondFailOpen {
 		t.Fatalf("who-can structural safety: no second-wave, got %#v", got2)
 	}
-	if got2.LeadFallback[members[0]] {
-		t.Fatalf("who-can must not LeadFallback, got %#v", got2.LeadFallback)
+	if !got2.LeadFallback[members[0]] {
+		t.Fatalf("who-can coder must LeadFallback (forbid PASS), got %#v", got2.LeadFallback)
 	}
 }
 
