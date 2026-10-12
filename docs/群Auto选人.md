@@ -74,11 +74,11 @@ resolveGroupSendTargets / planSendTargets
 - **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）；**无**短语抬 K
 - **置信度**：`max(confidence, probs[choice])`；who-can 从 `all` 重映射时再考虑 `probs[all]` / 所选 mN 合计，避免低 `confidence` 字段误 fail-open；再否则 0.55
 - **调用路径**：API `planSendTargets` → runtime `POST /v1/decision/decide` → factory（Jev / Laya / Unsloth SystemOne）
-- **超时**：约 8s
+- **超时**：约 20s（Laya 常见 5–12s；8s 曾与 cf23 7.3s 完成竞态 → client timeout → lead-only）
 
 **Fail-open 规则（硬）：**
 
-- decision：解析失败、超时、空列表、`confidence < θ`、决策层 off、runtime 不可达 → **heuristic**（禁止误变成 lead-only）
+- decision：解析失败、超时、空列表、`confidence < θ`、决策层 off、runtime 不可达 → **heuristic**；若 heuristic 无专长命中 / 仅 lead → **全员 + LeadFallback**（禁止误变成 lead-only；Langfuse cf23 「大家好」）
 - heuristic：无命中 / 低分 → `[lead]`；lead 不在群成员里 → 退回**全员候选**
 - Auto 选人**不得**替代 `@` 强制集合
 
@@ -88,16 +88,18 @@ resolveGroupSendTargets / planSendTargets
 
 | 模式 | 行为 |
 |---|---|
-| **decision**（**产品路径**） | **调用** SystemOne；criteria 含 `all`；**prompt 始终**教模型分类 ALL-HANDS vs WHO-CAN vs SPECIALTY（示例含「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」）。模型应 `choice=all`、count=全员、高概率质量压在 `all`。**信任模型映射**（无 underpick→全员结构展开；**无** `isAllHandsIntent` 短语门控）。 |
+| **decision**（**产品路径**） | **调用** SystemOne；criteria 含 `all`；**prompt 始终**教模型分类 ALL-HANDS vs WHO-CAN vs SPECIALTY（示例含「都介绍下自己」「在座的各位都是辣鸡」「各位都是…」）。模型应 `choice=all`、count=全员、高概率质量压在 `all`。**无** `isAllHandsIntent` 短语门控；薄结构安全见下。 |
 | **heuristic** | **无** all-hands 短语短路（弱路径，仅专长/角色匹配）。全员介绍 / roast 请用 decision 模式。 |
 
-**Prompt 驱动（替代短语列表）**：`buildAutoPickDecisionPayload` **始终**写入 ALL-HANDS / WHO-CAN / SPECIALTY 分类指令与 count 规则——不再靠 `Contains` 短语列表切换 framing。已删除 `isAllHandsIntent` 及 fixed/collective/action 词表；已移除 heuristic `*->all_hands` 短路与 decision 失败时的 `*->all_hands` fail-open。
+**Prompt 驱动（替代短语列表）**：`buildAutoPickDecisionPayload` **始终**写入 ALL-HANDS / WHO-CAN / SPECIALTY 分类指令与 count 规则——不再靠 `Contains` 短语列表切换 framing。已删除 `isAllHandsIntent` 及 fixed/collective/action 词表；已移除 heuristic `*->all_hands` 短语短路。
 
-**薄结构安全（非短语）**：
+**薄结构安全（非 all-hands 短语表）**：
 
 - 模型 `choice=all` 或映射结果覆盖全员 → 每位选出成员标 `LeadFallback`（禁止 candidacy `[PASS]`）+ `AllowSecondFailOpen=false` + `fallback=all`。
-- decision 解析失败 / 超时 / 低置信 → 普通 **heuristic** fail-open（`decision->heuristic`），**不**因话术展开全员。
+- **信任全员 count**：非 who-can、非 specialty（`userTextHitsRoleSynonym`）且 `count ≥ 成员数` 时，即使 primary 落在单个 mN（underpick），也展开全员 + LeadFallback。
+- decision 解析失败 / 超时 / 低置信 → **heuristic**；无专长命中或仅 lead → **全员 + LeadFallback**（避免慢 SystemOne 把全员意图塌成单 lead；Langfuse cf23 「大家好」）。
 - `choice=all` 时若 `confidence` 字段被稀释（~0.1）但 probs/`all` 或映射有效，抬置信度避免误 fail-open。
+- decide 客户端超时约 **20s**（原 8s 曾与 ~7.3s Laya 完成竞态）。
 
 否则会出现「文章+代码都 PASS → 全员沉默」——14:25 CST「大家都介绍下自己」（Langfuse peek `f24b88df`，runs `9bd33f4a` / `aeb5cffa`）。
 
@@ -180,7 +182,7 @@ resolveGroupSendTargets / planSendTargets
 4. heuristic 无命中 → 仅 lead 答，不出现空回合。  
 5. org `auto_pick=off` → 与今日全员+PASS 一致。  
 6. org `auto_pick=decision` + 决策层可用 → SystemOne choice 选人；日志 `auto_pick=decision`。  
-7. org `auto_pick=decision` 但决策 off / 超时 / 低置信 → 行为同 heuristic，日志 `decision->heuristic`；**不是**仅 lead。  
+7. org `auto_pick=decision` 但决策 off / 超时 / 低置信 → `decision->heuristic`；有专长命中则用专长子集，否则 **全员 + LeadFallback**（**不是**仅 lead）。  
 8. 历史 bool `true/false` 在 org flags / channel 存储可读为 heuristic / off；channel 显式值**不**覆盖 org。  
 9. Admin 功能开关可选三策略中文标签，写回 `feature_flags_json.auto_pick`。  
 10. channel `settings.auto_pick=off` 且 org=`decision` → 仍按 decision 规划。

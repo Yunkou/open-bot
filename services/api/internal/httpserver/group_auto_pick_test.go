@@ -654,7 +654,8 @@ func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 }
 
 func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
-	// Decide failure fail-opens to ordinary heuristic — not phrase-gated all_hands roster.
+	// Decide timeout/err: no specialty signal → all members + LeadFallback (not lead-only).
+	// Langfuse cf23: SystemOne finished choice=all in ~7.3s but 8s client timeout → lead-only.
 	members, agents := testGroupAgents()
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
@@ -668,6 +669,17 @@ func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
 	}
 	if strings.Contains(got.Method, "all_hands") {
 		t.Fatalf("must not phrase-gate fail-open: %#v", got)
+	}
+	if got.Fallback != "all" || len(got.AgentIDs) != len(members) {
+		t.Fatalf("decide-fail with no specialty must fail-open all, got %#v", got)
+	}
+	for _, id := range members {
+		if !got.LeadFallback[id] {
+			t.Fatalf("LeadFallback missing %s: %#v", id, got.LeadFallback)
+		}
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("all fail-open must disable second wave")
 	}
 }
 
@@ -1229,8 +1241,9 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 }
 
 func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
-	// Prompt-only fix (no underpick→roster remap): all-hands payload must force choice=all.
-	// Langfuse 38726dc4 shape (choice=m0 diluted) is trusted as-is — do NOT assert expand.
+	// Prompt still teaches ALL-HANDS; thin structural safety trusts full-roster count
+	// (no phrase table): choice=m0 + count=N on non-specialty → expand to everyone.
+	// Langfuse 38726dc4 / roast underpick shapes.
 	members := []string{"635d1077-5611-41bb-9fcf-2a4454d43d5a", "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf", "f634df70-8e30-4f71-9415-c7f80a8c0ec3"}
 	agents := []*db.Agent{
 		{ID: members[0], Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -1258,7 +1271,7 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 				t.Fatalf("all-hands state missing mandate: %q", st)
 			}
 			sawAllHandsPrompt = true
-			// Langfuse 38726dc4 underpick shape — mapping must trust model (no structural expand).
+			// Langfuse 38726dc4 underpick: choice=m0 but noul→count=N.
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
@@ -1276,12 +1289,16 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if !sawAllHandsPrompt {
 		t.Fatal("decide must receive all-hands-strengthened payload")
 	}
-	// Trust model: do not remap underpick to full roster (prompt should make live model return choice=all).
-	if got.Fallback == "all" && len(got.AgentIDs) == 3 {
-		t.Fatalf("must not structurally expand underpick to roster; got %#v (prompt-only fix)", got.AgentIDs)
+	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 3 {
+		t.Fatalf("full-roster count must expand underpick to all, got %#v", got)
 	}
-	if got.Method != "decision" && !strings.HasPrefix(got.Method, "decision->heuristic") {
-		t.Fatalf("unexpected method=%s got=%#v", got.Method, got)
+	for _, id := range members {
+		if !got.LeadFallback[id] {
+			t.Fatalf("LeadFallback missing %s: %#v", id, got.LeadFallback)
+		}
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("full roster must disable second fail-open")
 	}
 	// Contrast: who-can with single capable must NOT expand to all.
 	deps2 := &autoPickDecisionDeps{

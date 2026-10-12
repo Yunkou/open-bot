@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	autoPickDecisionTimeout  = 8 * time.Second
+	autoPickDecisionTimeout  = 20 * time.Second // Laya often 5–12s; 8s raced Langfuse cf23 (7.3s done → client timeout → lead-only)
 	autoPickDecisionQKey     = "pick"
 	autoPickDecisionCountKey = "count" // noul: how many should reply (→ 1..members)
 	autoPickDecisionAllKey   = "all"   // opaque criteria: every member should reply
@@ -126,6 +126,25 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	allowMultiFromProbs := countHint == 0 || whoCan
 	ids, conf, allSelected, ok := mapDecisionChoiceToAgentIDs(answers, keyToID, members, effectiveK, allowMultiFromProbs, whoCan, countHint)
 	choiceKey, probs := decisionPickMeta(answers)
+	// Thin structural safety (no all-hands phrase table): full-roster count on a
+	// non-who-can / non-specialty ask means the model wanted everyone even when it
+	// parked primary on mN (underpick). Trust count over a single-mN primary.
+	// Langfuse/tests: choice=m0 + count=N + diluted mN probs → only lead spoke.
+	if ok && !whoCan && !userTextHitsRoleSynonym(userText) && countHint >= len(members) && len(members) > 1 {
+		if len(ids) < len(members) || !allSelected {
+			ids = orderedDecisionMemberIDs(members, keyToID)
+			allSelected = true
+			if conf < autoPickConfidenceFloor {
+				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+					conf = pAll
+				}
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
+			}
+			log.Printf("auto_pick=decision note=full_roster_count_expand choice=%s count=%d ids=%v", choiceKey, countHint, ids)
+		}
+	}
 	// Who-can structural safety below still forbids PASS→second-wave dump of incapable peers.
 	// Specialty: do not trust a mapped set that includes role-mismatched members (e.g. coder
 	// for 「帮我查下…」) — fail-open so heuristic research needles pick 22+44.

@@ -119,18 +119,25 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 		_, leadInMembers = memberSet[leadID]
 	}
 
+	failOpenAll := func() groupAutoPickResult {
+		out := copyStringSlice(members)
+		leadFB := map[string]bool{}
+		for _, id := range out {
+			leadFB[id] = true
+		}
+		log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=all", method, out)
+		return groupAutoPickResult{
+			AgentIDs:            out,
+			Confidence:          0,
+			Method:              method,
+			Fallback:            "all",
+			LeadFallback:        leadFB,
+			AllowSecondFailOpen: false,
+		}
+	}
 	failOpenLead := func() groupAutoPickResult {
 		if !leadInMembers {
-			out := copyStringSlice(members)
-			log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=all", method, out)
-			return groupAutoPickResult{
-				AgentIDs:            out,
-				Confidence:          0,
-				Method:              method,
-				Fallback:            "all",
-				LeadFallback:        map[string]bool{},
-				AllowSecondFailOpen: false,
-			}
+			return failOpenAll()
 		}
 		log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=lead", method, []string{leadID})
 		return groupAutoPickResult{
@@ -613,7 +620,28 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {
 			return pick
 		}
-		return autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
+		// Decide failed (timeout/parse/low-conf/off). Specialty heuristic keeps capable
+		// subsets; empty/lead-only expands to all + LeadFallback so a slow SystemOne that
+		// would have returned choice=all (Langfuse cf23 「大家好」 7.3s vs 8s client
+		// timeout) does not collapse the room to a single lead reply.
+		h := autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
+		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText)) {
+			out := copyStringSlice(members)
+			leadFB := map[string]bool{}
+			for _, id := range out {
+				leadFB[id] = true
+			}
+			log.Printf("auto_pick=decision->heuristic ids=%v conf=0.00 fallback=all note=decide_fail_all_hands_failopen", out)
+			return groupAutoPickResult{
+				AgentIDs:            out,
+				Confidence:          0,
+				Method:              "decision->heuristic",
+				Fallback:            "all",
+				LeadFallback:        leadFB,
+				AllowSecondFailOpen: false,
+			}
+		}
+		return h
 	default: // heuristic
 		return autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
 	}
