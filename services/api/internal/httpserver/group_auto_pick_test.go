@@ -1561,3 +1561,163 @@ func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 		}
 	}
 }
+
+// Trace 4b43-style: last msgs are bot SVG + current 「再来个哭脸」— synopsis must
+// surface the prior USER specialty ask (「用代码画个笑脸」), not burn the only slot
+// on truncated SVG markup.
+func TestRecentMessagesSynopsisPrefersUserOverBotSVG(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="yellow"/><circle cx="35" cy="40" r="5"/><circle cx="65" cy="40" r="5"/><path d="M30 65 Q50 80 70 65" fill="none"/></svg>`
+	msgs := []db.Message{
+		{Role: "user", Content: "用代码画个笑脸"},
+		{Role: "assistant", Content: svg},
+		{Role: "user", Content: "再来个哭脸"}, // current turn — already in User message:
+	}
+	got := recentMessagesSynopsis(msgs, 2)
+	if !strings.Contains(got, "用代码画个笑脸") {
+		t.Fatalf("synopsis must keep prior user specialty ask, got %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "<svg") {
+		t.Fatalf("synopsis must not occupy slot with bot SVG, got %q", got)
+	}
+	if strings.Contains(got, "再来个哭脸") {
+		t.Fatalf("synopsis must omit trailing current user turn, got %q", got)
+	}
+}
+
+func TestRecentMessagesSynopsisSkipsMarkupFillsWithUser(t *testing.T) {
+	msgs := []db.Message{
+		{Role: "user", Content: "帮我查下优锘科技"},
+		{Role: "assistant", Content: "<div><p>摘要</p><ul><li>a</li></ul></div>"},
+		{Role: "assistant", Content: "查完了，见上。"},
+		{Role: "user", Content: "再深入一点"},
+	}
+	got := recentMessagesSynopsis(msgs, 2)
+	if !strings.Contains(got, "帮我查下优锘科技") {
+		t.Fatalf("want prior user ask retained, got %q", got)
+	}
+	if strings.Contains(got, "<div>") {
+		t.Fatalf("markup-heavy assistant must not fill synopsis, got %q", got)
+	}
+}
+
+// Prompt accuracy for specialty anaphora (no keyword specialty纠偏): decide must
+// teach 「再来个哭脸」 after coding smile → keep coding mN, never choice=all.
+func TestBuildAutoPickDecisionPayloadSpecialtyFollowUpAnaphora(t *testing.T) {
+	members, agents := testGroupAgents()
+	syn := "用代码画个笑脸"
+	_, q, st := buildAutoPickDecisionPayload("再来个哭脸", members, agents, syn, false)
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	for _, needle := range []string{
+		"SPECIALTY FOLLOW-UP", "ANAPHORA", "再来个哭脸", "再画一个",
+		"KEEP the same specialty", `never switch to choice="all"`, "coding-role mN only",
+	} {
+		if !strings.Contains(instr, needle) {
+			t.Fatalf("specialty follow-up instructions missing %q: %s", needle, instr)
+		}
+	}
+	count := q[autoPickDecisionCountKey].(map[string]any)
+	countInstr := fmt.Sprint(count["instructions"])
+	if !strings.Contains(countInstr, "再来个哭脸") || !strings.Contains(countInstr, "MUST stay near 0") {
+		t.Fatalf("count must teach specialty follow-up noul, got %v", count["instructions"])
+	}
+	for _, needle := range []string{
+		"SPECIALTY FOLLOW-UP", "再来个", "NEVER choice",
+		"用代码画个笑脸", "再来个哭脸", "写代码",
+		"prior USER turns preferred",
+	} {
+		if !strings.Contains(st, needle) {
+			t.Fatalf("state missing %q: %q", needle, st)
+		}
+	}
+	if !strings.Contains(instr, "Before ALL-HANDS") {
+		t.Fatalf("instructions must lead with follow-up check before ALL-HANDS: %s", instr)
+	}
+}
+
+
+// Inflated noul on anaphoric specialty follow-up must not dump everyone when
+// Recent context still carries a prior specialty USER ask (synopsis hits 代码).
+func TestAutoPickDecisionSpecialtyFollowUpSkipsCountExpand(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m0", // coder
+					"confidence": 0.11,
+					"probabilities": map[string]any{
+						"all": 0.187, "m0": 0.50, "m1": 0.18, "m2": 0.13,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.99},
+			}, nil
+		},
+	}
+	synopsis := "用代码画个笑脸"
+	got := runAutoPickByMode(db.AutoPickDecision, "再来个哭脸", members, agents, "33", 1, synopsis, deps)
+	if got.Method != "decision" {
+		t.Fatalf("want decision keep, got method=%s ids=%#v", got.Method, got.AgentIDs)
+	}
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
+		t.Fatalf("specialty follow-up must NOT count-expand to all; want coder 33, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+}
+
+
+// Trace 4b43: model choice=all on 「再来个哭脸」 after coding smile. Fail-open heuristic
+// (synopsis blends 代码) must keep coder — not decision->heuristic fail-open-all.
+func TestAutoPickDecisionSpecialtyFollowUpAllFailOpenKeepsCoder(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "all",
+					"confidence": 0.3741,
+					"probabilities": map[string]any{
+						"all": 0.7271, "m0": 0.0999, "m1": 0.1249, "m2": 0.0481,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9925},
+			}, nil
+		},
+	}
+	synopsis := "用代码画个笑脸"
+	got := runAutoPickByMode(db.AutoPickDecision, "再来个哭脸", members, agents, "33", 1, synopsis, deps)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("want decision->heuristic fail-open, got method=%s ids=%#v fallback=%s", got.Method, got.AgentIDs, got.Fallback)
+	}
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
+		t.Fatalf("want coder 33 only (no fail-open-all), got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+}
+
+func TestLooksLikeSpecialtyFollowUp(t *testing.T) {
+	if !looksLikeSpecialtyFollowUp("再来个哭脸") {
+		t.Fatal("再来个哭脸")
+	}
+	if !looksLikeSpecialtyFollowUp("再画一个") {
+		t.Fatal("再画一个")
+	}
+	if looksLikeSpecialtyFollowUp("都介绍下自己") {
+		t.Fatal("intro must not look like specialty follow-up")
+	}
+	if looksLikeSpecialtyFollowUp("帮我查下2026年优锘科技的发展") {
+		t.Fatal("long specialty task is not anaphora")
+	}
+}

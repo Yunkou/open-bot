@@ -625,7 +625,10 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 		// would have returned choice=all (Langfuse cf23 「大家好」 7.3s vs 8s client
 		// timeout) does not collapse the room to a single lead reply.
 		h := autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
-		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText)) {
+		// Lead-only still expands to all (cf23 all-hands decide timeout). A single
+		// specialty hit recovered via Recent-context synopsis (「再来个哭脸」+ prior「用代码…」)
+		// must NOT be dumped to everyone — that is the fail-open-all trap.
+		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText) && !userTextHitsRoleSynonym(synopsis)) {
 			out := copyStringSlice(members)
 			leadFB := map[string]bool{}
 			for _, id := range out {
@@ -647,7 +650,11 @@ func runAutoPickByMode(mode, userText string, members []string, agents []*db.Age
 	}
 }
 
-// recentMessagesSynopsis builds a short optional synopsis from the last 1–2 messages.
+// recentMessagesSynopsis builds a short optional synopsis for decide state.
+// Prefer recent USER turns so specialty follow-ups (「再来个哭脸」) still see the
+// prior ask (「用代码画个笑脸」). Skip the trailing current-user message (already in
+// "User message:"). Long bot SVG/markup must not occupy the only history slot —
+// look further back for user text instead of taking the last N chronological msgs.
 func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
 	if maxMsgs <= 0 {
 		maxMsgs = 2
@@ -655,21 +662,90 @@ func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
 	if len(msgs) == 0 {
 		return ""
 	}
-	start := len(msgs) - maxMsgs
+	end := len(msgs)
+	// Just-saved current turn is already the decide "User message:"; omit it so
+	// the synopsis budget goes to prior turns (esp. prior user specialty asks).
+	if end > 0 && strings.EqualFold(strings.TrimSpace(msgs[end-1].Role), "user") {
+		end--
+	}
+	if end <= 0 {
+		return ""
+	}
+	lookback := maxMsgs * 4
+	if lookback < 8 {
+		lookback = 8
+	}
+	start := end - lookback
 	if start < 0 {
 		start = 0
 	}
-	var parts []string
-	for _, m := range msgs[start:] {
+	window := msgs[start:end]
+
+	var userParts []string
+	var otherParts []string
+	for i := len(window) - 1; i >= 0; i-- {
+		m := window[i]
 		c := strings.TrimSpace(m.Content)
 		if c == "" || isGroupPassReply(c) {
 			continue
 		}
-		runes := []rune(c)
-		if len(runes) > 80 {
-			c = string(runes[:80]) + "…"
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if role != "user" && synopsisIsMarkupHeavy(c) {
+			// Bot SVG/HTML smile etc. — never burn a synopsis slot on markup.
+			continue
 		}
-		parts = append(parts, c)
+		snippet := synopsisClip(c, role)
+		if snippet == "" {
+			continue
+		}
+		if role == "user" {
+			userParts = append(userParts, snippet)
+			if len(userParts) >= maxMsgs {
+				break
+			}
+			continue
+		}
+		if len(otherParts) < maxMsgs {
+			otherParts = append(otherParts, snippet)
+		}
+	}
+	parts := userParts
+	if len(parts) < maxMsgs {
+		for _, o := range otherParts {
+			if len(parts) >= maxMsgs {
+				break
+			}
+			parts = append(parts, o)
+		}
+	}
+	// Collected newest-first; emit chronological.
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
 	}
 	return strings.Join(parts, " | ")
+}
+
+func synopsisClip(content, role string) string {
+	limit := 80
+	if role != "user" {
+		limit = 40
+	}
+	runes := []rune(content)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return content
+}
+
+// synopsisIsMarkupHeavy detects assistant replies that are mostly SVG/HTML so they
+// do not crowd out prior user specialty asks in Recent context.
+func synopsisIsMarkupHeavy(c string) bool {
+	lower := strings.ToLower(c)
+	if strings.Contains(lower, "<svg") || strings.Contains(lower, "</svg>") {
+		return true
+	}
+	if strings.Count(c, "<") >= 3 && strings.Count(c, ">") >= 3 {
+		return true
+	}
+	return false
 }

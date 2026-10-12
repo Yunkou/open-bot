@@ -67,9 +67,9 @@ resolveGroupSendTargets / planSendTargets
 
 ### B 档细节
 
-- **State**：`User message:` + 可选 `Recent context:`（synopsis）
+- **State**：`User message:` + 可选 `Recent context:`（synopsis；**优先近期 user 话**，跳过本轮刚落库的 user；长 bot SVG/HTML 不占槽，向前看以保留专长追问上下文，如「用代码画个笑脸」→「再来个哭脸」）
 - **Question**：`pick` choice + `count` noul；`criteria` 含 opaque **`all`**（全员应发言）+ `m_i = "显示名 — 角色短描述"`（**不用**原始 agent_id / 裸名作 key）
-- **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集
+- **指令**：可选一人专长、若干互补专长、或全员；集体介绍 / 轮流 → 选 `all`；多专长时主选 + `count` + `probabilities` 补多人子集；**SPECIALTY follow-up / anaphora**（「再来个/再画…」接在专长任务后）→ 保持原专长 mN，**禁止** `choice=all`（靠 decide prompt，非 keyword specialty 纠偏）
 - **映射**：`choice=all` → 频道顺序展开全部 `agent_id`（**who-can 例外**：按 mN 概率 + `count` 取有能力子集，不展开全员）；否则仅接受 `mN`；按 probability 降序、≥ θ（who-can 用相对阈值）取 top-N；`count` noul→1..N 定人数；无 count / who-can 时可由多路高概率推断多人（不必 `all`）
 - **有效 K**：专长用 `auto_pick_k`（软默认，上限 3）；`count` / 多路高概率可将有效 K 抬到 `min(成员数, 8)`（例如 2 of 3）；**无**短语抬 K
 - **置信度**：`max(confidence, probs[choice])`；who-can 从 `all` 重映射时再考虑 `probs[all]` / 所选 mN 合计，避免低 `confidence` 字段误 fail-open；再否则 0.55
@@ -130,6 +130,8 @@ resolveGroupSendTargets / planSendTargets
 **PASS / 二次 fail-open（who-can，结构安全）**：模型选出有能力子集后，对这些 id 标 `LeadFallback`（参与提示禁止 `[PASS]`），且 `AllowSecondFailOpen=false`。否则会出现「只选中 33 → 33 PASS → 二次 fail-open 把 22/44 拉进来」——11:41 CST「谁会写代码」即此（Langfuse `a1f143e3` / obs `30796cdf`）。这是结构安全，不是 keyword 纠偏。
 
 **PASS / 二次 fail-open（specialty，结构安全）**：专长问（`userTextHitsRoleSynonym`，如「写个js的代码」「帮我查下…」）选出有能力成员后同样 `LeadFallback` + `AllowSecondFailOpen=false`。否则会出现「两个 coder 都 PASS → 二次 fail-open 把文档助手拉进来」——13:45 CST「写个js的代码…」即此（Langfuse `a32fde27` / obs `5808f45a`）。heuristic 与 decision 成功路径均适用。
+
+**专长追问准确度（prompt + synopsis，非 keyword 纠偏）**：短回指「再来个哭脸」「再画一个」等 anaphora 在 Recent context 有先前专长 user 话（如「用代码画个笑脸」）时应保持 coding（或原专长）mN，不得因无「代码」字样塌成 `choice=all`。靠 decide prompt 的 SPECIALTY FOLLOW-UP 示例 + synopsis 优先 user；**不**把「再来个/哭脸」扩进 `userTextHitsRoleSynonym`，也**不**对 `choice=all` 做 specialty 拒收→fail-open-all。薄安全：若 synopsis 仍含专长同义词、primary 为 mN 且 `probs[all]` 偏低，则**跳过** full-roster count 展开；若模型仍 `choice=all` 且当前句是短 anaphora（再来个/再画…）且 synopsis 含专长同义词，则 fail-open heuristic（synopsis 混合打分选专长 bot），并禁止 decision→heuristic 单人结果再被抬成全员。
 
 **短语检测**（`isWhoCanIntent`）：`都谁会` / `谁会` / `谁能` / `哪些人会` / `who can` / `which of you can` / `both can` 等。与全员介绍互斥场景（由 decide prompt 分类，非短语互斥）：前者要**有能力子集**，后者要**每位发言**。
 
