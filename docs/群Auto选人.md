@@ -88,7 +88,7 @@ resolveGroupSendTargets / planSendTargets
 | 模式 | 行为 |
 |---|---|
 | **heuristic** | phrase 短路 → 全员候选（非 forced，可 PASS；同 `off`） |
-| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；模型选 `all`（或 probabilities 补满）→ 多人 / 全员 |
+| **decision** | **仍调用** SystemOne（**不**跳过）；criteria 含 `all`；有效 K 抬到 `min(成员数, 8)`；模型选 `all`（或 probabilities 补满）→ 多人 / 全员；**结构安全**：即便 choice=mN 且 mN 概率被绝对置信度门槛滤掉，仍展开全员（与 who-can 子集互斥） |
 
 **短语检测**（`isAllHandsIntent`）仍用于：heuristic 短路、decision 抬高 K / 加强指令、decision 失败时 fail-open 全员。
 

@@ -994,6 +994,67 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 	}
 }
 
+func TestAutoPickDecisionAllHandsExpandsWhenChoiceMNDiluted(t *testing.T) {
+	// Langfuse 38726dc4 / obs e28462a156054b71 @ 12:06 CST:
+	// 「都介绍下自己」→ choice=m0 count=3 probs all:0.29 m0:0.45 m1:0.21 m2:0.05
+	// Absolute floor dropped m1/m2 → only 33 replied. All-hands must expand to 22+33+44.
+	members := []string{"635d1077-5611-41bb-9fcf-2a4454d43d5a", "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf", "f634df70-8e30-4f71-9415-c7f80a8c0ec3"}
+	agents := []*db.Agent{
+		{ID: members[0], Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: members[1], Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: members[2], Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.2909, "m0": 0.4469, "m1": 0.209, "m2": 0.0532,
+					},
+					"confidence": 0.1327,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.8364},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, members[0], 1, "都介绍下自己", deps)
+	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 3 {
+		t.Fatalf("all-hands must expand to everyone, got %#v method=%s fallback=%s", got.AgentIDs, got.Method, got.Fallback)
+	}
+	for i, id := range members {
+		if got.AgentIDs[i] != id {
+			t.Fatalf("order want %#v got %#v", members, got.AgentIDs)
+		}
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("full roster: second fail-open should be off")
+	}
+	// Contrast: who-can with same diluted shape must NOT expand to all.
+	deps2 := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.03, "m0": 0.88, "m1": 0.05, "m2": 0.04,
+					},
+					"confidence": 0.86,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.02},
+			}, nil
+		},
+	}
+	got2 := runAutoPickByMode(db.AutoPickDecision, "谁会写代码", members, agents, members[1], 1, "", deps2)
+	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != members[0] || got2.Fallback == "all" {
+		t.Fatalf("who-can must stay coder-only subset, got %#v fallback=%s", got2.AgentIDs, got2.Fallback)
+	}
+}
+
 func TestAutoPickDecisionAllHandsStillCallsDecide(t *testing.T) {
 	// 「都介绍下自己」— still call decide; choice=all → everyone OK.
 	members := []string{"22", "33", "44"}

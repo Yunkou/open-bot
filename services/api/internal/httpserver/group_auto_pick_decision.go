@@ -76,6 +76,8 @@ func decisionEffectiveK(k, memberCount int, allHands bool, countHint int) int {
 // Opaque criteria keys (m0..) map back to agent_ids; "all" → every candidate.
 // count noul → how many (1..members); specialty soft K; multi/all-hands may raise to members.
 // Trusts model choice+count+probs (no keyword role-match remap).
+// All-hands intent (「都介绍下自己」) still calls decide, then maps everyone even when
+// choice is an mN with diluted probs; who-can stays a capable subset.
 // On any soft failure the caller should fail-open to heuristic (not lead-only).
 func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string) (groupAutoPickResult, bool) {
 	method := "decision"
@@ -130,6 +132,27 @@ func autoPickDecision(ctx context.Context, deps *autoPickDecisionDeps, userText 
 	if !ok || len(ids) == 0 {
 		log.Printf("auto_pick=decision note=parse_or_empty_failopen_heuristic choice=%s count=%d probs=%v", choiceKey, countHint, probs)
 		return groupAutoPickResult{}, false
+	}
+	// All-hands structural safety (Langfuse 38726dc4 / 12:06 CST 「都介绍下自己」):
+	// SystemOne often returns choice=mN + count=N with diluted mN probs below the
+	// absolute confidence floor, so mapping keeps only the primary. When intent is
+	// everyone-speak (and not who-can census), expand to the full roster — same as
+	// choice=all. Who-can subset mapping is unchanged.
+	if allHands && !whoCan {
+		full := orderedDecisionMemberIDs(members, keyToID)
+		if len(full) > 0 && len(ids) < len(full) {
+			ids = full
+			allSelected = true
+			if conf < autoPickConfidenceFloor {
+				if pAll := probs[autoPickDecisionAllKey]; pAll > conf {
+					conf = pAll
+				}
+				if conf < autoPickConfidenceFloor {
+					conf = 0.55
+				}
+			}
+			log.Printf("auto_pick=decision note=all_hands_expand choice=%s count=%d probs=%v -> ids=%v", choiceKey, countHint, probs, ids)
+		}
 	}
 	if conf < autoPickConfidenceFloor {
 		log.Printf("auto_pick=decision ids=%v conf=%.2f choice=%s count=%d probs=%v note=low_conf_failopen_heuristic", ids, conf, choiceKey, countHint, probs)
