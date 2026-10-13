@@ -599,6 +599,20 @@ def test_continue_nudge_after_interrupt_skips_when_tools_used() -> None:
     assert nudge is None
 
 
+def test_continue_nudge_skips_when_colleague_already_delivered() -> None:
+    from app.harness.long_task import continue_nudge
+
+    messages = [
+        {"role": "user", "content": "帮我写个html页面，简单的计算器"},
+        {
+            "role": "user",
+            "content": "【代码】已做好简易计算器页面：[打开计算器](sandbox:/workspace/shared/simple-calculator.html)",
+        },
+    ]
+    assert continue_nudge([], messages, already_continued=False, ask_routed=True) is None
+    assert continue_nudge([], messages, already_continued=False) is not None
+
+
 def test_continue_nudge_after_interrupt_skips_when_already_continued() -> None:
     from app.harness.long_task import continue_nudge
 

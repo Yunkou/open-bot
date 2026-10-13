@@ -90,6 +90,7 @@ export function useChatEventsSocket(deps: {
         let data: {
           type?: string;
           message?: Message;
+          message_id?: string;
           conversation_id?: string;
           status?: string;
           label?: string;
@@ -102,6 +103,11 @@ export function useChatEventsSocket(deps: {
         if (data.type === "conversation_message" && data.message) {
           live.acceptServerMessage(data.message);
           void live.refreshAgents().catch(() => {});
+          return;
+        }
+        if (data.type === "message_deleted" && data.message_id && data.conversation_id) {
+          const messageId = data.message_id;
+          live.patchConvMessages(data.conversation_id, (prev) => prev.filter((m) => m.id !== messageId));
           return;
         }
         if (data.type === "task_status" && data.conversation_id) {

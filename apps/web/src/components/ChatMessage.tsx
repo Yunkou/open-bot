@@ -21,6 +21,7 @@ import { parseHostConfirm } from "./hostConfirmModel";
 import type { ApprovalDecision } from "../lib/toolAllowlist";
 import { type ChatMessageData, formatMessageTime } from "./chatMessageModel";
 import { HandoffCard } from "./HandoffCard";
+import { AgentAvatar } from "./AgentAvatar";
 import { MessageActionSheet } from "./MessageActionSheet";
 import { MessageHoverBar } from "./MessageHoverBar";
 import { useIsTouchUi } from "./useIsTouchUi";
@@ -31,10 +32,11 @@ type Props = {
   /** Fallback selected bot when message.agent_id is missing. */
   agentId?: string;
   /**
-   * Group chat only: bot display name above the assistant bubble.
-   * Omit in DM / single-bot so chrome stays unchanged.
+   * Group: member name. DM: 「来自 {名字}」 when the bubble is another bot.
+   * Omit when this conversation's own bot is speaking.
    */
   speakerName?: string;
+  speakerFace?: { id: string; name: string; shape?: string | null; color?: string | null };
   onHostDecide?: (decision: ApprovalDecision) => void;
   /** When false, hide Always allow (machine exec_policy=ask). Default true. */
   alwaysAllowEnabled?: boolean;
@@ -95,6 +97,7 @@ function ChatMessageInner({
   message,
   agentId,
   speakerName,
+  speakerFace,
   onHostDecide,
   alwaysAllowEnabled = true,
   replyQuote,
@@ -407,7 +410,16 @@ function ChatMessageInner({
       <div className="bubble-stack bubble-stack-assistant has-data-diagram-card:w-full">
         {speakerLabel ? (
           <div className="msg-speaker-name" title={speakerLabel}>
-            {speakerLabel}
+            {speakerFace ? (
+              <AgentAvatar
+                id={speakerFace.id}
+                name={speakerFace.name}
+                shape={speakerFace.shape}
+                color={speakerFace.color}
+                size={18}
+              />
+            ) : null}
+            <span className="msg-speaker-text">{speakerLabel}</span>
           </div>
         ) : null}
         <div className="bubble bubble-assistant has-data-diagram-card:w-full has-data-diagram-card:max-w-full">

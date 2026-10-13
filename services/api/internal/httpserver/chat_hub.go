@@ -144,6 +144,17 @@ func (s *Server) handleChatEventsWS(w http.ResponseWriter, r *http.Request) {
 	go client.readPump()
 }
 
+func (s *Server) publishMessageDeleted(userID, conversationID, messageID string) {
+	if s.events == nil || strings.TrimSpace(userID) == "" || strings.TrimSpace(messageID) == "" {
+		return
+	}
+	s.events.Publish(userID, map[string]any{
+		"type":            "message_deleted",
+		"conversation_id": conversationID,
+		"message_id":      messageID,
+	})
+}
+
 func (s *Server) publishConversationMessage(userID string, msg *db.Message) {
 	if s.events == nil || msg == nil || strings.TrimSpace(userID) == "" {
 		return

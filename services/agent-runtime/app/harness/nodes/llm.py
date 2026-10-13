@@ -9,8 +9,8 @@ from langchain_core.runnables import RunnableConfig
 from ... import langfuse_trace as lf
 from ...llm import (
     AutoToolChoiceUnsupported,
-    TOOL_DEFS,
     chat_completion,
+    iter_tool_defs,
     fold_tool_results_in_messages,
     is_context_length_error,
     openai_config,
@@ -178,7 +178,10 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "needs_compaction": False,
             }
 
-        tools = list(TOOL_DEFS) + extra_tools
+        tools = iter_tool_defs(
+            allow_ask_agent=bool(cfg.get("allow_ask_agent")),
+            extra_tools=extra_tools,
+        )
         choice: str | None = "auto" if profile.tool_choice_auto else None
         try:
             data = await chat_completion(
@@ -305,12 +308,14 @@ async def llm_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         probe_msgs = list(msgs) + [{"role": "assistant", "content": final or content or ""}]
         body = cfg.get("body")
         after_interrupt = bool(body is not None and getattr(body, "after_interrupt", False))
+        ask_routed = bool(body is not None and getattr(body, "ask_routed", False))
         nudge = continue_nudge(
             used,
             probe_msgs,
             already_continued=already,
             after_interrupt=after_interrupt,
             final_text=final or "",
+            ask_routed=ask_routed,
         )
         if nudge:
             if on_status is not None:

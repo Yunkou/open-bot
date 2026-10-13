@@ -77,11 +77,14 @@ def continue_nudge(
     already_continued: bool,
     after_interrupt: bool = False,
     final_text: str = "",
+    ask_routed: bool = False,
 ) -> str | None:
     """One-shot internal nudge when the model stopped too early."""
     if already_continued:
         return None
-    if turn_unfinished(tools_used, messages):
+    # A colleague already delivered this turn. A sandbox link in their reply
+    # must not look like unfinished work for the caller.
+    if not ask_routed and turn_unfinished(tools_used, messages):
         return CONTINUE_WORK
     host = host_followup_prompt(tools_used, messages)
     if host:

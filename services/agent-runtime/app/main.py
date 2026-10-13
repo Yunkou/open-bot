@@ -122,6 +122,12 @@ class RunRequest(BaseModel):
     # True when this turn supersedes an in-flight run (interrupt-and-send).
     # Soft system hint: one short natural next-step/plan for the NEW ask, then work.
     after_interrupt: bool = False
+    # Same-turn colleague help. Depth >= 1 is already answering a colleague.
+    ask_depth: int = 0
+    allow_ask_agent: bool = False
+    # Go already asked a colleague before this run. Do not treat their file
+    # link as unfinished work that the caller must redo.
+    ask_routed: bool = False
 
 
 class MemoryCreate(BaseModel):
@@ -564,11 +570,13 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
         mcp_servers: list[mcp_client.MCPServerConfig] = []
         mcp_extra_tools: list[dict[str, Any]] = []
         available_tool_names: list[str] | None = None
+        allow_ask = bool(body.allow_ask_agent) and int(body.ask_depth or 0) < 1
         if tools_on:
             available_tool_names = [
                 str((t.get("function") or {}).get("name") or "")
                 for t in TOOL_DEFS
                 if (t.get("function") or {}).get("name")
+                and (allow_ask or str((t.get("function") or {}).get("name") or "") != "ask_agent")
             ]
             if body.user_id and (override is None or override.enable_tools is not False):
                 try:
@@ -798,6 +806,7 @@ async def run_events(body: RunRequest, request: Request | None = None) -> AsyncI
                 reply_to_id=body.reply_to_id,
                 thread_root_id=body.thread_root_id,
                 reply_context=body.reply_context,
+                durable_body=body,
             ):
                 yield chunk
         else:
@@ -925,6 +934,10 @@ async def openai_path(
     mcp_extra_tools = list(mcp_extra_tools or [])
     tools_on = tools_enabled(override)
     _, _, model_name = openai_config(override)
+    turn = durable_body
+    allow_ask_agent = bool(getattr(turn, "allow_ask_agent", False)) and int(
+        getattr(turn, "ask_depth", 0) or 0
+    ) < 1
 
     async def tool_handler(name: str, args: dict[str, Any]) -> str:
         with lf.observation_tool(name, args) as tool_obs:
@@ -1051,6 +1064,32 @@ async def openai_path(
                     )
             snippets = merge_scoped_snippets(buckets, mem0_by, scene_kind(channel_id, peer_agent_id))
             return json.dumps({"memories": snippets}, ensure_ascii=False)
+        if name == "ask_agent":
+            from .ask_agent import ask_colleague
+            from .harness.config import thread_id_for
+
+            if not allow_ask_agent:
+                return json.dumps(
+                    {"ok": False, "error": "当前回合不能向其他助手提问"},
+                    ensure_ascii=False,
+                )
+            rid = str(getattr(turn, "request_id", "") or "") if turn is not None else ""
+            try:
+                result = await ask_colleague(
+                    user_id=str(user_id or ""),
+                    from_agent_id=str(agent_id or ""),
+                    to_agent_id=str(args.get("to_agent_id") or ""),
+                    question=str(args.get("question") or ""),
+                    parent_conversation_id=str(conversation_id or ""),
+                    parent_thread_id=thread_id_for(
+                        conversation_id=str(conversation_id or ""),
+                        request_id=rid or None,
+                    ),
+                )
+                return json.dumps(result, ensure_ascii=False)
+            except Exception as e:  # noqa: BLE001
+                return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+
         if name == "send_to_agent":
             from . import agent_bus
 
@@ -1498,6 +1537,7 @@ async def openai_path(
                     )
                     if durable_body
                     else "",
+                    "allow_ask_agent": allow_ask_agent,
                 },
             ):
                 # Desktop/Tauri SSE drop (app background, AbortController on the
@@ -1553,6 +1593,8 @@ async def openai_path(
                     extra_tools=mcp_extra_tools or None,
                     on_status=on_status,
                     sources_out=sources_acc,
+                    allow_ask_agent=allow_ask_agent,
+                    ask_routed=bool(getattr(turn, "ask_routed", False)),
                 )
             )
             try:
