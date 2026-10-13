@@ -1,62 +1,10 @@
 import { useMemo, useState } from "react";
-import { downloadSandboxFile, readSandboxFile } from "../api";
-import { HtmlPreviewModal, friendlyFileError, friendlyOpenError, looksLikeHtml, normalizeWorkspacePath, previewTitleFromPath } from "./HtmlPreviewModal";
+import { HtmlPreviewModal } from "./HtmlPreviewModal";
+import { artifactDisplayName, splitResultOriented } from "./artifactCardsModel";
 import { MarkdownMessage } from "./MarkdownMessage";
 import type { MessageSource } from "../api";
 import { prepareCitedMarkdown } from "../lib/citationMarkers";
-
-/** Friendly label for artifact cards (hide internal /workspace prefix). */
-export function artifactDisplayName(path: string): string {
-  return previewTitleFromPath(path);
-}
-
-/** Extract internal workspace paths and JSON tool blobs from assistant text. */
-export function splitResultOriented(content: string): {
-  display: string;
-  artifacts: { path: string; kind: string }[];
-  collapsedJson: string[];
-} {
-  const artifacts: { path: string; kind: string }[] = [];
-  const collapsedJson: string[] = [];
-  let display = content || "";
-
-  const pathRe = /(?:sandbox:(?:\/\/)?)?(\/workspace\/[^\s`"'<>]+)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = pathRe.exec(content || "")) !== null) {
-    const path = normalizeWorkspacePath(m[1].replace(/[.,;:!?)]+$/, ""));
-    if (!artifacts.some((a) => a.path === path)) {
-      artifacts.push({ path, kind: path.split(".").pop() || "file" });
-    }
-  }
-
-  display = display.replace(/```(?:json)?\s*([\s\S]*?)```/gi, (full, body: string) => {
-    const trimmed = body.trim();
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return full;
-    try {
-      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-      if (parsed && typeof parsed === "object") {
-        if (typeof parsed.path === "string" && (parsed.ok === true || typeof parsed.content === "string")) {
-          const path = normalizeWorkspacePath(String(parsed.path));
-          if (!artifacts.some((a) => a.path === path)) {
-            artifacts.push({ path, kind: "write" });
-          }
-        }
-        collapsedJson.push(trimmed.length > 400 ? `${trimmed.slice(0, 400)}…` : trimmed);
-        return "\n\n";
-      }
-    } catch {
-      /* keep */
-    }
-    return full;
-  });
-
-  // Hide bare /workspace/ prefixes in chat body; leave sandbox:… hrefs intact for click handlers.
-  display = display.replace(/(sandbox:(?:\/\/)?)?\/workspace\//gi, (_full, proto?: string) =>
-    proto ? `${proto}/workspace/` : "",
-  );
-
-  return { display, artifacts, collapsedJson };
-}
+import { useSandboxHtmlPreview } from "./useSandboxHtmlPreview";
 
 export function ArtifactCards({
   artifacts,
@@ -67,60 +15,15 @@ export function ArtifactCards({
   collapsedJson: string[];
   agentId?: string;
 }) {
-  const [preview, setPreview] = useState<{
-    open: boolean;
-    title: string;
-    path: string | null;
-    html: string | null;
-    loading: boolean;
-    error: string | null;
-  }>({ open: false, title: "", path: null, html: null, loading: false, error: null });
+  const {
+    preview,
+    downloadError,
+    openPath,
+    downloadPath,
+    close,
+    isDownloadingPath,
+  } = useSandboxHtmlPreview(agentId);
   const [openJson, setOpenJson] = useState(false);
-  const [downloadingPath, setDownloadingPath] = useState<string | null>(null);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
-
-  const downloadPath = async (path: string) => {
-    const wp = normalizeWorkspacePath(path);
-    setDownloadingPath(wp);
-    setDownloadError(null);
-    try {
-      await downloadSandboxFile(wp, agentId ? { agent_id: agentId } : undefined);
-    } catch (e) {
-      setDownloadError(friendlyFileError(e, "下载"));
-    } finally {
-      setDownloadingPath(null);
-    }
-  };
-
-  const openPath = async (path: string) => {
-    const wp = normalizeWorkspacePath(path);
-    setPreview({ open: true, title: previewTitleFromPath(wp), path: wp, html: null, loading: true, error: null });
-    try {
-      const res = await readSandboxFile(wp, agentId ? { agent_id: agentId } : undefined);
-      const content = res.content || "";
-      if (looksLikeHtml(content, wp)) {
-        setPreview({ open: true, title: previewTitleFromPath(wp), path: wp, html: content, loading: false, error: null });
-      } else {
-        setPreview({
-          open: true,
-          title: previewTitleFromPath(wp),
-          path: wp,
-          html: `<pre style="white-space:pre-wrap;font:12px/1.4 ui-monospace,monospace;padding:12px">${escapeHtml(content)}</pre>`,
-          loading: false,
-          error: null,
-        });
-      }
-    } catch (e) {
-      setPreview({
-        open: true,
-        title: previewTitleFromPath(wp),
-        path: wp,
-        html: null,
-        loading: false,
-        error: friendlyOpenError(e),
-      });
-    }
-  };
 
   if (!artifacts.length && !collapsedJson.length) return null;
 
@@ -137,10 +40,10 @@ export function ArtifactCards({
             <button
               type="button"
               className="artifact-action"
-              disabled={downloadingPath === normalizeWorkspacePath(a.path)}
+              disabled={isDownloadingPath(a.path)}
               onClick={() => void downloadPath(a.path)}
             >
-              {downloadingPath === normalizeWorkspacePath(a.path) ? "下载中…" : "下载"}
+              {isDownloadingPath(a.path) ? "下载中…" : "下载"}
             </button>
           </span>
         </div>
@@ -152,8 +55,8 @@ export function ArtifactCards({
         </button>
       ) : null}
       {openJson
-        ? collapsedJson.map((j, i) => (
-            <pre key={i} className="tool-json-collapsed">
+        ? collapsedJson.map((j) => (
+            <pre key={j} className="tool-json-collapsed">
               {j}
             </pre>
           ))
@@ -164,17 +67,13 @@ export function ArtifactCards({
         html={preview.html}
         loading={preview.loading}
         error={preview.error}
-        downloading={preview.path != null && downloadingPath === preview.path}
+        downloading={preview.path != null && isDownloadingPath(preview.path)}
         downloadError={preview.open ? downloadError : null}
         onDownload={preview.path ? () => void downloadPath(preview.path!) : undefined}
-        onClose={() => setPreview((p) => ({ ...p, open: false }))}
+        onClose={close}
       />
     </div>
   );
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 export function ResultOrientedMessage({

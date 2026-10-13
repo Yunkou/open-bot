@@ -1,8 +1,8 @@
 import { X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 import type { Agent, Machine } from "../api";
-import { listMachines } from "../api";
-import { isLoginOnlyMachine, machinePresenceLabel, preferHostMachines } from "../lib/clientEnv";
+import { machinePresenceLabel } from "../lib/machineRoster";
+import { usePreferHostMachines } from "../hooks/usePreferHostMachines";
 import {
   AVATAR_COLOR_PALETTE,
   AVATAR_SHAPE_LABELS,
@@ -14,6 +14,7 @@ import {
 } from "./avatarColor";
 import { AgentAvatar } from "./AgentAvatar";
 import { useSheetFormUi } from "./useIsTouchUi";
+import { useDialogChrome } from "./useDialogOpen";
 
 type Props = {
   agent: Agent | null;
@@ -51,8 +52,9 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   const [shape, setShape] = useState<AvatarShape>("rectangle");
   const [color, setColor] = useState("#457b9d");
   const [machineId, setMachineId] = useState("");
-  const [machines, setMachines] = useState<Machine[]>([]);
-  const [machinesLoaded, setMachinesLoaded] = useState(false);
+  const { machines, loaded: machinesLoaded, error: machinesError } = usePreferHostMachines(
+    Boolean(agent && open),
+  );
   const [previewMode, setPreviewMode] = useState<PreviewMode>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -65,43 +67,23 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
     setMachineId(agent.machine_id || "");
     setPreviewMode("idle");
     setErr("");
-    setMachinesLoaded(false);
-    let cancelled = false;
-    void (async () => {
-      try {
-        const list = await listMachines();
-        if (!cancelled) {
-          const hosts = preferHostMachines(list);
-          setMachines(hosts);
-          setMachinesLoaded(true);
-          setMachineId((prev) => {
-            if (!prev) return prev;
-            const bound = list.find((m) => m.id === prev);
-            if (bound && isLoginOnlyMachine(bound)) return "";
-            return prev;
-          });
-        }
-      } catch (ex) {
-        if (!cancelled) {
-          setMachines([]);
-          setMachinesLoaded(true);
-          setErr(ex instanceof Error ? ex.message : String(ex));
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
   }, [agent, open]);
 
   useEffect(() => {
-    if (!open || !sheetForm) return;
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, [open, sheetForm]);
+    if (!machinesLoaded) return;
+    if (machinesError) setErr(machinesError);
+    setMachineId((prev) => {
+      if (!prev) return prev;
+      // Drop login-only / unknown binds (prefer-host list excludes phones).
+      if (!machines.some((m) => m.id === prev)) return "";
+      return prev;
+    });
+  }, [machinesLoaded, machines, machinesError]);
+
+  const { ref: dialogRef, maskProps } = useDialogChrome(open, onClose, {
+    blockDismiss: busy,
+    lockScroll: sheetForm,
+  });
 
   if (!open || !agent) return null;
 
@@ -126,19 +108,13 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
   const closeIcon = <X size={16} strokeWidth={2} aria-hidden />;
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
       className={`modal-backdrop${sheetForm ? " bot-avatar-backdrop-sheet bot-avatar-backdrop-shell settings-backdrop-shell" : ""}`}
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      aria-label={`Bot 形象 ${agent.name}`}
     >
-      <div
-        className={`modal bot-avatar-modal${sheetForm ? " bot-avatar-modal-sheet bot-avatar-modal-shell" : ""}`}
-        onPointerDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Bot 形象 ${agent.name}`}
-      >
+      <button {...maskProps} />
+      <div className={`modal bot-avatar-modal${sheetForm ? " bot-avatar-modal-sheet bot-avatar-modal-shell" : ""}`}>
         {sheetForm ? (
           <div className="settings-shell-subhead">
             <button
@@ -199,7 +175,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                 <div className="muted small">预览五态 + 检索动画变体（仅本地试看，不改真实 presence）</div>
               </div>
 
-              <label className="bot-avatar-label">形状</label>
+              <span className="bot-avatar-label">形状</span>
               <div className="bot-avatar-shape-grid">
                 {AVATAR_SHAPES.map((s) => (
                   <button
@@ -216,7 +192,7 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                 ))}
               </div>
 
-              <label className="bot-avatar-label">主色</label>
+              <span className="bot-avatar-label">主色</span>
               <div className="bot-avatar-color-grid">
                 {AVATAR_COLOR_PALETTE.map((c) => (
                   <button
@@ -251,15 +227,15 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
                 ))}
               </select>
               {machinesLoaded && machines.length === 0 ? (
-                <div className="muted small new-chat-help-wrap">
+                <div className="muted small whitespace-normal leading-[1.45] wrap-anywhere">
                   还没有已连接的电脑。手机不能当作优先电脑。
                 </div>
               ) : (
-                <div className="muted small new-chat-help-wrap">
+                <div className="muted small whitespace-normal leading-[1.45] wrap-anywhere">
                   本地能力跟「你在哪台电脑上发这条消息」走，不会锁死创建时选的那台。优先电脑仅在路由需要兜底时使用。
                 </div>
               )}
-              {err ? <div className="auth-error">{err}</div> : null}
+              {err ? <div className="text-[13px] text-(--danger)">{err}</div> : null}
             </div>
           </div>
 
@@ -273,6 +249,6 @@ export function BotAvatarSettings({ agent, open, onClose, onSave }: Props) {
           </div>
         </form>
       </div>
-    </div>
+    </dialog>
   );
 }

@@ -2,16 +2,18 @@
  * Image diagram card — design bot-diagram-card-design-v2 §2.
  * Auth attachment GET via ?access_token= on <img>; toolbar: copy URL · download · fullscreen.
  * No fake generated images — only real urls / attachments.
+ * Interaction chrome from `./diagram`.
  */
-import { Download, Maximize2, X } from "lucide-react";
+import { clamp } from "es-toolkit";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
-import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import {
   attachmentCopyUrl,
@@ -19,19 +21,28 @@ import {
   fetchAttachmentBlob,
   imageDownloadFilename,
 } from "../api";
-import { copyText } from "../lib/diagramExport";
-import { DiagramCardFrame, type DiagramOverflowItem } from "./DiagramCardFrame";
-
-const diagramIcon = {
-  size: 16,
-  strokeWidth: 1.5,
-  "aria-hidden": true as const,
-  focusable: false as const,
-};
-
-const IconDownload = () => <Download {...diagramIcon} />;
-const IconExpand = () => <Maximize2 {...diagramIcon} />;
-const IconClose = () => <X {...diagramIcon} />;
+import { cn } from "@/lib/utils";
+import { DiagramCardFrame } from "./DiagramCardFrame";
+import { type DiagramOverflowItem } from "./diagramCardFrameModel";
+import {
+  copyDiagramText,
+  DiagramCopyButton,
+  DiagramDownloadIconButton,
+  DiagramExpandButton,
+  DiagramFullscreenShell,
+  diagramOverflowItems,
+  useDiagramCardChrome,
+} from "./diagram";
+import {
+  diagramBodyImageClass,
+  diagramBodyImageFailClass,
+  diagramBtnTextClass,
+  diagramFsBodyClass,
+  diagramImageFailClass,
+  diagramImageImgClass,
+  diagramImageImgFsClass,
+  diagramImageSkeletonClass,
+} from "./diagram/diagramUi";
 
 function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
@@ -44,46 +55,12 @@ function saveBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function ImageFullscreen({
-  src,
-  alt,
-  name,
-  mime: _mime,
-  onCopy,
-  onDownload,
-  downloading,
-  onClose,
-}: {
-  src: string;
-  alt: string;
-  name?: string;
-  mime?: string;
-  onCopy: () => void;
-  onDownload: () => void;
-  downloading: boolean;
-  onClose: () => void;
-}) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
+function useImageFullscreenZoom(bodyRef: RefObject<HTMLDivElement | null>) {
   const [scale, setScale] = useState(1);
   const scaleRef = useRef(1);
-  scaleRef.current = scale;
-
-  useEffect(() => {
-    const prevFocus = document.activeElement as HTMLElement | null;
-    closeRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      prevFocus?.focus?.();
-    };
-  }, [onClose]);
+  useLayoutEffect(() => {
+    scaleRef.current = scale;
+  });
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -91,7 +68,7 @@ function ImageFullscreen({
     const onWheel = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
-      setScale((s) => Math.min(4, Math.max(0.25, s * Math.exp(-e.deltaY * 0.0015))));
+      setScale((s) => clamp(s * Math.exp(-e.deltaY * 0.0015), 0.25, 4));
     };
     let start: { dist: number; scale: number } | null = null;
     const dist = (t: TouchList) =>
@@ -102,7 +79,7 @@ function ImageFullscreen({
     const onTouchMove = (e: TouchEvent) => {
       if (!start || e.touches.length !== 2) return;
       e.preventDefault();
-      setScale(Math.min(4, Math.max(0.25, start.scale * (dist(e.touches) / start.dist))));
+      setScale(clamp(start.scale * (dist(e.touches) / start.dist), 0.25, 4));
     };
     const onTouchEnd = (e: TouchEvent) => {
       if (e.touches.length < 2) start = null;
@@ -119,60 +96,60 @@ function ImageFullscreen({
       el.removeEventListener("touchend", onTouchEnd);
       el.removeEventListener("touchcancel", onTouchEnd);
     };
-  }, []);
+  }, [bodyRef]);
 
-  return createPortal(
-    <div
-      className="diagram-fs-backdrop diagram-fs-backdrop-image"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="diagram-fs diagram-fs-image" role="dialog" aria-modal="true" aria-label="图片">
-        <div className="diagram-toolbar diagram-fs-toolbar">
-          <span className="diagram-pill">图片</span>
-          <div className="diagram-actions">
-            <button type="button" className="diagram-btn diagram-btn-text" onClick={onCopy}>
-              复制
-            </button>
-            <button
-              type="button"
-              className="diagram-btn diagram-btn-icon"
-              aria-label="下载原图"
-              title="下载原图"
-              disabled={downloading}
-              onClick={onDownload}
-            >
-              <IconDownload />
-            </button>
-            <button
-              ref={closeRef}
-              type="button"
-              className="diagram-btn diagram-btn-icon"
-              aria-label="关闭"
-              title="关闭 (Esc)"
-              onClick={onClose}
-            >
-              <IconClose />
-            </button>
-          </div>
-        </div>
-        <div
-          ref={bodyRef}
-          className="diagram-fs-body is-image"
-          onDoubleClick={() => setScale(1)}
-        >
-          <img
-            className="diagram-image-img diagram-image-img-fs"
-            src={src}
-            alt={alt || name || "图片"}
-            style={{ transform: `scale(${scale})` }}
-            draggable={false}
+  return { scale, setScale };
+}
+
+function ImageFullscreen({
+  src,
+  alt,
+  name,
+  onCopy,
+  onDownload,
+  downloading,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  name?: string;
+  onCopy: () => void;
+  onDownload: () => void;
+  downloading: boolean;
+  onClose: () => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const { scale, setScale } = useImageFullscreenZoom(bodyRef);
+
+  return (
+    <DiagramFullscreenShell
+      label="图片"
+      ariaLabel="图片"
+      variant="image"
+      actions={
+        <>
+          <DiagramCopyButton onClick={onCopy} />
+          <DiagramDownloadIconButton
+            ariaLabel="下载原图"
+            title="下载原图"
+            disabled={downloading}
+            onClick={onDownload}
           />
-        </div>
-      </div>
-    </div>,
-    document.body,
+        </>
+      }
+      bodyRef={bodyRef}
+      bodyClassName={diagramFsBodyClass({ image: true })}
+      onBodyDoubleClick={() => setScale(1)}
+      onClose={onClose}
+    >
+      <img
+        className={diagramImageImgFsClass}
+        src={src}
+        alt={alt || name || "图片"}
+        style={{ transform: `scale(${scale})` }}
+        draggable={false}
+      />
+    </DiagramFullscreenShell>
   );
 }
 
@@ -191,26 +168,20 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
     displaySrc ? "loading" : "error",
   );
   const [retryKey, setRetryKey] = useState(0);
-  const [fullscreen, setFullscreen] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     setStatus(displaySrc ? "loading" : "error");
   }, [displaySrc, retryKey]);
 
-  useEffect(() => {
-    if (status !== "ok") setFullscreen(false);
-  }, [status]);
+  const ready = status === "ok" && Boolean(displaySrc);
+  const { fullscreen, openFullscreen, closeFullscreen } = useDiagramCardChrome({ ready });
 
   const onCopy = useCallback(() => {
-    if (!copyTarget) {
-      toast.message("暂不可复制", { duration: 1500 });
-      return;
-    }
-    copyText(copyTarget).then(
-      () => toast.success("已复制", { duration: 1500 }),
-      () => toast.error("复制失败"),
-    );
+    copyDiagramText(copyTarget, {
+      emptyMessage: "暂不可复制",
+      failMessage: "复制失败",
+    });
   }, [copyTarget]);
 
   const onDownload = useCallback(() => {
@@ -224,43 +195,28 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
       .finally(() => setDownloading(false));
   }, [src, name, mime]);
 
-  const ready = status === "ok" && Boolean(displaySrc);
-
   const actions = (
     <>
-      <button
-        type="button"
-        className="diagram-btn diagram-btn-text"
-        title={copyTarget ? "复制图片地址" : "暂不可复制"}
-        disabled={!copyTarget}
+      <DiagramCopyButton
         onClick={onCopy}
-      >
-        复制
-      </button>
-      <button
-        type="button"
-        className="diagram-btn diagram-btn-icon"
-        aria-label="下载原图"
+        disabled={!copyTarget}
+        title={copyTarget ? "复制图片地址" : "暂不可复制"}
+      />
+      <DiagramDownloadIconButton
+        ariaLabel="下载原图"
         title={ready || displaySrc ? "下载原图" : "图片就绪后可下载"}
         disabled={!displaySrc || downloading}
         onClick={onDownload}
-      >
-        <IconDownload />
-      </button>
-      <button
-        type="button"
-        className="diagram-btn diagram-btn-icon"
-        aria-label="全屏"
-        title={ready ? "全屏" : "图片就绪后可全屏"}
-        disabled={!ready}
-        onClick={() => setFullscreen(true)}
-      >
-        <IconExpand />
-      </button>
+      />
+      <DiagramExpandButton
+        ready={ready}
+        onClick={openFullscreen}
+        disabledTitle="图片就绪后可全屏"
+      />
     </>
   );
 
-  const overflowItems: DiagramOverflowItem[] = [
+  const overflowItems: DiagramOverflowItem[] = diagramOverflowItems(
     {
       key: "copy",
       label: "复制",
@@ -277,20 +233,20 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
       key: "fs",
       label: "全屏",
       disabled: !ready,
-      onClick: () => setFullscreen(true),
+      onClick: openFullscreen,
     },
-  ];
+  );
 
   let body: ReactNode;
   if (!displaySrc || status === "error") {
     body = (
-      <div className="diagram-body diagram-body-image diagram-body-image-fail">
-        <div className="diagram-image-fail" role="status">
+      <div className={diagramBodyImageFailClass}>
+        <div className={diagramImageFailClass} role="status">
           <span>图片加载失败</span>
           {displaySrc ? (
             <button
               type="button"
-              className="diagram-btn diagram-btn-text"
+              className={diagramBtnTextClass}
               onClick={() => setRetryKey((k) => k + 1)}
             >
               重试
@@ -302,19 +258,30 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
   } else {
     body = (
       <div
-        className={`diagram-body diagram-body-image${status === "loading" ? " is-loading" : ""}`}
+        className={cn(diagramBodyImageClass, status === "loading" && "is-loading group/img")}
         aria-busy={status === "loading"}
       >
-        {status === "loading" ? <div className="diagram-image-skeleton" aria-hidden="true" /> : null}
+        {status === "loading" ? (
+          <div className={diagramImageSkeletonClass} aria-hidden="true" />
+        ) : null}
         <img
           key={`${displaySrc}#${retryKey}`}
-          className="diagram-image-img"
+          className={diagramImageImgClass}
           src={displaySrc}
           alt={alt || name || "图片"}
           onLoad={() => setStatus("ok")}
           onError={() => setStatus("error")}
+          role={status === "ok" ? "button" : undefined}
+          tabIndex={status === "ok" ? 0 : undefined}
           onClick={() => {
-            if (status === "ok") setFullscreen(true);
+            if (status === "ok") openFullscreen();
+          }}
+          onKeyDown={(e) => {
+            if (status !== "ok") return;
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openFullscreen();
+            }
           }}
         />
       </div>
@@ -336,11 +303,10 @@ export function ImageDiagramCard({ src, alt, name, mime }: ImageDiagramCardProps
           src={displaySrc}
           alt={alt || name || "图片"}
           name={name}
-          mime={mime}
           onCopy={onCopy}
           onDownload={onDownload}
           downloading={downloading}
-          onClose={() => setFullscreen(false)}
+          onClose={closeFullscreen}
         />
       ) : null}
     </>

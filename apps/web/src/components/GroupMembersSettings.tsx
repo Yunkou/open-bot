@@ -1,12 +1,12 @@
 import { ChevronLeft } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 import type { Agent, Channel } from "../api";
 import { addChannelMember, removeChannelMember } from "../api";
 import { AgentAvatar } from "./AgentAvatar";
 import { useConfirm } from "./ConfirmProvider";
 import { useSheetFormUi } from "./useIsTouchUi";
-import { OPENBOT_SYSTEM_BACK_EVENT } from "../lib/mobileSystemBack";
+import { useDialogChrome } from "./useDialogOpen";
 
 type Props = {
   open: boolean;
@@ -24,46 +24,31 @@ type View = "members" | "add";
  * Entry: channel pill or list long-press「群设置」.
  * removeChannelMember may 404 until backend ships DELETE (graceful toast).
  */
-export function GroupMembersSettings({ open, channel, agents, onClose, onChanged }: Props) {
+type DialogProps = {
+  channel: Channel;
+  agents: Agent[];
+  onClose: () => void;
+  onChanged: (ch: Channel) => void;
+};
+
+function GroupMembersSettingsDialog({ channel, agents, onClose, onChanged }: DialogProps) {
   const sheetForm = useSheetFormUi();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("members");
   const [busy, setBusy] = useState(false);
-  const [localChannel, setLocalChannel] = useState<Channel | null>(channel);
+  const [channelPatch, setChannelPatch] = useState<Channel | null>(null);
+  const localChannel = channelPatch ?? channel;
 
-  useEffect(() => {
-    if (!open) return;
-    setLocalChannel(channel);
-    setView("members");
-  }, [open, channel]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        if (view === "add") setView("members");
-        else onClose();
+  const { ref: dialogRef, maskProps } = useDialogChrome(true, onClose, {
+    blockDismiss: busy,
+    systemBack: true,
+    onDismiss: () => {
+      if (view === "add") {
+        setView("members");
+        return false;
       }
-    };
-    document.addEventListener("keydown", onKey);
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      document.body.style.overflow = prev;
-    };
-  }, [open, onClose, view]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onBack = (e: Event) => {
-      e.preventDefault();
-      if (view === "add") setView("members");
-      else onClose();
-    };
-    document.addEventListener(OPENBOT_SYSTEM_BACK_EVENT, onBack);
-    return () => document.removeEventListener(OPENBOT_SYSTEM_BACK_EVENT, onBack);
-  }, [open, onClose, view]);
+    },
+  });
 
   const memberIds = useMemo(() => new Set(localChannel?.members || []), [localChannel]);
 
@@ -98,7 +83,7 @@ export function GroupMembersSettings({ open, channel, agents, onClose, onChanged
         members: updated.members ?? localChannel.members,
         member_profiles: updated.member_profiles ?? localChannel.member_profiles,
       };
-      setLocalChannel(merged);
+      setChannelPatch(merged);
       onChanged(merged);
     },
     [localChannel, onChanged],
@@ -158,24 +143,16 @@ export function GroupMembersSettings({ open, channel, agents, onClose, onChanged
     }
   };
 
-  if (!open || !localChannel) return null;
-
   const title = view === "add" ? "添加成员" : "群设置";
 
   return (
-    <div
+    <dialog
+      ref={dialogRef}
       className={`modal-backdrop group-channel-backdrop${sheetForm ? " group-channel-backdrop-sheet" : ""}`}
-      onPointerDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      aria-label={`${title} ${localChannel.name}`}
     >
-      <div
-        className={`modal group-channel-modal${sheetForm ? " group-channel-modal-shell" : ""}`}
-        onPointerDown={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label={`${title} ${localChannel.name}`}
-      >
+      <button {...maskProps} />
+      <div className={`modal group-channel-modal${sheetForm ? " group-channel-modal-shell" : ""}`}>
         <div className="modal-head group-channel-modal-head">
           {sheetForm ? (
             <>
@@ -286,12 +263,14 @@ export function GroupMembersSettings({ open, channel, agents, onClose, onChanged
               {candidates.length === 0 ? (
                 <p className="muted small">没有可添加的助手</p>
               ) : (
-                <div className="new-chat-members group-add-members">
+                <div className="group-add-members flex max-h-70 min-h-30 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain">
+
                   {candidates.map((a) => (
                     <button
                       key={a.id}
                       type="button"
-                      className="new-chat-member group-add-member-btn"
+                      className="group-add-member-btn flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-sm hover:bg-(--bg-hover)"
+
                       disabled={busy}
                       onClick={() => void onAdd(a.id)}
                     >
@@ -312,6 +291,20 @@ export function GroupMembersSettings({ open, channel, agents, onClose, onChanged
           )}
         </div>
       </div>
-    </div>
+    </dialog>
+  );
+}
+
+export function GroupMembersSettings({ open, channel, agents, onClose, onChanged }: Props) {
+  if (!open || !channel) return null;
+
+  return (
+    <GroupMembersSettingsDialog
+      key={channel.id}
+      channel={channel}
+      agents={agents}
+      onClose={onClose}
+      onChanged={onChanged}
+    />
   );
 }
