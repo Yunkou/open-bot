@@ -1,0 +1,38 @@
+diff --git a/build/src/start/server/middleware/DomComponentsMiddleware.js b/build/src/start/server/middleware/DomComponentsMiddleware.js
+--- a/build/src/start/server/middleware/DomComponentsMiddleware.js
++++ b/build/src/start/server/middleware/DomComponentsMiddleware.js
+@@ -131,16 +131,25 @@
+         <div id="root"></div>
+         <script>${_domPolyfills.DOM_POLYFILLS_SCRIPT}</script>
+         <script>
+-          var injectedObject = {};
+-          try {
+-            injectedObject = JSON.parse(window.ReactNativeWebView.injectedObjectJson());
+-          } catch (e) {
+-            throw new Error('Failed to parse injectedObjectJson: ' + e.message);
+-          }
+-          window.$$EXPO_DOM_HOST_OS = injectedObject.EXPO_DOM_HOST_OS;
+-          window.$$EXPO_INITIAL_PROPS = injectedObject.initialProps;
++          (function bootDomComponent() {
++            var injectedObject = null;
++            try {
++              var bridge = window.ReactNativeWebView;
++              if (bridge && typeof bridge.injectedObjectJson === 'function') {
++                injectedObject = JSON.parse(bridge.injectedObjectJson());
++              }
++            } catch (e) {}
++            // Android react-native-webview writes injectedObjectJson after the
++            // document scripts run. Wait until the host OS is actually present.
++            if (!injectedObject || injectedObject.EXPO_DOM_HOST_OS == null) {
++              setTimeout(bootDomComponent, 16);
++              return;
++            }
++            window.$$EXPO_DOM_HOST_OS = injectedObject.EXPO_DOM_HOST_OS;
++            window.$$EXPO_INITIAL_PROPS = injectedObject.initialProps;
++            ${src ? `var script = document.createElement('script'); script.crossOrigin = 'anonymous'; script.src = ${JSON.stringify(src.replace(/^https?:/, ''))}; document.body.appendChild(script);` : ''}
++          })();
+         </script>
+-        ${src ? `<script crossorigin src="${src.replace(/^https?:/, '')}"></script>` : ''}
+     </body>
+ </html>`;
+ }
