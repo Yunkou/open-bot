@@ -11,7 +11,8 @@
       "path": "skills/find-skills",
       "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
       "install": "npx skills add https://github.com/vercel-labs/skills --skill find-skills",
-      "note": "Discovery entry: always mounted for new bots; disable blocked (losing find-skills removes skill discovery)."
+      "note": "Discovery entry: always mounted for new bots; disable blocked. Adapted for open-bot Settings install UX (not npx-only); sync skips overwrite.",
+      "preserve_local": true
     },
     {
       "slug": "grill-me",
@@ -21,7 +22,8 @@
       "path": "skills/productivity/grill-me",
       "ref": "49dd158d1076134a641b33efb035946536778336",
       "install": "npx skills add https://github.com/mattpocock/skills --skill grill-me",
-      "note": "grilling is merged into grill-me; do not add grilling separately"
+      "note": "grilling is merged into grill-me; do not add grilling separately; Adapted for open-bot (load_skill; grilling inlined into grill-me). Sync skips overwrite.",
+      "preserve_local": true
     },
     {
       "slug": "grill-with-docs",
@@ -30,7 +32,9 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/grill-with-docs",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "install": "npx skills add https://github.com/mattpocock/skills --skill grill-with-docs"
+      "install": "npx skills add https://github.com/mattpocock/skills --skill grill-with-docs",
+      "preserve_local": true,
+      "note": "Adapted for open-bot (load_skill; grilling inlined into grill-me). Sync skips overwrite."
     },
     {
       "slug": "improve-codebase-architecture",
@@ -39,7 +43,9 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/improve-codebase-architecture",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "install": "npx skills add https://github.com/mattpocock/skills --skill improve-codebase-architecture"
+      "install": "npx skills add https://github.com/mattpocock/skills --skill improve-codebase-architecture",
+      "preserve_local": true,
+      "note": "Adapted for open-bot (load_skill; grilling inlined into grill-me). Sync skips overwrite."
     },
     {
       "slug": "tdd",
@@ -68,7 +74,9 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/productivity/handoff",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "install": "npx skills add https://github.com/mattpocock/skills --skill handoff"
+      "install": "npx skills add https://github.com/mattpocock/skills --skill handoff",
+      "preserve_local": true,
+      "note": "Adapted for open-bot (load_skill; grilling inlined into grill-me). Sync skips overwrite."
     },
     {
       "slug": "triage",
@@ -77,7 +85,9 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/triage",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "install": "npx skills add https://github.com/mattpocock/skills --skill triage"
+      "install": "npx skills add https://github.com/mattpocock/skills --skill triage",
+      "preserve_local": true,
+      "note": "Adapted for open-bot (load_skill; grilling inlined into grill-me). Sync skips overwrite."
     },
     {
       "slug": "prototype",

@@ -130,7 +130,9 @@ function AppSidebarInner() {
                   color={identityFocus.avatar_color}
                   status={presenceByAgent[identityFocus.id] || "idle"}
                   searchingHint={Boolean(
-                    (runFaceAgentId ? identityFocus.id === runFaceAgentId : activeAgent && identityFocus.id === activeAgent.id) &&
+                    (runFaceAgentId
+                      ? identityFocus.id === runFaceAgentId
+                      : !conversation?.channel_id && activeAgent && identityFocus.id === activeAgent.id) &&
                       searchingHintNow,
                   )}
                   online={isBotOnline(identityFocus.id)}
@@ -237,7 +239,9 @@ function AppSidebarInner() {
                     color={a.avatar_color}
                     status={presenceByAgent[a.id] || "idle"}
                     searchingHint={Boolean(
-                      (runFaceAgentId ? a.id === runFaceAgentId : activeAgent && a.id === activeAgent.id) &&
+                      (runFaceAgentId
+                        ? a.id === runFaceAgentId
+                        : !conversation?.channel_id && activeAgent && a.id === activeAgent.id) &&
                         searchingHintNow,
                     )}
                     online={isBotOnline(a.id)}

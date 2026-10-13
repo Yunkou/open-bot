@@ -118,9 +118,9 @@ def format_environment_block(
             "没点名时：有当前会话 machine_id（发消息的那台）就用它；它没连接就说明要打开那台，不要改到别的电脑。"
             "浏览器没有 machine_id 时：用可选的优先电脑，否则仅一台已连接时用那一台；多台且无优先则先问用户。"
             "对不上或有多台都像时先问用户。"
-            "本机命令、文件查询、远程 SSH：先 load_skill（host-shell / host-file-query / host-ssh）再按说明执行。"
-            "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小。"
-            "不要用内部运行环境冒充本机文件。"
+            # Must-load details live in ## 工具路由; keep a short pointer (tests expect load_skill + host-ssh here).
+            "本机/远程操作前先 load_skill（host-shell / host-file-query / host-ssh）。"
+            "禁止编造文件名和大小；不要用内部运行环境冒充本机文件。"
         )
         lines.extend(_usual_machine_lines(machines))
         if not connected_labels:
@@ -240,11 +240,11 @@ def format_tools_routing_block(*, tools_enabled: bool, available_tool_names: lis
         )
     if "list_machines" in names or any(n.startswith("host_") for n in names):
         lines.append(
-            "主机：先 list_machines 看 connected；点名用对应 machine_id；没点名用当前会话机，浏览器再走优先电脑/唯一在线。"
-            "本机命令、文件查询、远程 SSH 的用法不写在系统提示里——"
+            # Machine selection detail lives in ## 环境; keep must-load as the canonical host-skill rule.
+            "主机：选机规则见「环境」。本机命令、文件查询、远程 SSH 的用法不写在系统提示里——"
             "目录有匹配技能时，动手前必须 load_skill"
             "（host-shell / host-file-query / host-ssh），读完再调用工具；禁止跳过 load 直接调。"
-            "结果在等待则尚未执行；denied 即用户拒绝。禁止编造文件名和大小，禁止用 sandbox 冒充本机。"
+            "禁止用 sandbox 冒充本机。"
         )
     if "clone_agent" in names:
         lines.append(

@@ -23,9 +23,14 @@ type groupAutoPickResult struct {
 	Confidence float64
 	Method     string // "heuristic"
 	Fallback   string // "" | "lead" | "all"
-	// LeadFallback marks agents that should get the "you are the fallback, please answer" prompt.
+	// LeadFallback marks agents that get the hard must-answer / no-[PASS] participation
+	// prompt. Set for: true all-hands (choice=all / full roster), intentional must-answer
+	// (lead fail-open, second fail-open), and who-can capable picks (census answerers must
+	// speak). Specialty / broad fail-open-all do NOT set this — selected bots keep
+	// candidacy [PASS] when off-topic / mis-selected.
 	LeadFallback map[string]bool
 	// AllowSecondFailOpen: if every AutoPick candidate PASS-es, run lead (or all).
+	// False for who-can / specialty / all-hands so PASS cannot dump incapable peers.
 	AllowSecondFailOpen bool
 }
 
@@ -119,18 +124,24 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 		_, leadInMembers = memberSet[leadID]
 	}
 
+	failOpenAll := func() groupAutoPickResult {
+		out := copyStringSlice(members)
+		// Broad path: everyone is a candidate, but do not ban [PASS] — unrelated bots
+		// must still be able to stay silent via candidacy. True all-hands uses
+		// choice=all LeadFallback instead.
+		log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=all", method, out)
+		return groupAutoPickResult{
+			AgentIDs:            out,
+			Confidence:          0,
+			Method:              method,
+			Fallback:            "all",
+			LeadFallback:        map[string]bool{},
+			AllowSecondFailOpen: false,
+		}
+	}
 	failOpenLead := func() groupAutoPickResult {
 		if !leadInMembers {
-			out := copyStringSlice(members)
-			log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=all", method, out)
-			return groupAutoPickResult{
-				AgentIDs:            out,
-				Confidence:          0,
-				Method:              method,
-				Fallback:            "all",
-				LeadFallback:        map[string]bool{},
-				AllowSecondFailOpen: false,
-			}
+			return failOpenAll()
 		}
 		log.Printf("auto_pick=%s ids=%v conf=0.00 fallback=lead", method, []string{leadID})
 		return groupAutoPickResult{
@@ -230,15 +241,19 @@ func autoPickHeuristicAs(method, userText string, members []string, agents []*db
 	}
 	leadFB := map[string]bool{}
 	allowSecond := true
-	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): capable must answer;
-	// no PASS→second-wave dump of incapable peers. Production 13:45 CST Langfuse
-	// peek/obs=5808f45a (「写个js的代码…」): low-conf decision→heuristic picked both
-	// coders; both [PASS]; second fail-open dumped to 文档助手 who answered.
-	if isWhoCanIntent(userText) || userTextHitsRoleSynonym(userText) {
+	// Who-can OR specialty-from-user-text (「写个js」「帮我查下…」): close second-wave
+	// so PASS cannot dump incapable peers (13:45 CST 5808f45a → 文档助手).
+	// Who-can capable picks: also LeadFallback (forbid [PASS]) — otherwise the only
+	// coder can candidacy-[PASS] and AllowSecondFailOpen=false → silence
+	// (regression after fe5f9a6; restore 423139b who-can must-answer).
+	// Specialty does NOT LeadFallback: mis-selected bots may still PASS via candidacy.
+	if isWhoCanIntent(userText) {
 		allowSecond = false
 		for _, id := range ids {
 			leadFB[id] = true
 		}
+	} else if userTextHitsRoleSynonym(userText) {
+		allowSecond = false
 	}
 	log.Printf("auto_pick=%s ids=%v conf=%.2f fallback=", method, ids, conf)
 	return groupAutoPickResult{
@@ -385,12 +400,17 @@ var roleSynonymBuckets = []struct {
 	roleNeedles []string
 }{
 	{
-		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "function", "api", "脚本", "单元测试", "写个函数", "修一下"},
+		userNeedles: []string{"函数", "代码", "bug", "修bug", "编程", "实现", "编译", "报错", "排障", "refactor", "code", "coding", "coder", "function", "api", "脚本", "单元测试", "写个函数", "修一下", "html", "canvas", "svg", "javascript", "js", "网页"},
 		roleNeedles: []string{"码", "程序", "代码", "编程", "开发", "工程", "排障", "tech", "code", "engineer", "软件", "后端", "前端"},
 	},
 	{
 		userNeedles: []string{"写诗", "文案", "改稿", "小说", "散文", "写作", "润色", "起标题"},
 		roleNeedles: []string{"写", "文案", "写作", "编辑", "内容", "诗人", "作家"},
+	},
+	{
+		// UI/UE design specialty (distinct from coding html/canvas and writing copy).
+		userNeedles: []string{"线框", "原型", "设计稿", "交互稿", "视觉稿", "信息架构", "高保真", "低保真", "点击态", "组件规范", "用户体验", "ui设计", "ue设计", "ux设计", "wireframe", "mockup", "figma", "prototype", "做个设计", "设计一下", "设计个", "画个界面", "画一个界面", "界面设计", "交互设计", "视觉设计"},
+		roleNeedles: []string{"设计", "ui", "ue", "ux", "交互", "视觉", "线框", "原型", "体验", "design", "设计师"},
 	},
 	{
 		userNeedles: []string{"查资料", "查下资料", "查一下资料", "查下", "帮我查", "查一查", "搜一下", "搜索", "研究", "调研", "检索", "百科", "look up", "research"},
@@ -438,7 +458,6 @@ func scoreRoleSynonyms(haystack, roleBlob string) int {
 	}
 	return score
 }
-
 
 // userTextHitsRoleSynonym reports whether the user ask itself matches a specialty
 // synonym bucket (research/coding/…). When true, heuristic scoring must not blend
@@ -551,69 +570,6 @@ func orgAutoPickEnabled(flagsJSON string) bool {
 	return orgAutoPickMode(flagsJSON) != db.AutoPickOff
 }
 
-// isAllHandsIntent detects no-@ phrasing that asks every member to speak
-// (self-intro / round-robin), e.g. 「都介绍下自己」「大家介绍一下」「everyone introduce」.
-// MVP: heuristic substring / collective+action match — enough to avoid decision/heuristic
-// collapsing to K=1 when the user clearly wants all bots.
-func isAllHandsIntent(userText string) bool {
-	text := strings.ToLower(strings.TrimSpace(userText))
-	if text == "" {
-		return false
-	}
-	for _, p := range allHandsFixedPhrases {
-		if p != "" && strings.Contains(text, strings.ToLower(p)) {
-			return true
-		}
-	}
-	hasCollective := false
-	for _, c := range allHandsCollectiveMarkers {
-		if c != "" && strings.Contains(text, strings.ToLower(c)) {
-			hasCollective = true
-			break
-		}
-	}
-	if !hasCollective {
-		return false
-	}
-	for _, a := range allHandsActionMarkers {
-		if a != "" && strings.Contains(text, strings.ToLower(a)) {
-			return true
-		}
-	}
-	return false
-}
-
-// Fixed multi-char phrases (ZH/EN). Checked first for precision.
-var allHandsFixedPhrases = []string{
-	"都介绍", "大家都介绍", "各位介绍", "各自介绍",
-	"都自我介绍", "大家自我介绍", "各位自我介绍", "各自自我介绍",
-	"都说说", "大家都说说", "各位说说", "各自说说",
-	"都说一下", "大家都说一下", "各位说一下",
-	"都讲讲", "大家讲讲", "各位讲讲",
-	"都讲一下", "大家讲一下",
-	"每人介绍", "每位介绍", "每个人介绍", "每一位介绍",
-	"逐个介绍", "轮流介绍", "全员介绍", "所有人介绍",
-	"都来介绍", "一起来介绍", "都来自我介绍",
-	"轮流发言", "每人发言", "各自发言",
-	"introduce yourselves", "everyone introduce", "everybody introduce",
-	"all introduce", "all of you introduce", "each of you introduce",
-	"everyone introduce yourselves", "introduce yourself everyone",
-}
-
-// Collective markers that must co-occur with an action marker.
-var allHandsCollectiveMarkers = []string{
-	"都", "大家", "各位", "各自", "每人", "每位", "每个人", "每一位",
-	"所有人", "全员", "轮流", "逐个",
-	"everyone", "everybody", "all of you", "each of you",
-}
-
-// Speak / intro actions paired with collective markers.
-var allHandsActionMarkers = []string{
-	"介绍", "自我介绍", "说说", "说一下", "讲讲", "讲一下", "发言",
-	"introduce", "say hi", "say hello",
-}
-
-
 // isWhoCanIntent detects capability-census asks: who among members can do X / both.
 // Distinct from all-hands (intro / everyone speak) — answerers are the capable subset.
 func isWhoCanIntent(userText string) bool {
@@ -663,80 +619,173 @@ var whoCanAbilityMarkers = []string{
 	"会", "能", "可以", "can", "could",
 }
 
-// autoPickAllCandidates returns every member for all-hands phrasing (intro / round-robin).
-// LeadFallback on each so participation prompt forbids candidacy [PASS]; Method is
-// mode-prefixed for logs (heuristic->all_hands / decision->heuristic->all_hands).
-func autoPickAllCandidates(method string, members []string) groupAutoPickResult {
-	if strings.TrimSpace(method) == "" {
-		method = "all_hands"
-	}
-	out := copyStringSlice(members)
-	leadFB := map[string]bool{}
-	for _, id := range out {
-		leadFB[id] = true
-	}
-	log.Printf("auto_pick=%s ids=%v conf=1.00 fallback=all", method, out)
-	return groupAutoPickResult{
-		AgentIDs:            out,
-		Confidence:          1.0,
-		Method:              method,
-		Fallback:            "all",
-		LeadFallback:        leadFB,
-		AllowSecondFailOpen: false,
-	}
-}
-
 // runAutoPickByMode applies org auto_pick mode for a no-@ turn.
-// Heuristic all-hands phrasing (「都介绍下自己」…) short-circuits to all members with
-// LeadFallback (must answer; no candidacy [PASS]).
-// Decision always calls SystemOne (no phrase skip): schema includes opaque "all" + mN + count;
-// multi/all-hands may raise effective K up to members so the model can return a subset / all.
-// On parse/timeout/empty/low-conf/off fail-open to heuristic (or all-hands if phrase).
+// Decision always calls SystemOne: schema includes opaque "all" + mN + count;
+// the decide prompt classifies all-hands vs who-can vs specialty (no phrase-list gate).
+// multi/count may raise effective K up to members so the model can return a subset / all.
+// On parse/timeout/empty/low-conf/off fail-open to heuristic (not lead-only).
+// Heuristic has no all-hands keyword short-circuit — decision mode is the product path
+// for intro / roast-everyone; heuristic remains specialty/role matching only.
 func runAutoPickByMode(mode, userText string, members []string, agents []*db.Agent, leadID string, k int, synopsis string, deps *autoPickDecisionDeps) groupAutoPickResult {
 	mode = db.NormalizeAutoPickMode(mode)
-	allHands := isAllHandsIntent(userText)
-	if allHands && mode != db.AutoPickDecision {
-		return autoPickAllCandidates("heuristic->all_hands", members)
-	}
 	switch mode {
 	case db.AutoPickDecision:
 		if pick, ok := autoPickDecision(context.Background(), deps, userText, members, agents, leadID, k, synopsis); ok {
 			return pick
 		}
-		// Fail-open: all-hands phrase → all candidates (decision path already tried);
-		// else heuristic (docs §6), Method decision->heuristic — not lead-only.
-		if allHands {
-			return autoPickAllCandidates("decision->heuristic->all_hands", members)
+		// Decide failed (timeout/parse/low-conf/off). Specialty heuristic keeps capable
+		// subsets; empty/lead-only expands to all + LeadFallback so a slow SystemOne that
+		// would have returned choice=all (Langfuse cf23 「大家好」 7.3s vs 8s client
+		// timeout) does not collapse the room to a single lead reply.
+		h := autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
+		// Lead-only still expands to all (cf23 all-hands decide timeout) so the room is
+		// not collapsed to a single lead. Do NOT LeadFallback everyone: this is a broad
+		// path when intent is unknown — unrelated bots must still [PASS] via candidacy.
+		// True all-hands with successful choice=all still LeadFallbacks. A single
+		// specialty hit recovered via Recent-context synopsis (FOLLOW-UP + prior specialty
+		// USER ask) must NOT be dumped to everyone — that is the fail-open-all trap.
+		if h.Fallback == "lead" || (len(h.AgentIDs) <= 1 && len(members) > 1 && !isWhoCanIntent(userText) && !userTextHitsRoleSynonym(userText) && !userTextHitsRoleSynonym(synopsis)) {
+			out := copyStringSlice(members)
+			log.Printf("auto_pick=decision->heuristic ids=%v conf=0.00 fallback=all note=decide_fail_all_hands_failopen", out)
+			return groupAutoPickResult{
+				AgentIDs:            out,
+				Confidence:          0,
+				Method:              "decision->heuristic",
+				Fallback:            "all",
+				LeadFallback:        map[string]bool{},
+				AllowSecondFailOpen: false,
+			}
 		}
-		return autoPickHeuristicAs("decision->heuristic", userText, members, agents, leadID, k, synopsis)
+		return h
 	default: // heuristic
 		return autoPickHeuristic(userText, members, agents, leadID, k, synopsis)
 	}
 }
 
-// recentMessagesSynopsis builds a short optional synopsis from the last 1–2 messages.
-func recentMessagesSynopsis(msgs []db.Message, maxMsgs int) string {
+// recentMessagesSynopsis builds Recent context for decide state:
+// prior USER turns + last answering bot(s) (name — role). Not raw keyword needles —
+// FOLLOW-UP continuity comes from who spoke last and what the user asked before.
+// Skip the trailing current-user message (already in "User message:"). Markup-heavy
+// bot bodies are omitted from text slots, but the answering bot identity is still
+// recorded so decide sees specialty continuity (e.g. coder answered with SVG).
+func recentMessagesSynopsis(msgs []db.Message, maxMsgs int, agents []*db.Agent) string {
 	if maxMsgs <= 0 {
 		maxMsgs = 2
 	}
 	if len(msgs) == 0 {
 		return ""
 	}
-	start := len(msgs) - maxMsgs
+	byID := map[string]*db.Agent{}
+	for _, a := range agents {
+		if a != nil {
+			byID[a.ID] = a
+		}
+	}
+	end := len(msgs)
+	// Just-saved current turn is already the decide "User message:"; omit it so
+	// the synopsis budget goes to prior turns (esp. prior user specialty asks).
+	if end > 0 && strings.EqualFold(strings.TrimSpace(msgs[end-1].Role), "user") {
+		end--
+	}
+	if end <= 0 {
+		return ""
+	}
+	lookback := maxMsgs * 4
+	if lookback < 8 {
+		lookback = 8
+	}
+	start := end - lookback
 	if start < 0 {
 		start = 0
 	}
-	var parts []string
-	for _, m := range msgs[start:] {
+	window := msgs[start:end]
+
+	var userParts []string
+	var lastAnswerers []string // newest-first display labels
+	seenAnswerer := map[string]struct{}{}
+	for i := len(window) - 1; i >= 0; i-- {
+		m := window[i]
 		c := strings.TrimSpace(m.Content)
 		if c == "" || isGroupPassReply(c) {
 			continue
 		}
-		runes := []rune(c)
-		if len(runes) > 80 {
-			c = string(runes[:80]) + "…"
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if role == "user" {
+			snippet := synopsisClip(c, role)
+			if snippet == "" {
+				continue
+			}
+			userParts = append(userParts, "User: "+snippet)
+			if len(userParts) >= maxMsgs {
+				// Still scan remaining for last answerers if we have none yet.
+				if len(lastAnswerers) > 0 {
+					break
+				}
+			}
+			continue
 		}
-		parts = append(parts, c)
+		// Assistant / bot turn: record who answered (even if body is markup-heavy).
+		aid := strings.TrimSpace(m.AgentID)
+		if aid != "" {
+			if _, did := seenAnswerer[aid]; !did {
+				seenAnswerer[aid] = struct{}{}
+				lastAnswerers = append(lastAnswerers, synopsisAgentLabel(aid, byID[aid]))
+			}
+		}
+		if len(userParts) >= maxMsgs && len(lastAnswerers) > 0 {
+			break
+		}
+	}
+
+	var parts []string
+	// Chronological user turns first (collected newest-first).
+	for i := len(userParts) - 1; i >= 0; i-- {
+		parts = append(parts, userParts[i])
+	}
+	if len(lastAnswerers) > 0 {
+		// lastAnswerers is newest-first; show up to 2 for multi-reply turns.
+		n := len(lastAnswerers)
+		if n > 2 {
+			n = 2
+		}
+		// Emit oldest-of-these first for stable reading.
+		ans := make([]string, n)
+		for i := 0; i < n; i++ {
+			ans[n-1-i] = lastAnswerers[i]
+		}
+		parts = append(parts, "Last answered by: "+strings.Join(ans, ", "))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func synopsisAgentLabel(id string, a *db.Agent) string {
+	name := id
+	role := ""
+	if a != nil {
+		if n := strings.TrimSpace(a.Name); n != "" {
+			name = n
+		}
+		role = strings.TrimSpace(groupParticipationRoleHint(a))
+	}
+	if role == "" {
+		return name
+	}
+	// Keep label short for synopsis budget.
+	runes := []rune(role)
+	if len(runes) > 24 {
+		role = string(runes[:24]) + "…"
+	}
+	return name + " — " + role
+}
+
+func synopsisClip(content, role string) string {
+	limit := 80
+	if role != "user" {
+		limit = 40
+	}
+	runes := []rune(content)
+	if len(runes) > limit {
+		return string(runes[:limit]) + "…"
+	}
+	return content
 }

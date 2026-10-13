@@ -67,6 +67,12 @@ export function memberAgents(activeChannel: Channel | null | undefined, agents: 
     .filter((a): a is Agent => Boolean(a));
 }
 
+/**
+ * Resolve shape/color/name for RunStatus AgentAvatar by answering agent_id.
+ * Group decision / AutoPick (empty faceAgentId): undefined → neutral generic face
+ * (never list-focus activeAgent — that was the random-member animation bug).
+ * DM still falls back to activeAgent.
+ */
 export function resolveRunFaceAgent(
   runFaceAgentId: string,
   activeAgent: Agent | null | undefined,
@@ -74,8 +80,13 @@ export function resolveRunFaceAgent(
   activeChannel: Channel | null | undefined,
   agentNameById: Map<string, string>,
 ): Agent | null | undefined {
-  const id = runFaceAgentId.trim();
-  if (!id) return activeAgent;
+  const isGroup = Boolean(activeChannel);
+  const id = (runFaceAgentId || "").trim();
+  if (!id) {
+    // Group AutoPick window: keep neutral until agent_start sets faceAgentId.
+    if (isGroup) return undefined;
+    return activeAgent;
+  }
   const fromGroup = (memberAgents(activeChannel, agents) || []).find((a) => a.id === id);
   if (fromGroup) return fromGroup;
   const a = agents.find((x) => x.id === id);

@@ -39,7 +39,7 @@ skills/<name>/
 ```
 
 - 路径段只能用字母、数字、`-`、`_`、`.`；不能有 `..`、绝对路径、隐藏文件。
-- 只收文本文件；单文件 ≤ 512 KB，单包 ≤ 64 个文件（运行时磁盘加载上限），上传 zip 总量 ≤ 4 MiB。
+- 只收文本文件；单文件 ≤ 512 KB，单包 ≤ 128 个文件（运行时磁盘加载上限），上传 zip 总量 ≤ 4 MiB。
 - `node_modules/`、`__pycache__/`、二进制、`.DS_Store` 会被跳过或拒绝。
 
 ## Frontmatter（必须单行）
@@ -54,7 +54,7 @@ description: 一句话说清能力 + 触发场景。Use when the user asks for X
 - 第一字节就是 `---`，不要空行或 BOM。
 - **只写 `name` 和 `description`**，各占一行。open-bot 的解析器是逐行 `key: value`，不支持 YAML 多行（`>` / `|`）或嵌套 `metadata:`；多余字段会被忽略。
 - `name`：小写 + 连字符，与目录名一致。
-- `description`：每轮都会进系统提示里的技能目录，花的是每轮的 token。写「能力 + 何时用」，包含用户会说的中英文关键词；控制在约 200 字符内；不要营销词。
+- `description`：每轮都会进系统提示里的技能目录，花的是每轮的 token。写「能力 + 何时用」，包含用户会说的中英文关键词；控制在约 120 字符内（运行时目录还会截断到 `CATALOG_DESC_MAX`）；不要营销词。深搜/安装指引交给 always_on 的 `find-skills`，不必把生态检索写进每个包的 description。
 - 没有 `description` 的包不会出现在目录里。
 
 ## 正文结构

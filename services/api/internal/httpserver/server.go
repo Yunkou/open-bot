@@ -2102,7 +2102,7 @@ func (s *Server) planSendTargets(uid string, conv *db.Conversation, explicit []s
 	synopsis := ""
 	if msgs, lerr := s.db.ListMessages(uid, conv.ID); lerr == nil {
 		// Exclude the user message just saved if present as last; still useful as soft signal.
-		synopsis = recentMessagesSynopsis(msgs, 2)
+		synopsis = recentMessagesSynopsis(msgs, 2, agents)
 	}
 	var decisionDeps *autoPickDecisionDeps
 	if mode == db.AutoPickDecision {

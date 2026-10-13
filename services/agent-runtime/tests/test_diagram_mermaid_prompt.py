@@ -34,8 +34,10 @@ def test_system_prompt_triggers_diagram_skill():
     assert "画图" in prompt
     assert "内部加载" in DIAGRAM_SKILL_TRIGGER
     assert "不要向用户解释加载失败" in DIAGRAM_SKILL_TRIGGER
-    assert "===|" in DIAGRAM_SKILL_TRIGGER
     assert "对用户只说" in DIAGRAM_SKILL_TRIGGER
+    # Syntax/form rules live in skills/diagram/SKILL.md, not the thin trigger.
+    assert "===|" not in DIAGRAM_SKILL_TRIGGER
+    assert "```mermaid" not in DIAGRAM_SKILL_TRIGGER
 
 
 def test_trigger_mentions_diagram_kinds():

@@ -9,8 +9,8 @@
       "repo": "https://github.com/vercel-labs/skills",
       "path": "skills/find-skills",
       "ref": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
-      "preserve_local": false,
-      "status": "synced",
+      "preserve_local": true,
+      "status": "preserved_local",
       "content_hash": "913b9d37d0d54047"
     },
     "grill-me": {
@@ -20,9 +20,10 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/productivity/grill-me",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "preserve_local": false,
-      "status": "synced",
-      "content_hash": "fe33aaa8e8dcd606"
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "fe33aaa8e8dcd606",
+      "note": "Local open-bot adaptation; sync will skip overwrite"
     },
     "grill-with-docs": {
       "slug": "grill-with-docs",
@@ -31,9 +32,10 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/grill-with-docs",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "preserve_local": false,
-      "status": "synced",
-      "content_hash": "9e8f732b80672797"
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "9e8f732b80672797",
+      "note": "Local open-bot adaptation; sync will skip overwrite"
     },
     "improve-codebase-architecture": {
       "slug": "improve-codebase-architecture",
@@ -42,9 +44,10 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/improve-codebase-architecture",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "preserve_local": false,
-      "status": "synced",
-      "content_hash": "741b4015c0edbcd5"
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "741b4015c0edbcd5",
+      "note": "Local open-bot adaptation; sync will skip overwrite"
     },
     "tdd": {
       "slug": "tdd",
@@ -75,9 +78,10 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/productivity/handoff",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "preserve_local": false,
-      "status": "synced",
-      "content_hash": "16e5b77eadb689d6"
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "16e5b77eadb689d6",
+      "note": "Local open-bot adaptation; sync will skip overwrite"
     },
     "triage": {
       "slug": "triage",
@@ -86,9 +90,10 @@
       "repo": "https://github.com/mattpocock/skills",
       "path": "skills/engineering/triage",
       "ref": "49dd158d1076134a641b33efb035946536778336",
-      "preserve_local": false,
-      "status": "synced",
-      "content_hash": "bf09f37fa24ab643"
+      "preserve_local": true,
+      "status": "preserved_local",
+      "content_hash": "bf09f37fa24ab643",
+      "note": "Local open-bot adaptation; sync will skip overwrite"
     },
     "prototype": {
       "slug": "prototype",

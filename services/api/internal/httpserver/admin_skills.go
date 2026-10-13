@@ -222,6 +222,13 @@ func (s *Server) handleAdminDeleteSkill(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "skill not found"})
 			return
 		}
+		if errors.Is(err, db.ErrSkillDisableBlocked) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": err.Error(),
+				"code":  "skill_disable_blocked",
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

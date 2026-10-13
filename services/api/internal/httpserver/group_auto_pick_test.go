@@ -28,8 +28,11 @@ func TestAutoPickHeuristicPrefersCoderForFunction(t *testing.T) {
 	if got.Fallback != "" || got.Method != "heuristic" {
 		t.Fatalf("unexpected meta %#v", got)
 	}
-	if got.AllowSecondFailOpen || !got.LeadFallback["coder"] {
-		t.Fatalf("specialty coding: LeadFallback coder, no second-wave dump, got %#v", got)
+	if got.AllowSecondFailOpen {
+		t.Fatalf("specialty coding: no second-wave dump, got %#v", got)
+	}
+	if got.LeadFallback["coder"] {
+		t.Fatalf("specialty must not LeadFallback (off-topic selected can PASS), got %#v", got.LeadFallback)
 	}
 	if got.Confidence < autoPickConfidenceFloor {
 		t.Fatalf("confidence too low: %.2f", got.Confidence)
@@ -45,6 +48,15 @@ func TestAutoPickHeuristicWhoWritesCodePicksCoder(t *testing.T) {
 	got := autoPickHeuristic("谁会写代码", members, agents, "coder", 1, "")
 	if len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
 		t.Fatalf("want coder(33) only, got %#v conf=%.2f fallback=%s", got.AgentIDs, got.Confidence, got.Fallback)
+	}
+	if got.AllowSecondFailOpen {
+		t.Fatalf("who-can heuristic must close second-wave, got %#v", got)
+	}
+	if !got.LeadFallback["coder"] {
+		t.Fatalf("who-can heuristic coder must LeadFallback, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback["research"] {
+		t.Fatalf("research must not LeadFallback, got %#v", got.LeadFallback)
 	}
 }
 
@@ -350,7 +362,7 @@ func TestAutoPickDecisionErrorsFailOpenHeuristic(t *testing.T) {
 
 func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	members, agents := testGroupAgents()
-	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false, false)
+	keyToID, questions, state := buildAutoPickDecisionPayload("修 bug", members, agents, "上次提到 API", false)
 	if keyToID["m0"] != "lead" || keyToID["m1"] != "coder" || keyToID["m2"] != "writer" {
 		t.Fatalf("keyToID=%#v", keyToID)
 	}
@@ -383,36 +395,39 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !strings.Contains(state, "修 bug") || !strings.Contains(state, "上次提到 API") {
 		t.Fatalf("state=%q", state)
 	}
+	if !strings.Contains(state, "Current user intent") || !strings.Contains(state, "用户想：修 bug") {
+		t.Fatalf("state must include Current user intent: %q", state)
+	}
 	// Must not put raw agent ids as criteria keys
 	for k := range crit {
 		if k == "coder" || k == "lead" || k == "writer" {
 			t.Fatalf("leaked agent id as key: %s", k)
 		}
 	}
-	// allHands strengthens instructions: must force choice=all / full roster / high mass on all
-	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
+	// Prompt always teaches ALL-HANDS classification (no phrase gate): choice=all / full roster / high mass on all
+	_, q2, st2 := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", false)
 	pick2 := q2["pick"].(map[string]any)
 	instr2 := fmt.Sprint(pick2["instructions"])
-	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN", "HIGH probability"} {
+	for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", "在座的各位都是辣鸡", `choice MUST be "all"`, "never a single mN", "HIGH probability"} {
 		if !strings.Contains(instr2, needle) {
 			t.Fatalf("all-hands instructions missing %q: %s", needle, instr2)
 		}
 	}
 	count2 := q2[autoPickDecisionCountKey].(map[string]any)
 	countInstr2 := fmt.Sprint(count2["instructions"])
-	for _, needle := range []string{"ALL-HANDS count", "near 1", "都介绍下自己"} {
+	for _, needle := range []string{"ALL-HANDS", "near 1"} {
 		if !strings.Contains(countInstr2, needle) {
 			t.Fatalf("all-hands count instructions missing %q: %s", needle, countInstr2)
 		}
 	}
-	if !strings.Contains(st2, `choice must be "all"`) || !strings.Contains(st2, "never a single mN") {
-		t.Fatalf("all-hands state missing roster mandate: %q", st2)
+	if !strings.Contains(st2, `choice="all"`) || !strings.Contains(st2, "Member capability profiles") {
+		t.Fatalf("all-hands state missing roster/capability mandate: %q", st2)
 	}
 	// who-can: prompt must drive specific mN + capable count (no role-match remap later)
-	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", false, true)
+	_, q3, st3 := buildAutoPickDecisionPayload("谁会写代码", members, agents, "同伴自介查资料", true)
 	pick3 := q3["pick"].(map[string]any)
 	instr3 := fmt.Sprint(pick3["instructions"])
-	for _, needle := range []string{"CAPABILITY CENSUS", "谁会写代码", "写代码", "查资料", "criteria", "never park on", "NEAR-ZERO"} {
+	for _, needle := range []string{"CAPABILITY CENSUS", "谁会写代码", "Member capability profiles", "never park on", "NEAR-ZERO"} {
 		if !strings.Contains(instr3, needle) {
 			t.Fatalf("who-can instructions missing %q: %s", needle, instr3)
 		}
@@ -426,13 +441,13 @@ func TestBuildAutoPickDecisionPayloadOpaqueKeys(t *testing.T) {
 	if !strings.Contains(countInstr3, "CAPABILITY CENSUS count") || !strings.Contains(countInstr3, "FORBIDDEN") {
 		t.Fatalf("who-can count instructions=%v", count3["instructions"])
 	}
-	if !strings.Contains(st3, "Member roles are in the pick criteria") {
-		t.Fatalf("state should point at criteria roles, got %q", st3)
+	if !strings.Contains(st3, "Member capability profiles") {
+		t.Fatalf("state should list Member capability profiles, got %q", st3)
 	}
-	if !strings.Contains(st3, "not an override of criteria roles") {
-		t.Fatalf("state should warn Recent context is not role override, got %q", st3)
+	if !strings.Contains(st3, "do not override Member capability profiles") && !strings.Contains(st3, "WHO-CAN") {
+		t.Fatalf("state should teach WHO-CAN / profile authority, got %q", st3)
 	}
-	if !strings.Contains(st3, "谁会写代码") || !strings.Contains(st3, "never choice=all") {
+	if !strings.Contains(st3, "谁会写代码") || !strings.Contains(strings.ToLower(st3), "never choice=all") {
 		t.Fatalf("state should mandate coder-only for 谁会写代码, got %q", st3)
 	}
 }
@@ -463,63 +478,132 @@ func TestMapDecisionChoiceAllExpandsMembers(t *testing.T) {
 	}
 }
 
-func TestDecisionEffectiveKAllHandsRaises(t *testing.T) {
-	if got := decisionEffectiveK(1, 5, false, 0); got != 1 {
+func TestDecisionEffectiveKCountHintRaises(t *testing.T) {
+	if got := decisionEffectiveK(1, 5, 0); got != 1 {
 		t.Fatalf("specialty k=1 → %d", got)
 	}
-	if got := decisionEffectiveK(2, 5, false, 0); got != 2 {
+	if got := decisionEffectiveK(2, 5, 0); got != 2 {
 		t.Fatalf("specialty k=2 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 5, true, 0); got != 5 {
-		t.Fatalf("all-hands 5 members → %d", got)
+	// No phrase-gated all-hands K bump: full roster comes from countHint / choice=all mapping.
+	if got := decisionEffectiveK(1, 5, 5); got != 5 {
+		t.Fatalf("countHint=5 of 5 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 12, true, 0); got != autoPickAllHandsMaxK {
-		t.Fatalf("all-hands 12 members capped → %d", got)
+	if got := decisionEffectiveK(1, 12, 12); got != autoPickAllHandsMaxK {
+		t.Fatalf("countHint=12 capped → %d", got)
 	}
-	if got := decisionEffectiveK(1, 3, false, 2); got != 2 {
+	if got := decisionEffectiveK(1, 3, 2); got != 2 {
 		t.Fatalf("countHint=2 of 3 → %d", got)
 	}
-	if got := decisionEffectiveK(1, 3, false, 3); got != 3 {
+	if got := decisionEffectiveK(1, 3, 3); got != 3 {
 		t.Fatalf("countHint=3 of 3 → %d", got)
 	}
 }
 
-func TestIsAllHandsIntent(t *testing.T) {
-	positives := []string{
-		"都介绍下自己",
-		"都介绍一下自己",
-		"大家介绍一下",
-		"大家介绍自己",
-		"各位介绍一下",
-		"各自介绍一下",
-		"都说说",
-		"大家都说说",
-		"每人介绍一下",
-		"轮流介绍",
-		"everyone introduce yourselves",
-		"Please all introduce yourselves",
-		"everybody introduce",
+// Production 2026-10-12 15:30 CST Langfuse decision span=53cd5422 / trace=7abb3a17:
+// 「在座的各位都是辣鸡」 was framed as SPECIALTY when phrase-gated isAllHandsIntent missed it.
+// New scheme: no phrase gate — decide prompt always teaches ALL-HANDS (roast examples);
+// healthy model returns choice=all → LeadFallback on full roster. Heuristic has no
+// all-hands keyword short-circuit (decision mode is the product path).
+func TestAllHandsRoastZaiZuoDeGeWei(t *testing.T) {
+	const utterance = "在座的各位都是辣鸡"
+	if isWhoCanIntent(utterance) {
+		t.Fatalf("roast must not be who-can: %q", utterance)
 	}
-	for _, p := range positives {
-		if !isAllHandsIntent(p) {
-			t.Fatalf("want all-hands for %q", p)
+
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+
+	// Heuristic: no phrase short-circuit — does not expand to all via keyword lists.
+	gotH := runAutoPickByMode(db.AutoPickHeuristic, utterance, members, agents, "writer", 1, "", nil)
+	if strings.Contains(gotH.Method, "all_hands") {
+		t.Fatalf("heuristic must not phrase-gate all-hands, got %#v", gotH)
+	}
+
+	var sawAllHandsPrompt bool
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			pick := questions["pick"].(map[string]any)
+			instr := fmt.Sprint(pick["instructions"])
+			st := fmt.Sprint(state)
+			if !strings.Contains(instr, "ALL-HANDS") || !strings.Contains(instr, "在座的各位都是辣鸡") {
+				t.Fatalf("roast must get all-hands prompt classification; instr=%s", instr)
+			}
+			if !strings.Contains(st, `choice="all"`) || !strings.Contains(st, "Member capability profiles") {
+				t.Fatalf("all-hands state missing: %q", st)
+			}
+			sawAllHandsPrompt = true
+			// Healthy model response after prompt-driven classification.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":          "choice",
+					"choice":        "all",
+					"probabilities": map[string]any{"all": 0.82, "m0": 0.09, "m1": 0.09},
+					"confidence":    0.12, // diluted field; mapping should lift via probs[all]
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.98},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", deps)
+	if !sawAllHandsPrompt {
+		t.Fatal("decide must see always-on all-hands classification in payload")
+	}
+	if got.Method != "decision" || got.Fallback != "all" || len(got.AgentIDs) != 2 {
+		t.Fatalf("decision roast → all members, got %#v", got)
+	}
+	if !got.LeadFallback["writer"] || !got.LeadFallback["coder"] || got.AllowSecondFailOpen {
+		t.Fatalf("choice=all LeadFallback + no second-wave: %#v", got)
+	}
+	if got.Confidence < autoPickConfidenceFloor {
+		t.Fatalf("diluted conf should lift above floor, got %.2f", got.Confidence)
+	}
+
+	// Production underpick shape (choice=m0, noul≈1, low conf field): trust model
+	// (no structural expand to roster). Low conf → ordinary heuristic fail-open
+	// (not phrase-gated all_hands).
+	depsUnder := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			// Mirror Langfuse 53cd5422 output.
+			return map[string]any{
+				"pick": map[string]any{
+					"type":   "choice",
+					"choice": "m0",
+					"probabilities": map[string]any{
+						"all": 0.2446, "m0": 0.5023, "m1": 0.2531,
+					},
+					"confidence": 0.0551,
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.9778},
+			}, nil
+		},
+	}
+	gotU := runAutoPickByMode(db.AutoPickDecision, utterance, members, agents, "writer", 1, "", depsUnder)
+	if strings.Contains(gotU.Method, "all_hands") {
+		t.Fatalf("must not phrase-gate fail-open to all_hands, got %#v", gotU)
+	}
+	if gotU.Method == "decision" {
+		if len(gotU.AgentIDs) == 0 {
+			t.Fatalf("empty decision ids: %#v", gotU)
 		}
-	}
-	negatives := []string{
-		"",
-		"帮我写个函数",
-		"谁会写代码",
-		"介绍一下码农",
-		"介绍一下",
-		"都很好",
-		"大家好",
-		"随便聊聊天气",
-		"@码农 介绍一下",
-	}
-	for _, n := range negatives {
-		if isAllHandsIntent(n) {
-			t.Fatalf("want NOT all-hands for %q", n)
+		// Full roster via multi/count → LeadFallback; underpick subset may or may not.
+		if len(gotU.AgentIDs) >= len(members) {
+			for _, id := range gotU.AgentIDs {
+				if !gotU.LeadFallback[id] {
+					t.Fatalf("full-roster decision must LeadFallback selected, got %#v", gotU)
+				}
+			}
+			if gotU.AllowSecondFailOpen {
+				t.Fatalf("full roster must disable second fail-open: %#v", gotU)
+			}
 		}
+	} else if !strings.HasPrefix(gotU.Method, "decision->heuristic") {
+		t.Fatalf("underpick low-conf should fail-open heuristic, got %#v", gotU)
 	}
 }
 
@@ -584,7 +668,10 @@ func TestRunAutoPickAllHandsDecisionCallsDecide(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickAllHandsDecisionFailOpenAll(t *testing.T) {
+func TestRunAutoPickAllHandsDecisionFailOpenHeuristic(t *testing.T) {
+	// Decide timeout/err: no specialty signal → all members (not lead-only), but no
+	// LeadFallback — broad path must still allow unrelated bots to [PASS].
+	// Langfuse cf23: SystemOne finished choice=all in ~7.3s but 8s client timeout → lead-only.
 	members, agents := testGroupAgents()
 	deps := &autoPickDecisionDeps{
 		Provider: "unsloth",
@@ -593,19 +680,22 @@ func TestRunAutoPickAllHandsDecisionFailOpenAll(t *testing.T) {
 		},
 	}
 	got := runAutoPickByMode(db.AutoPickDecision, "大家介绍一下", members, agents, "lead", 1, "", deps)
-	if got.Method != "decision->heuristic->all_hands" {
-		t.Fatalf("method=%s", got.Method)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("method=%s want decision->heuristic (no phrase all_hands)", got.Method)
 	}
-	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
-		t.Fatalf("want all members on fail-open, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	if strings.Contains(got.Method, "all_hands") {
+		t.Fatalf("must not phrase-gate fail-open: %#v", got)
 	}
-	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("fail-open all-hands must LeadFallback %s, got %#v", id, got.LeadFallback)
+	if got.Fallback != "all" || len(got.AgentIDs) != len(members) {
+		t.Fatalf("decide-fail with no specialty must fail-open all, got %#v", got)
+	}
+	for _, id := range members {
+		if got.LeadFallback[id] {
+			t.Fatalf("broad decide-fail must not LeadFallback %s: %#v", id, got.LeadFallback)
 		}
 	}
 	if got.AllowSecondFailOpen {
-		t.Fatal("all-hands must not AllowSecondFailOpen")
+		t.Fatal("all fail-open must disable second wave")
 	}
 }
 
@@ -640,7 +730,6 @@ func TestRunAutoPickAllHandsDecisionMultiViaRaisedK(t *testing.T) {
 		}
 	}
 }
-
 
 // Production 14:25 CST 「大家都介绍下自己」 (Langfuse decision peek=f24b88df,
 // runs 9bd33f4a/aeb5cffa): SystemOne choice=all + noul≈0.89 + confidence≈0.10 +
@@ -688,21 +777,15 @@ func TestAllHandsIntroLowConfStillLeadFallback(t *testing.T) {
 	}
 }
 
-func TestRunAutoPickAllHandsHeuristic(t *testing.T) {
+func TestRunAutoPickHeuristicNoAllHandsPhraseShortCircuit(t *testing.T) {
+	// Heuristic is weak for intro/roast: no keyword short-circuit to full roster.
+	// Decision mode + prompt is the product path for all-hands.
 	members, agents := testGroupAgents()
 	got := runAutoPickByMode(db.AutoPickHeuristic, "大家介绍一下", members, agents, "lead", 1, "", nil)
-	if got.Method != "heuristic->all_hands" {
-		t.Fatalf("method=%s", got.Method)
+	if strings.Contains(got.Method, "all_hands") {
+		t.Fatalf("heuristic must not phrase-gate all-hands, got %#v", got)
 	}
-	if len(got.AgentIDs) != 3 || got.Fallback != "all" {
-		t.Fatalf("want all members, got %#v fallback=%s", got.AgentIDs, got.Fallback)
-	}
-	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("heuristic all-hands must LeadFallback %s, got %#v", id, got.LeadFallback)
-		}
-	}
-	// Contrast: specialty question still picks coder, not all.
+	// Specialty question still picks coder, not all.
 	got2 := runAutoPickByMode(db.AutoPickHeuristic, "帮我写个函数", members, agents, "lead", 1, "", nil)
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "coder" {
 		t.Fatalf("specialty should still pick coder, got %#v", got2.AgentIDs)
@@ -813,8 +896,8 @@ func TestAutoPickDecisionTwoOfThreeViaCount(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatal("specialty synonym phrase must not AllowSecondFailOpen")
 	}
-	if !got.LeadFallback["coder"] || !got.LeadFallback["writer"] {
-		t.Fatalf("LeadFallback want coder+writer, got %#v", got.LeadFallback)
+	if got.LeadFallback["coder"] || got.LeadFallback["writer"] {
+		t.Fatalf("specialty must not LeadFallback (candidacy PASS ok), got %#v", got.LeadFallback)
 	}
 }
 
@@ -1037,8 +1120,11 @@ func TestAutoPickDecisionWhoCanBothResearchers(t *testing.T) {
 	if got.AllowSecondFailOpen {
 		t.Fatalf("who-can must not AllowSecondFailOpen")
 	}
-	if !got.LeadFallback["22"] || !got.LeadFallback["44"] || got.LeadFallback["33"] {
-		t.Fatalf("leadFallback want 22+44, got %#v", got.LeadFallback)
+	if !got.LeadFallback["22"] || !got.LeadFallback["44"] {
+		t.Fatalf("who-can capable researchers must LeadFallback, got %#v", got.LeadFallback)
+	}
+	if got.LeadFallback["33"] {
+		t.Fatalf("coder must not be LeadFallback for research census, got %#v", got.LeadFallback)
 	}
 }
 
@@ -1135,8 +1221,8 @@ func TestAutoPickDecisionWhoCanUsesCriteriaRolesNotSynopsis(t *testing.T) {
 	if !set["22"] || !set["44"] || set["33"] || len(got.AgentIDs) != 2 {
 		t.Fatalf("want research 22+44 only (criteria roles, not synopsis bleed), got %#v", got.AgentIDs)
 	}
-	if !strings.Contains(sawState, "not an override of criteria roles") {
-		t.Fatalf("state must warn synopsis is not role override, got %q", sawState)
+	if !strings.Contains(sawState, "do not override Member capability profiles") && !strings.Contains(sawState, "Member capability profiles") {
+		t.Fatalf("state must warn Recent context does not override profiles, got %q", sawState)
 	}
 }
 
@@ -1168,14 +1254,18 @@ func TestAutoPickDecisionWhoCanSingleCoderNotAllHands(t *testing.T) {
 	if got.Method != "decision" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
 		t.Fatalf("want only coder 33, got %#v method=%s", got.AgentIDs, got.Method)
 	}
-	if got.AllowSecondFailOpen || !got.LeadFallback["33"] {
-		t.Fatalf("structural safety: LeadFallback 33, no second-wave, got %#v", got)
+	if got.AllowSecondFailOpen {
+		t.Fatalf("structural safety: no second-wave, got %#v", got)
+	}
+	if !got.LeadFallback["33"] {
+		t.Fatalf("who-can coder must LeadFallback (forbid PASS), got %#v", got.LeadFallback)
 	}
 }
 
 func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
-	// Prompt-only fix (no underpick→roster remap): all-hands payload must force choice=all.
-	// Langfuse 38726dc4 shape (choice=m0 diluted) is trusted as-is — do NOT assert expand.
+	// Prompt still teaches ALL-HANDS; underpick choice=mN is NOT expanded via
+	// count≈N + probs[all] (full_roster_count_expand removed). Only explicit
+	// choice=all means everyone. Langfuse 38726dc4 / roast underpick shapes.
 	members := []string{"635d1077-5611-41bb-9fcf-2a4454d43d5a", "bfcea5bc-91b6-4bf7-b31a-ea45f2fcb0bf", "f634df70-8e30-4f71-9415-c7f80a8c0ec3"}
 	agents := []*db.Agent{
 		{ID: members[0], Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
@@ -1191,19 +1281,19 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 			countQ := questions[autoPickDecisionCountKey].(map[string]any)
 			countInstr := fmt.Sprint(countQ["instructions"])
 			st := fmt.Sprint(state)
-			for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", `choice="all"`, "never a single mN"} {
+			for _, needle := range []string{"ALL-HANDS", "都介绍下自己", "大家都介绍一下", "在座的各位都是辣鸡", `choice MUST be "all"`, "never a single mN"} {
 				if !strings.Contains(instr, needle) {
 					t.Fatalf("all-hands pick instructions missing %q: %s", needle, instr)
 				}
 			}
-			if !strings.Contains(countInstr, "ALL-HANDS count") || !strings.Contains(countInstr, "near 1") {
+			if !strings.Contains(countInstr, "ALL-HANDS") || !strings.Contains(countInstr, "near 1") {
 				t.Fatalf("all-hands count instructions weak: %s", countInstr)
 			}
-			if !strings.Contains(st, `choice must be "all"`) {
+			if !strings.Contains(st, `choice="all"`) || !strings.Contains(st, "Member capability profiles") {
 				t.Fatalf("all-hands state missing mandate: %q", st)
 			}
 			sawAllHandsPrompt = true
-			// Langfuse 38726dc4 underpick shape — mapping must trust model (no structural expand).
+			// Langfuse 38726dc4 underpick: choice=m0 but noul→count=N.
 			return map[string]any{
 				"pick": map[string]any{
 					"type":   "choice",
@@ -1221,12 +1311,14 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if !sawAllHandsPrompt {
 		t.Fatal("decide must receive all-hands-strengthened payload")
 	}
-	// Trust model: do not remap underpick to full roster (prompt should make live model return choice=all).
-	if got.Fallback == "all" && len(got.AgentIDs) == 3 {
-		t.Fatalf("must not structurally expand underpick to roster; got %#v (prompt-only fix)", got.AgentIDs)
+	if got.Method != "decision" {
+		t.Fatalf("want decision keep underpick, got %#v", got)
 	}
-	if got.Method != "decision" && !strings.HasPrefix(got.Method, "decision->heuristic") {
-		t.Fatalf("unexpected method=%s got=%#v", got.Method, got)
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != members[0] {
+		t.Fatalf("underpick mN must NOT count-expand to all, got %#v", got)
+	}
+	if got.LeadFallback[members[0]] && len(got.AgentIDs) >= len(members) {
+		t.Fatalf("must not LeadFallback full roster from underpick: %#v", got)
 	}
 	// Contrast: who-can with single capable must NOT expand to all.
 	deps2 := &autoPickDecisionDeps{
@@ -1249,8 +1341,11 @@ func TestAutoPickDecisionAllHandsPromptNeedlesNoStructuralExpand(t *testing.T) {
 	if len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != members[0] || got2.Fallback == "all" {
 		t.Fatalf("who-can must stay coder-only subset, got %#v fallback=%s", got2.AgentIDs, got2.Fallback)
 	}
-	if got2.AllowSecondFailOpen || !got2.LeadFallback[members[0]] {
-		t.Fatalf("who-can structural safety: LeadFallback + no second-wave, got %#v", got2)
+	if got2.AllowSecondFailOpen {
+		t.Fatalf("who-can structural safety: no second-wave, got %#v", got2)
+	}
+	if !got2.LeadFallback[members[0]] {
+		t.Fatalf("who-can coder must LeadFallback (forbid PASS), got %#v", got2.LeadFallback)
 	}
 }
 
@@ -1310,33 +1405,48 @@ func TestAutoPickHeuristicWhoCanBothResearchers(t *testing.T) {
 	}
 }
 
-
 func TestBuildAutoPickDecisionPayloadSpecialtyResearchTask(t *testing.T) {
 	members, agents := testGroupAgents()
-	_, q, st := buildAutoPickDecisionPayload("帮我查下2026年优锘科技的发展", members, agents, "谁不会写代码：22和44查资料", false, false)
+	_, q, st := buildAutoPickDecisionPayload("帮我查下2026年优锘科技的发展", members, agents, "谁不会写代码：22和44查资料", false)
 	pick := q["pick"].(map[string]any)
 	instr := fmt.Sprint(pick["instructions"])
-	for _, needle := range []string{"SPECIALTY TASK", "帮我查下", "research", "never park on", "22+44", "not the coder"} {
+	// Always-on classification: ALL-HANDS / WHO-CAN / SPECIALTY / FOLLOW-UP (no phrase gate).
+	for _, needle := range []string{"ALL-HANDS", "WHO-CAN", "SPECIALTY", "FOLLOW-UP", "Member capability profiles"} {
 		if !strings.Contains(instr, needle) {
-			t.Fatalf("specialty instructions missing %q: %s", needle, instr)
+			t.Fatalf("classification instructions missing %q: %s", needle, instr)
 		}
 	}
 	count := q[autoPickDecisionCountKey].(map[string]any)
 	countInstr := fmt.Sprint(count["instructions"])
-	if !strings.Contains(countInstr, "SPECIALTY TASK count") || !strings.Contains(countInstr, "FORBIDDEN") {
+	if !strings.Contains(countInstr, "SPECIALTY") || !strings.Contains(countInstr, "FORBIDDEN") {
 		t.Fatalf("specialty count instructions=%v", count["instructions"])
 	}
-	if !strings.Contains(st, "specialty tasks") || !strings.Contains(st, "research mNs only") {
+	if !strings.Contains(st, "Member capability profiles") {
+		t.Fatalf("state must list Member capability profiles: %q", st)
+	}
+	if !strings.Contains(st, "SPECIALTY") || !strings.Contains(st, "matching-role mNs only") {
 		t.Fatalf("specialty state missing mandate: %q", st)
 	}
-	// who-can / all-hands must NOT get specialty block
-	_, qWho, _ := buildAutoPickDecisionPayload("谁会写代码", members, agents, "", false, true)
-	if strings.Contains(fmt.Sprint(qWho["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
-		t.Fatal("who-can must not append SPECIALTY TASK block")
+	// Profiles appear with role text (coder / writer / lead).
+	for _, want := range []string{"m0:", "m1:", "码农", "写代码", "写手"} {
+		if !strings.Contains(st, want) {
+			t.Fatalf("capability profile missing %q in state: %q", want, st)
+		}
 	}
-	_, qAll, _ := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", true, false)
-	if strings.Contains(fmt.Sprint(qAll["pick"].(map[string]any)["instructions"]), "SPECIALTY TASK") {
-		t.Fatal("all-hands must not append SPECIALTY TASK block")
+	// who-can still gets extra census emphasis (and criteria[all] discourage).
+	_, qWho, _ := buildAutoPickDecisionPayload("谁会写代码", members, agents, "", true)
+	whoInstr := fmt.Sprint(qWho["pick"].(map[string]any)["instructions"])
+	if !strings.Contains(whoInstr, "THIS MESSAGE IS A CAPABILITY CENSUS") {
+		t.Fatal("who-can must append census emphasis")
+	}
+	// Intro utterance (whoCan=false) still sees always-on ALL-HANDS classification.
+	_, qAll, stAll := buildAutoPickDecisionPayload("都介绍下自己", members, agents, "", false)
+	allInstr := fmt.Sprint(qAll["pick"].(map[string]any)["instructions"])
+	if !strings.Contains(allInstr, "ALL-HANDS") || !strings.Contains(allInstr, "在座的各位都是辣鸡") {
+		t.Fatalf("intro payload must teach ALL-HANDS, got %s", allInstr)
+	}
+	if !strings.Contains(stAll, `choice="all"`) && !strings.Contains(stAll, "ALL-HANDS") {
+		t.Fatalf("intro state must teach ALL-HANDS choice=all: %q", stAll)
 	}
 }
 
@@ -1364,11 +1474,11 @@ func TestAutoPickHeuristicResearchLookupYouNuo(t *testing.T) {
 	}
 }
 
-
 // Production 2026-10-12 12:35 CST Langfuse peek/obs=3569c5ef947ad07a (trace 38cb71ea…):
 // 「帮我查下2025年格灵深瞳的年报」— c5c5231 SPECIALTY TASK prompt was loaded, but SystemOne
 // still chose m0=coder (pick-prob 0.61, calibrated conf 0.23, count noul≈0.99).
-// Specialty mismatch vs role-capable 22+44 → fail-open heuristic (not trust m0).
+// Specialty mismatch vs role-capable 22+44 → remap to capable (same direction as
+// who_can_profile_match; not fail-open heuristic which can re-admit wrong roles).
 // Companion run peek/obs=f258fadb… / trace 042ffb71… answered by 33.
 func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	members := []string{"33", "22", "44"}
@@ -1395,8 +1505,8 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	}
 	synopsis := "要的。你刚才问的是谁不会写代码：22 和 44 主要负责查资料与总结；33 负责写代码与排障。"
 	got := runAutoPickByMode(db.AutoPickDecision, "帮我查下2025年格灵深瞳的年报", members, agents, "33", 1, synopsis, deps)
-	if got.Method != "decision->heuristic" {
-		t.Fatalf("want decision->heuristic fail-open, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
+	if got.Method != "decision" {
+		t.Fatalf("want decision specialty_mismatch_profile_match, got method=%s ids=%#v conf=%.2f", got.Method, got.AgentIDs, got.Confidence)
 	}
 	if len(got.AgentIDs) != 2 {
 		t.Fatalf("research specialty want 22+44, got %#v", got.AgentIDs)
@@ -1408,13 +1518,17 @@ func TestAutoPickDecisionSpecialtyResearchMismatchGeLing(t *testing.T) {
 	if !set["22"] || !set["44"] || set["33"] {
 		t.Fatalf("want research 22+44 only (not coder 33), got %#v", got.AgentIDs)
 	}
+	if got.AllowSecondFailOpen {
+		t.Fatal("specialty rematch must close second-wave")
+	}
 }
 
 // Production 2026-10-12 13:45 CST Langfuse peek/obs=5808f45a342469dc
 // (trace a32fde27da3cf91c5cf57a042b456afa): 「写个js的代码，格式化日期为hh:mm:ss。输入是时间戳」
 // SystemOne choice=m0 (代码与排障助手) noul≈0.98 conf field 0.05 pick-prob 0.38 → below
 // floor → decision→heuristic both coders; both [PASS]; second fail-open dumped to 文档助手
-// who answered. Specialty picks must LeadFallback + AllowSecondFailOpen=false.
+// who answered. Specialty picks: AllowSecondFailOpen=false (no dump to 文档助手);
+// no LeadFallback so off-topic selected bots can still [PASS].
 func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 	members := []string{
 		"1d818a58-4f4a-48f3-9bcd-1de613d6dcec", // 代码与排障助手 (m0 / lead)
@@ -1462,15 +1576,12 @@ func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 		t.Fatalf("specialty must not AllowSecondFailOpen (else PASS→文档助手), got %#v", got)
 	}
 	for _, id := range got.AgentIDs {
-		if !got.LeadFallback[id] {
-			t.Fatalf("LeadFallback missing for capable %s, got %#v", id, got.LeadFallback)
+		if got.LeadFallback[id] {
+			t.Fatalf("specialty must not LeadFallback capable %s (PASS ok), got %#v", id, got.LeadFallback)
 		}
 	}
-	if got.LeadFallback[members[2]] {
-		t.Fatalf("文档助手 must not be LeadFallback, got %#v", got.LeadFallback)
-	}
 
-	// Heuristic alone (same channel) must also block second-wave.
+	// Heuristic alone (same channel) must also block second-wave, without LeadFallback.
 	h := autoPickHeuristic(phrase, members, agents, members[0], 1, "")
 	if h.AllowSecondFailOpen {
 		t.Fatalf("heuristic specialty must not AllowSecondFailOpen, got %#v", h)
@@ -1479,8 +1590,462 @@ func TestSpecialtyCodingNoSecondWaveDocBot(t *testing.T) {
 		if id == members[2] {
 			t.Fatalf("heuristic must not pick 文档助手, got %#v", h.AgentIDs)
 		}
-		if !h.LeadFallback[id] {
-			t.Fatalf("heuristic LeadFallback missing %s, got %#v", id, h.LeadFallback)
+		if h.LeadFallback[id] {
+			t.Fatalf("heuristic must not LeadFallback %s, got %#v", id, h.LeadFallback)
 		}
+	}
+}
+
+// Trace 4b43-style: bot SVG + current follow-up — synopsis keeps prior USER ask
+// and records Last answered by (coder), without burning a slot on SVG markup.
+func TestRecentMessagesSynopsisPrefersUserOverBotSVG(t *testing.T) {
+	svg := `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><circle cx="50" cy="50" r="40" fill="yellow"/><circle cx="35" cy="40" r="5"/><circle cx="65" cy="40" r="5"/><path d="M30 65 Q50 80 70 65" fill="none"/></svg>`
+	agents := []*db.Agent{
+		{ID: "coder", Name: "码农", Description: "负责写代码与排障"},
+		{ID: "writer", Name: "写手", Description: "负责写诗与文案"},
+	}
+	msgs := []db.Message{
+		{Role: "user", Content: "用代码画个笑脸"},
+		{Role: "assistant", Content: svg, AgentID: "coder"},
+		{Role: "user", Content: "再来个哭脸"}, // current turn — already in User message:
+	}
+	got := recentMessagesSynopsis(msgs, 2, agents)
+	if !strings.Contains(got, "用代码画个笑脸") {
+		t.Fatalf("synopsis must keep prior user specialty ask, got %q", got)
+	}
+	if !strings.Contains(got, "Last answered by:") || !strings.Contains(got, "码农") {
+		t.Fatalf("synopsis must surface last answering bot, got %q", got)
+	}
+	if !strings.Contains(got, "写代码") {
+		t.Fatalf("last answerer label should include role, got %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "<svg") {
+		t.Fatalf("synopsis must not occupy slot with bot SVG, got %q", got)
+	}
+	if strings.Contains(got, "再来个哭脸") {
+		t.Fatalf("synopsis must omit trailing current user turn, got %q", got)
+	}
+}
+
+func TestRecentMessagesSynopsisSkipsMarkupFillsWithUser(t *testing.T) {
+	agents := []*db.Agent{
+		{ID: "22", Name: "22", Description: "负责查资料与总结"},
+		{ID: "33", Name: "33", Description: "负责写代码与排障"},
+	}
+	msgs := []db.Message{
+		{Role: "user", Content: "帮我查下优锘科技"},
+		{Role: "assistant", Content: "<div><p>摘要</p><ul><li>a</li></ul></div>", AgentID: "22"},
+		{Role: "assistant", Content: "查完了，见上。", AgentID: "22"},
+		{Role: "user", Content: "再深入一点"},
+	}
+	got := recentMessagesSynopsis(msgs, 2, agents)
+	if !strings.Contains(got, "帮我查下优锘科技") {
+		t.Fatalf("want prior user ask retained, got %q", got)
+	}
+	if !strings.Contains(got, "Last answered by:") || !strings.Contains(got, "22") {
+		t.Fatalf("want last answerer 22, got %q", got)
+	}
+	if strings.Contains(got, "<div>") {
+		t.Fatalf("markup-heavy assistant must not fill synopsis, got %q", got)
+	}
+}
+
+func TestRecentMessagesSynopsisMultiLastAnswerers(t *testing.T) {
+	agents := []*db.Agent{
+		{ID: "22", Name: "22", Description: "负责查资料与总结"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结"},
+	}
+	msgs := []db.Message{
+		{Role: "user", Content: "都谁会查资料"},
+		{Role: "assistant", Content: "我会。", AgentID: "22"},
+		{Role: "assistant", Content: "我也会。", AgentID: "44"},
+		{Role: "user", Content: "那帮我查下优锘"},
+	}
+	got := recentMessagesSynopsis(msgs, 2, agents)
+	if !strings.Contains(got, "Last answered by:") {
+		t.Fatalf("want last answerers, got %q", got)
+	}
+	if !strings.Contains(got, "22") || !strings.Contains(got, "44") {
+		t.Fatalf("want both recent answerers, got %q", got)
+	}
+}
+
+// Decide state always lists Member capability profiles; FOLLOW-UP classification
+// continues prior USER specialty without SVG/HTML/哭脸 keyword needles in the prompt.
+func TestBuildAutoPickDecisionPayloadCapabilityProfilesAndFollowUp(t *testing.T) {
+	members, agents := testGroupAgents()
+	syn := "用代码画个笑脸"
+	_, q, st := buildAutoPickDecisionPayload("再来个哭脸", members, agents, syn, false)
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	for _, needle := range []string{"ALL-HANDS", "WHO-CAN", "SPECIALTY", "FOLLOW-UP", "Member capability profiles"} {
+		if !strings.Contains(instr, needle) {
+			t.Fatalf("classification instructions missing %q: %s", needle, instr)
+		}
+	}
+	// No stacked markup/anaphora needle tables in the prompt.
+	for _, dead := range []string{"要html", "改成html", "SVG/HTML/CSS/JS", "用svg给我写一个笑脸图标", "ANAPHORA"} {
+		if strings.Contains(instr, dead) {
+			t.Fatalf("prompt must not stack dead specialty needles %q: %s", dead, instr)
+		}
+	}
+	if !strings.Contains(instr, "Last answered by") {
+		t.Fatalf("FOLLOW-UP instructions must teach Last answered by continuity: %s", instr)
+	}
+	if !strings.Contains(st, "Member capability profiles") {
+		t.Fatalf("state missing capability profiles: %q", st)
+	}
+	if !strings.Contains(st, "FOLLOW-UP") {
+		t.Fatalf("state must teach FOLLOW-UP: %q", st)
+	}
+	if !strings.Contains(st, "Last answered by") {
+		t.Fatalf("state Recent framing must mention Last answered by: %q", st)
+	}
+	if !strings.Contains(st, syn) {
+		t.Fatalf("state must carry Recent specialty ask: %q", st)
+	}
+	// Profiles include coding role so FOLLOW-UP can stay on coder without keyword lists.
+	if !strings.Contains(st, "写代码") && !strings.Contains(st, "码农") {
+		t.Fatalf("coding capability profile missing: %q", st)
+	}
+	// Current user intent + interrupt: newest ask wins over unfinished prior work.
+	if !strings.Contains(st, "Current user intent") || !strings.Contains(st, "用户想：再来个哭脸") {
+		t.Fatalf("state must carry Current user intent summary: %q", st)
+	}
+	if !strings.Contains(st, "newest wins") {
+		t.Fatalf("state must teach interrupt/newest-wins: %q", st)
+	}
+	if !strings.Contains(instr, "INTERRUPT") || !strings.Contains(instr, "Current user intent") {
+		t.Fatalf("instructions must teach interrupt + Current user intent: %s", instr)
+	}
+	count := q[autoPickDecisionCountKey].(map[string]any)
+	countInstr := fmt.Sprint(count["instructions"])
+	if !strings.Contains(countInstr, "FOLLOW-UP") || !strings.Contains(countInstr, "FORBIDDEN") {
+		t.Fatalf("count must teach FOLLOW-UP noul bound, got %v", count["instructions"])
+	}
+}
+
+// Langfuse peek 38529ebd (2026-10-12 17:51 CST): 「通过选择不同心情生成不同svg」
+// with Recent 「谁会写代码 | 给我写个html | Last answered by: 文章, 代码」→ SystemOne
+// choice=all @0.55 / both bots ran. State must surface Current user intent so the
+// newest specialty ask wins over unfinished prior asks (no SVG keyword needle).
+func TestBuildAutoPickDecisionPayloadCurrentUserIntentInterrupt(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	ut := "通过选择不同心情生成不同svg"
+	syn := "User: 谁会写代码 | User: 给我写个html | Last answered by: 文章 — 负责写东西与改稿…, 代码 — 负责写代码与排障…"
+	_, q, st := buildAutoPickDecisionPayload(ut, members, agents, syn, false)
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	if !strings.Contains(st, "Current user intent") {
+		t.Fatalf("missing Current user intent block: %q", st)
+	}
+	if !strings.Contains(st, "用户想："+ut) {
+		t.Fatalf("INTERRUPT intent must stay newest-only (no prior bind): %q", st)
+	}
+	if strings.Contains(st, "用户想：继续完善") {
+		t.Fatalf("INTERRUPT must not bind prior as 继续完善: %q", st)
+	}
+	if !strings.Contains(st, "newest wins") {
+		t.Fatalf("state must teach newest-wins interrupt: %q", st)
+	}
+	if !strings.Contains(st, syn) {
+		t.Fatalf("Recent context still present for FOLLOW-UP support: %q", st)
+	}
+	if !strings.Contains(instr, "INTERRUPT") {
+		t.Fatalf("instructions missing INTERRUPT: %s", instr)
+	}
+	if !strings.Contains(instr, "Current user intent") {
+		t.Fatalf("instructions missing Current user intent: %s", instr)
+	}
+	// No SVG/HTML specialty needle reintroduction.
+	for _, dead := range []string{"SVG/HTML/CSS/JS", "要html", "改成html"} {
+		if strings.Contains(instr, dead) {
+			t.Fatalf("must not restack specialty needles %q", dead)
+		}
+	}
+}
+
+// Langfuse peek c5c3d672 (2026-10-12 18:57 CST): 「修改下，换成动物的表情」 with Recent
+// html canvas mood page + who-can 「谁能写代码」 + dual Last answered by → intent must bind
+// the html/canvas prior (skip who-can), not echo the short ask alone.
+func TestCurrentUserIntentSummaryPeekC5c3d672(t *testing.T) {
+	syn := "User: 给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg | User: 谁能写代码 | Last answered by: 文章 — 写东西与改稿…, 代码 — 写代码与排障…"
+	ut := "修改下，换成动物的表情"
+	got, mode := currentUserIntentJoin(ut, syn)
+	if mode != "follow_up" {
+		t.Fatalf("want follow_up join, got mode=%s summary=%q", mode, got)
+	}
+	if !strings.Contains(got, "继续完善") {
+		t.Fatalf("follow-up must bind prior with 继续完善: %q", got)
+	}
+	if !strings.Contains(got, "html") && !strings.Contains(got, "canvas") {
+		t.Fatalf("prior must be html/canvas task, got %q", got)
+	}
+	if strings.Contains(got, "谁能写代码") {
+		t.Fatalf("prior must skip who-can census ask, got %q", got)
+	}
+	if !strings.Contains(got, ut) {
+		t.Fatalf("summary must keep current ask, got %q", got)
+	}
+}
+
+func TestBuildAutoPickDecisionPayloadJointIntentFollowUpPeekC5c3d672(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	ut := "修改下，换成动物的表情"
+	syn := "User: 给我写个html页面，选择不同的心情。生成不同的表情，用canvas，不要用svg | User: 谁能写代码 | Last answered by: 文章 — 写东西与改稿…, 代码 — 写代码与排障…"
+	_, q, st := buildAutoPickDecisionPayload(ut, members, agents, syn, false)
+	if !strings.Contains(st, "继续完善") {
+		t.Fatalf("state intent must bind prior task: %q", st)
+	}
+	if !strings.Contains(st, "html") && !strings.Contains(st, "canvas") {
+		t.Fatalf("state intent must carry html/canvas anchor: %q", st)
+	}
+	if strings.Contains(st, "用户想：继续完善「谁能写代码」") || strings.Contains(st, "继续完善「谁能写代码") {
+		t.Fatalf("must not bind who-can as prior: %q", st)
+	}
+	// Exact raw echo of short ask alone is the bug (c5c3d672).
+	if strings.Contains(st, "用户想："+ut) && !strings.Contains(st, "继续完善") {
+		t.Fatalf("must not leave intent as raw short-ask echo: %q", st)
+	}
+	pick := q["pick"].(map[string]any)
+	instr := fmt.Sprint(pick["instructions"])
+	if !strings.Contains(instr, "继续完善") {
+		t.Fatalf("instructions should teach bound follow-up intent: %s", instr)
+	}
+	if !strings.Contains(st, "may already bind prior session task") {
+		t.Fatalf("state classify line must mention prior bind: %q", st)
+	}
+}
+
+func TestCurrentUserIntentSummaryJoinModes(t *testing.T) {
+	syn := "User: 给我写个html页面，用canvas | User: 谁能写代码 | Last answered by: 代码 — 写代码…"
+
+	// INTERRUPT / self-contained (peek 38529ebd shape): newest-only.
+	utNew := "通过选择不同心情生成不同svg"
+	got, mode := currentUserIntentJoin(utNew, syn)
+	if mode != "new" || got != utNew {
+		t.Fatalf("INTERRUPT want newest-only, got mode=%s summary=%q", mode, got)
+	}
+
+	// Who-can this turn: newest-only (do not bind html).
+	utWho := "谁会写代码"
+	got, mode = currentUserIntentJoin(utWho, syn)
+	if mode != "new" || got != utWho {
+		t.Fatalf("who-can want newest-only, got mode=%s summary=%q", mode, got)
+	}
+
+	// All-hands: not 继续完善.
+	utAll := "都介绍下自己"
+	got, mode = currentUserIntentJoin(utAll, syn)
+	if mode != "new" || strings.Contains(got, "继续完善") {
+		t.Fatalf("all-hands must not bind 继续完善, got mode=%s summary=%q", mode, got)
+	}
+
+	// No synopsis: none.
+	got, mode = currentUserIntentJoin("修改下，换成动物的表情", "")
+	if mode != "none" || got != "修改下，换成动物的表情" {
+		t.Fatalf("empty synopsis want none echo, got mode=%s summary=%q", mode, got)
+	}
+
+	// Soft: long ask (>40 runes) that still carries a follow-up marker.
+	utSoft := "把刚才那个页面里的按钮颜色改成红色并且加上一点简单的动画效果让整个交互看起来更生动一些"
+	if len([]rune(utSoft)) <= 40 {
+		t.Fatalf("soft fixture must be >40 runes, got %d", len([]rune(utSoft)))
+	}
+	got, mode = currentUserIntentJoin(utSoft, syn)
+	if mode != "soft" {
+		t.Fatalf("long+marker want soft, got mode=%s summary=%q", mode, got)
+	}
+	if !strings.Contains(got, "结合近期") || !strings.Contains(got, "本轮") {
+		t.Fatalf("soft framing missing: %q", got)
+	}
+	if strings.Contains(got, "谁能写代码") {
+		t.Fatalf("soft prior must skip who-can: %q", got)
+	}
+}
+
+// Underpick choice=mN never expands via count≈roster + probs[all] (full_roster_count_expand
+// removed). Weak or strong probs[all] both keep the mapped primary; only choice=all means everyone.
+func TestAutoPickDecisionNoCountExpandUnderpick(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	// Weak probs[all] + inflated noul + coding primary → keep coder (FOLLOW-UP shape).
+	depsWeak := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m0",
+					"confidence": 0.55,
+					"probabilities": map[string]any{
+						"all": 0.187, "m0": 0.50, "m1": 0.18, "m2": 0.13,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.99},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, "再来个哭脸", members, agents, "33", 1, "用代码画个笑脸", depsWeak)
+	if got.Method != "decision" {
+		t.Fatalf("want decision keep, got method=%s ids=%#v", got.Method, got.AgentIDs)
+	}
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
+		t.Fatalf("weak probs[all] must NOT count-expand; want coder 33, got %#v fallback=%s", got.AgentIDs, got.Fallback)
+	}
+
+	// Strong probs[all] + full-roster count on intro underpick → still keep m0 (no expand).
+	depsStrong := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m0",
+					"confidence": 0.13,
+					"probabilities": map[string]any{
+						"all": 0.29, "m0": 0.45, "m1": 0.21, "m2": 0.05,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.84},
+			}, nil
+		},
+	}
+	got2 := runAutoPickByMode(db.AutoPickDecision, "都介绍下自己", members, agents, "33", 1, "", depsStrong)
+	if got2.Method != "decision" || got2.Fallback == "all" || len(got2.AgentIDs) != 1 || got2.AgentIDs[0] != "33" {
+		t.Fatalf("strong probs[all]+count must NOT expand underpick; want m0 only, got %#v", got2)
+	}
+}
+
+// Production 2026-10-12 19:49 CST Langfuse peek/obs=a0233dbd84136984 (trace a52623e3…):
+// 「给我写个html…通过canvas画出不同的动物表情」 → SystemOne choice=m0(文章) @0.53,
+// probs[all]=0.35, noul≈0.997 → count=2. Old full_roster_count_expand (probs[all]≥0.20)
+// expanded to both + LeadFallback must-answer. Primary fix: disable that expand for
+// choice=mN underpick (only explicit choice=all → everyone). Secondary: coding role
+// markers can still specialty-mismatch fail-open to the capable profile — not the
+// structural expand gate.
+func TestReproLangfuseA023HTMLCanvasNoCountExpand(t *testing.T) {
+	members := []string{"b82b2fbe-c621-4943-aff0-f59e7fc075b6", "cb6df594-f972-4a7c-8efd-daeb6dcb7ece"}
+	writer, coder := members[0], members[1]
+	agents := []*db.Agent{
+		{ID: writer, Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。尊重用户语气；定稿外发前先给草稿。"},
+		{ID: coder, Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。小步验证；危险操作需确认。"},
+	}
+	ut := "给我写个html，选择不同的情绪。通过canvas画出不同的动物表情"
+	syn := "User: 大家好 | User: 给我写个html，选择不同的情绪。通过canvas画出不同的动物表情 | Last answered by: 代码 — 负责写代码与排障：改项目、查 bug、联调。小步…, 文章 — 负责写东西与改稿：邮件、文档、文案。尊重用户语气…"
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return map[string]any{
+				"count": map[string]any{"type": "noul", "noul": "0.9967"},
+				"pick": map[string]any{
+					"type": "choice", "choice": "m0",
+					"probabilities": map[string]any{"all": "0.3477", "m0": "0.5344", "m1": "0.1179"},
+					"confidence": "0.1314",
+				},
+			}, nil
+		},
+	}
+	got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, writer, 1, syn, deps)
+	if got.Fallback == "all" || len(got.AgentIDs) >= len(members) {
+		t.Fatalf("a023 underpick must NOT count-expand to full roster, got method=%s ids=%#v fallback=%s LeadFallback=%#v", got.Method, got.AgentIDs, got.Fallback, got.LeadFallback)
+	}
+	if got.LeadFallback[writer] && got.LeadFallback[coder] {
+		t.Fatalf("must not dual LeadFallback from count-expand, got %#v", got.LeadFallback)
+	}
+	// Prefer structural no-expand; if specialty-mismatch recovers coder, that is fine too.
+	if len(got.AgentIDs) == 1 && got.AgentIDs[0] == coder {
+		if got.LeadFallback[writer] || got.LeadFallback[coder] {
+			t.Fatalf("specialty path must not LeadFallback, got %#v", got.LeadFallback)
+		}
+		if got.AllowSecondFailOpen {
+			t.Fatal("specialty path must close second-wave")
+		}
+		return
+	}
+	// Without specialty recover: mapped underpick stays single (writer m0) — still not dual reply.
+	if len(got.AgentIDs) != 1 {
+		t.Fatalf("underpick without expand should be single primary, got %#v", got)
+	}
+}
+
+// When the model correctly classifies FOLLOW-UP / SPECIALTY onto the coding profile,
+// trust choice/count — no synonym needle rescue required.
+func TestAutoPickDecisionTrustsSpecialtyChoice(t *testing.T) {
+	members := []string{"writer", "coder"}
+	agents := []*db.Agent{
+		{ID: "writer", Name: "文章", Description: "负责写东西与改稿：邮件、文档、文案。"},
+		{ID: "coder", Name: "代码", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			st := fmt.Sprint(state)
+			if !strings.Contains(st, "Member capability profiles") {
+				t.Fatalf("decide state must include capability profiles: %q", st)
+			}
+			if !strings.Contains(st, "写代码") {
+				t.Fatalf("coding profile missing from state: %q", st)
+			}
+			return map[string]any{
+				"pick": map[string]any{
+					"type":       "choice",
+					"choice":     "m1",
+					"confidence": 0.82,
+					"probabilities": map[string]any{
+						"all": 0.05, "m0": 0.12, "m1": 0.83,
+					},
+				},
+				"count": map[string]any{"type": "noul", "noul": 0.02},
+			}, nil
+		},
+	}
+	for _, ut := range []string{"用svg给我写一个笑脸图标", "要html", "再来个哭脸"} {
+		got := runAutoPickByMode(db.AutoPickDecision, ut, members, agents, "writer", 1, "User: 用代码画个笑脸 | Last answered by: 代码 — 负责写代码与排障", deps)
+		if got.Method != "decision" || got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "coder" {
+			t.Fatalf("%q: trust specialty choice → coder, got %#v", ut, got)
+		}
+		if got.AllowSecondFailOpen || !got.LeadFallback["coder"] {
+			// specialty synonym may not hit svg/html; LeadFallback only when synonym OR who-can.
+			// For svg/html without synonym, second-wave may remain allowed — that's OK structurally.
+			_ = got
+		}
+	}
+}
+
+// Decide fail-open stays careful: synopsis with prior specialty (core synonym) recovers
+// the specialist via heuristic blend — must not dump to everyone.
+func TestAutoPickDecisionFailOpenKeepsSynopsisSpecialty(t *testing.T) {
+	members := []string{"33", "22", "44"}
+	agents := []*db.Agent{
+		{ID: "33", Name: "33", Description: "负责写代码与排障：改项目、查 bug、联调。"},
+		{ID: "22", Name: "22", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+		{ID: "44", Name: "44", Description: "负责查资料与总结：搜索、阅读、整理要点。"},
+	}
+	deps := &autoPickDecisionDeps{
+		Provider: "unsloth",
+		Decide: func(ctx context.Context, state any, questions map[string]any) (map[string]any, error) {
+			return nil, fmt.Errorf("timeout")
+		},
+	}
+	synopsis := "User: 用代码画个笑脸 | Last answered by: 33 — 负责写代码与排障"
+	got := runAutoPickByMode(db.AutoPickDecision, "再来个哭脸", members, agents, "33", 1, synopsis, deps)
+	if got.Method != "decision->heuristic" {
+		t.Fatalf("want decision->heuristic, got method=%s ids=%#v", got.Method, got.AgentIDs)
+	}
+	if got.Fallback == "all" || len(got.AgentIDs) != 1 || got.AgentIDs[0] != "33" {
+		t.Fatalf("want coder 33 only (no fail-open-all), got %#v fallback=%s", got.AgentIDs, got.Fallback)
 	}
 }

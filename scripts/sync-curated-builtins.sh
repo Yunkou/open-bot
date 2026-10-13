@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sync skills/curated-builtins.json → skills/<slug>/ + skills/CURATED.lock
 # Fetches from GitHub (codeload). Falls back to scaffolding empty dirs + lock notes
-# when network blocks. Does not overwrite preserve_local packages (tdd, diagnosing-bugs).
+# when network blocks. Does not overwrite preserve_local packages (see curated-builtins.json preserve_local).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

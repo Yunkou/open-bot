@@ -141,7 +141,8 @@ func (d *DB) skillBotUsage(userID string, list []UserSkill) (map[string][]SkillB
 		}
 		for _, b := range bots {
 			m, has := allow[b.ID]
-			if !has || m[s.Name] {
+			// role=always_on discovery skills are always effectively mounted.
+			if !has || m[s.Name] || IsAlwaysOnBuiltin(s.Name) {
 				out[s.Name] = append(out[s.Name], b)
 			}
 		}

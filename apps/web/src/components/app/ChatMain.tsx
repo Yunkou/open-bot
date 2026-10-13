@@ -21,6 +21,7 @@ import {
   speakerNameForMessage,
   threadMessages,
 } from "./chatTimeline";
+import { isGroupDecisionPending, resolveRunFaceAgentId } from "../../lib/runFace";
 import {
   chatScrollRef,
   setInput,
@@ -362,13 +363,28 @@ function LiveRunStatus({
   const runFaceAgentId = useChatStore((s) => s.runFaceAgentId);
   const sending = useChatStore((s) => s.sending);
   const taskBusy = useChatStore((s) => s.taskBusy);
-  const faceId = (runFaceAgentId || activeAgent?.id || "").trim();
+  const inGroupChat = Boolean(activeChannel);
+  const runLive = sending || taskBusy || viewingRunActive;
+  /**
+   * Group AutoPick / decision window: run live, no agent_start yet.
+   * Do not paint list-focus activeAgent — that looks like a random member answering.
+   */
+  const groupDecisionPending = isGroupDecisionPending({
+    isGroup: inGroupChat,
+    faceAgentId: runFaceAgentId,
+    runLive,
+  });
+  const faceId =
+    resolveRunFaceAgentId(runFaceAgentId, {
+      isGroup: inGroupChat,
+      activeAgentId: activeAgent?.id,
+    }) || "";
   const fromSse = usePresenceStore((s) =>
     normalizePresenceStatus(faceId ? s.presenceByAgent[faceId] : undefined),
   );
-  let runStatusFace: BotPresenceStatus = fromSse;
-  if (runStatusFace === "idle") {
-    if (sending || taskBusy || viewingRunActive) runStatusFace = runActiveTool ? "working" : "thinking";
+  let runStatusFace: BotPresenceStatus = groupDecisionPending ? "working" : fromSse;
+  if (!groupDecisionPending && runStatusFace === "idle") {
+    if (runLive) runStatusFace = runActiveTool ? "working" : "thinking";
   }
   const runFaceAgent = resolveRunFaceAgent(runFaceAgentId, activeAgent, agents, activeChannel, agentNameById);
   const searchingHintNow = toolNameLooksLikeSearch(runActiveTool) || toolNameLooksLikeSearch(hostActivity || "");
@@ -376,12 +392,15 @@ function LiveRunStatus({
     <RunStatus
       label={taskBusy && !sending && !viewingRunActive ? runLabel || "正在做…" : runLabel || "正在思考…"}
       agentId={runFaceAgent?.id}
-      agentName={runFaceAgent?.name ?? "助手"}
+      agentName={runFaceAgent?.name ?? (groupDecisionPending ? "选人中" : "助手")}
       shape={runFaceAgent?.avatar_shape}
       avatarColor={runFaceAgent?.avatar_color}
-      color={resolveAvatarColor(runFaceAgent?.id || runFaceAgent?.name || "open-bot", runFaceAgent?.avatar_color)}
+      color={resolveAvatarColor(
+        runFaceAgent?.id || runFaceAgent?.name || (groupDecisionPending ? "open-bot-group-pick" : "open-bot"),
+        runFaceAgent?.avatar_color,
+      )}
       status={runStatusFace}
-      searchingHint={searchingHintNow}
+      searchingHint={searchingHintNow || groupDecisionPending}
     />
   );
 }

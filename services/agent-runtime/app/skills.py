@@ -34,7 +34,7 @@ _SKIP_SUFFIXES = {
     ".bin",
 }
 _MAX_FILE_BYTES = 512 * 1024
-_MAX_FILES = 64
+_MAX_FILES = 128
 
 
 @dataclass
@@ -287,6 +287,11 @@ def _load_user_from_pg(user_id: str, into: dict[str, SkillMeta]) -> bool:
     return True
 
 
+# Catalog line descriptions are capped; full body via load_skill.
+# Keep enough trigger keywords for discovery; find-skills covers deep search.
+CATALOG_DESC_MAX = 120
+
+
 class SkillRegistry:
     def __init__(self, root: Path | None = None, user_id: str | None = None) -> None:
         self.root = root or default_skills_root()
@@ -312,7 +317,14 @@ class SkillRegistry:
             items = [s for s in items if s.name in allow]
         if not items:
             return "（当前未发现可用技能）"
-        lines = [f"- {s.name}: {s.description}" for s in items]
+        # Catalog is name+short desc only; full body via load_skill. Cap desc to curb prompt bloat.
+        lines = []
+        max_desc = CATALOG_DESC_MAX
+        for s in items:
+            desc = (s.description or "").strip()
+            if len(desc) > max_desc:
+                desc = desc[: max_desc - 3].rstrip() + "…"
+            lines.append(f"- {s.name}: {desc}")
         return "\n".join(lines)
 
     def filter_meta(self, enabled: set[str] | list[str] | None) -> list[SkillMeta]:
