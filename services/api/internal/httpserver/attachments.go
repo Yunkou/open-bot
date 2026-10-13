@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -94,7 +95,7 @@ func attachmentAllowed(mimeType, filename string) bool {
 		".java": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true,
 		".rb": true, ".php": true, ".sh": true, ".bash": true, ".zsh": true,
 		".sql": true, ".toml": true, ".ini": true, ".cfg": true, ".log": true,
-		".pdf": true,
+		".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true,
 		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true,
 		".svg": true, ".bmp": true, ".ico": true,
 	}
@@ -105,6 +106,8 @@ func attachmentAllowed(mimeType, filename string) bool {
 	case strings.HasPrefix(mt, "text/"):
 		return true
 	case mt == "application/json", mt == "application/xml", mt == "application/pdf":
+		return true
+	case officeMIME(mt):
 		return true
 	case strings.HasPrefix(mt, "image/"):
 		return true
@@ -226,7 +229,7 @@ func (s *Server) handleUploadAttachment(w http.ResponseWriter, r *http.Request) 
 	}
 	if !attachmentAllowed(mimeType, name) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "unsupported file type (allow images, text, pdf, json, md, csv, code)",
+			"error": "unsupported file type (allow images, text, pdf, docx, xlsx, pptx, json, md, csv, code)",
 		})
 		return
 	}
@@ -379,7 +382,10 @@ func resolveAttachmentPath(uid, convID string, ref AttachmentRef) (string, error
 	return abs, nil
 }
 
-func buildUserContentWithAttachments(text string, uid, convID string, refs []AttachmentRef) (string, error) {
+func buildUserContentWithAttachments(ctx context.Context, text string, uid, convID string, refs []AttachmentRef) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	text = strings.TrimSpace(text)
 	if len(refs) == 0 {
 		return text, nil
@@ -408,14 +414,15 @@ func buildUserContentWithAttachments(text string, uid, convID string, refs []Att
 		}
 		b.WriteString(fmt.Sprintf("- %s (%s, %s)\n", name, mimeType, formatSize(size)))
 
+		if isOfficeAttachment(mimeType, name) {
+			appendOfficeDocument(ctx, &b, abs, name, mimeType)
+			continue
+		}
 		if strings.HasPrefix(strings.ToLower(mimeType), "image/") {
 			b.WriteString("  （图片已存储；一期未传视觉多模态，仅文本提及）\n")
 			continue
 		}
 		if !isTextLikeAttachment(mimeType, name) {
-			if strings.EqualFold(mimeType, "application/pdf") || strings.HasSuffix(strings.ToLower(name), ".pdf") {
-				b.WriteString("  （PDF 已存储；一期未解析正文）\n")
-			}
 			continue
 		}
 		raw, err := os.ReadFile(abs)
@@ -502,4 +509,3 @@ func (s *Server) ensureAttachmentRows(uid, convID string, refs []AttachmentRef) 
 	}
 	return nil
 }
-

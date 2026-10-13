@@ -1359,7 +1359,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	storedContent := content
 	if len(body.Attachments) > 0 {
-		built, berr := buildUserContentWithAttachments(content, uid, conv.ID, body.Attachments)
+		built, berr := buildUserContentWithAttachments(r.Context(), content, uid, conv.ID, body.Attachments)
 		if berr != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": berr.Error()})
 			return

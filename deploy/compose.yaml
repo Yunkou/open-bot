@@ -1,7 +1,7 @@
 # open-bot local dependencies — single entry (Compose Spec)
 #
 # Usage (from repo root):
-#   make compose-up                          # core: postgres / redis / minio
+#   make compose-up                          # core: postgres / redis / minio / markitdown
 #   make compose-casdoor                     # + profile casdoor
 #   make compose-langfuse                    # + profile langfuse (needs deploy/langfuse/.env)
 #   make compose-down                        # tear down all profiles for this project

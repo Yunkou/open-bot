@@ -30,7 +30,7 @@ make e2e           # 需 API/web/admin/runtime 已起；默认 mock LLM
 ```bash
 # 1) Docker 依赖
 make compose-postgres   # 最小：只要 Postgres
-# 或：make compose-up     # core：Postgres / Redis / MinIO
+# 或：make compose-up     # core：Postgres / Redis / MinIO / MarkItDown（:8010）
 # 或：make compose-all    # core + Casdoor + Langfuse（一次全起）
 # 入口：deploy/compose.yaml（详见 deploy/README.md、docs/本地启动.md）
 # 镜像：pgvector/pgvector:pg16（含 vector 扩展）

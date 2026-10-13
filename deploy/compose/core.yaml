@@ -29,6 +29,22 @@ services:
     volumes:
       - openbot_minio:/data
 
+  # PDF/DOCX/XLSX/PPTX → Markdown. API is not in this stack:
+  #   make dev-api uses the published port (DOC_PARSE_URL=http://127.0.0.1:8010).
+  #   An API container on this network would use http://markitdown:8010.
+  # Host port 8010 avoids the agent runtime on :8001.
+  markitdown:
+    build:
+      context: ../../services/markitdown
+      dockerfile: Dockerfile
+    image: openbot-markitdown:dev
+    environment:
+      CONVERT_TIMEOUT_SECONDS: "8"
+      MAX_UPLOAD_BYTES: "20971520"
+    ports:
+      # Local API (`make dev-api`) is on the host, not this network.
+      - "127.0.0.1:8010:8010"
+
 volumes:
   openbot_pg:
   openbot_minio:
