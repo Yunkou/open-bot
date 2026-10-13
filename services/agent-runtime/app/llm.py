@@ -798,6 +798,75 @@ TOOL_DEFS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "gmail_status",
+            "description": (
+                "Check whether the current user has connected Gmail in Web Settings → 连接应用. "
+                "Returns connected, email, and a hint if not connected. "
+                "Call this before gmail_send when unsure. Desktop himalaya/google-workspace skills "
+                "are separate (host_shell); prefer this for web users without a connected computer."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "gmail_send",
+            "description": (
+                "Send email via the user's connected Gmail (Web OAuth). "
+                "Always shows a chat confirm card; never auto-sends. "
+                "If Gmail is not connected, returns an error telling the user to open "
+                "Settings → 连接应用. Do not invent a successful send. "
+                "Attachments: pass workspace paths in `attachments` (under /workspace) for "
+                "HTML/PDF/images/etc. Prefer attaching generated HTML pages/关系图/files "
+                "instead of dumping source into body — use a short note in `body` and "
+                "attachments=[{path, filename?}]. "
+                "Limits: up to 5 files, 5MB each, 8MB total. "
+                "Body must not be only a filesystem path unless attachments are also set; "
+                "never put a path in body as a fake attachment. "
+                "Call gmail_send exactly once per email. After ok:true / message_id (or "
+                "already_sent/deduped), stop — do not call gmail_send again for the same mail."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to": {
+                        "type": "string",
+                        "description": "Recipient email(s), comma-separated",
+                    },
+                    "subject": {"type": "string", "description": "Email subject line"},
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Plain-text note the recipient reads. Short is fine when attaching files. "
+                            "Never only a filesystem path (unless attachments are provided)."
+                        ),
+                    },
+                    "cc": {"type": "string"},
+                    "bcc": {"type": "string"},
+                    "attachments": {
+                        "type": "array",
+                        "description": (
+                            "Workspace files to attach. Each item: path (required, under /workspace), "
+                            "optional filename for the attachment name."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "filename": {"type": "string"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                },
+                "required": ["to", "subject", "body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_machines",
             "description": (
                 "List the user's registered computers. Each row has id, label, platform, connected, "

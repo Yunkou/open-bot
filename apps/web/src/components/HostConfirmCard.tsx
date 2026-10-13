@@ -19,6 +19,11 @@ function commandSnippet(item: HostConfirmPayload): string {
     if (!cmd) return item.dest === "terminal" ? "打开终端" : "（空命令）";
     return cmd.length > 72 ? `${cmd.slice(0, 72)}…` : cmd;
   }
+  if (item.op === "email_send") {
+    const subj = (item.dest || "").trim() || "(无主题)";
+    const to = (item.path || "").trim() || "(无收件人)";
+    return `${to} · ${subj}`;
+  }
   if (item.op === "move") {
     return item.dest ? `${item.path} → ${item.dest}` : item.path;
   }
@@ -66,6 +71,18 @@ function actionCopy(item: HostConfirmPayload): { detail: string; danger: boolean
       danger: true,
     };
   }
+  if (item.op === "email_send") {
+    const attachLine = (item.preview || "")
+      .split("\n")
+      .map((s) => s.trim())
+      .find((s) => s.startsWith("附件："));
+    return {
+      detail: [item.path && `收件人：${item.path}`, item.dest && `主题：${item.dest}`, attachLine]
+        .filter(Boolean)
+        .join("\n"),
+      danger: false,
+    };
+  }
   return { detail: item.path, danger: false };
 }
 
@@ -89,9 +106,13 @@ export function HostConfirmCard({
   const settled = item.status === "allowed" ? "已允许" : item.status === "denied" ? "已拒绝" : "";
   const tool = toolLabelForHostOp(item.op, item.path);
   const snippet = commandSnippet(item);
-  const titleLine = snippet ? `${tool} · ${snippet}` : tool;
+  // email_send: keep title short; to/subject live in detail + preview with normal wrap.
+  const titleLine =
+    item.op === "email_send" ? tool : snippet ? `${tool} · ${snippet}` : tool;
+  // Product: 不擅自代发 — never offer Always allow for email.
+  const allowAlways = alwaysAllowEnabled && item.op !== "email_send";
   const gitWriteHint =
-    alwaysAllowEnabled && isGitWriteRisk(item.op, item.path)
+    allowAlways && isGitWriteRisk(item.op, item.path)
       ? "始终允许将覆盖同类 Git 写操作（含 push），请确认风险"
       : "";
   const reason = item.reason || "";
@@ -99,7 +120,7 @@ export function HostConfirmCard({
 
   return (
     <div
-      className="host-confirm-card approval-gate-card"
+      className="host-confirm-card"
       role="region"
       aria-label="工具需要确认"
       data-tool-family={family}
@@ -113,11 +134,11 @@ export function HostConfirmCard({
       ) : null}
       {detail && detail !== snippet ? <div className="host-confirm-path">{detail}</div> : null}
       {item.preview &&
-      (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec") ? (
+      (item.op === "write" || item.op === "shell" || item.op === "ssh_write" || item.op === "ssh_exec" || item.op === "email_send") ? (
         <pre className="host-confirm-preview">{item.preview}</pre>
       ) : null}
       {pending && onDecide ? (
-        <div className={`host-confirm-actions${alwaysAllowEnabled ? " host-confirm-actions-tri" : ""}`}>
+        <div className={`host-confirm-actions${allowAlways ? " host-confirm-actions-tri" : ""}`}>
           <button
             type="button"
             className="host-confirm-allow-once primary"
@@ -125,7 +146,7 @@ export function HostConfirmCard({
           >
             允许一次
           </button>
-          {alwaysAllowEnabled ? (
+          {allowAlways ? (
             <button
               type="button"
               className="host-confirm-always ghost"
