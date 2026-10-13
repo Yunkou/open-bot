@@ -16,6 +16,7 @@ import {
   quoteForMessage,
   replyTargetFromMessage,
   resolveRunFaceAgent,
+  speakerFaceForMessage,
   speakerNameForMessage,
   threadMessages,
 } from "./chatTimeline";
@@ -298,7 +299,8 @@ function ChatTranscript({
             key={m.id}
             message={m}
             agentId={m.agent_id || agentId}
-            speakerName={speakerNameForMessage(m, conversation?.channel_id, agentNameById)}
+            speakerName={speakerNameForMessage(m, conversation?.channel_id, agentNameById, conversation?.agent_id)}
+            speakerFace={speakerFaceForMessage(m, conversation, agents)}
             onHostDecide={m.role === "host_confirm" ? (d) => settleHostConfirm(m, d) : undefined}
             alwaysAllowEnabled={hostExecPolicy !== "ask"}
             replyQuote={quoteForMessage(m, indexed.messageById, agentNameById)}
@@ -345,7 +347,8 @@ function ChatTranscript({
                 key={`thread-${m.id}`}
                 message={m}
                 agentId={m.agent_id || agentId}
-                speakerName={speakerNameForMessage(m, conversation?.channel_id, agentNameById)}
+                speakerName={speakerNameForMessage(m, conversation?.channel_id, agentNameById, conversation?.agent_id)}
+                speakerFace={speakerFaceForMessage(m, conversation, agents)}
                 dense
                 replyQuote={quoteForMessage(m, indexed.messageById, agentNameById)}
                 onReply={beginReplyTo}

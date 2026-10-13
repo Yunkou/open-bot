@@ -285,6 +285,8 @@ func (s *Server) runConversationTaskOnce(ctx context.Context, task *db.Conversat
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(task.UserID))
 	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(task.UserID))
 	s.attachPreferredMachine(payloadMap, task.UserID, task.AgentID)
+	s.attachPeerRoster(payloadMap, task.UserID, task.AgentID)
+	s.routeAskColleague(ctx, payloadMap)
 
 	emit := func(event string, data any) {
 		if event != "status" {
@@ -370,6 +372,34 @@ func (s *Server) dropProjectedGroupPass(conversationID, requestID string) {
 	}
 }
 
+// suppressEchoedAssistant drops a journal-projected closing reply that only
+// repeats a colleague bubble already in this conversation, and tells clients
+// to remove both that row and the in-flight stream.
+func (s *Server) suppressEchoedAssistant(userID, conversationID, requestID, agentID string, emit func(event string, data any)) {
+	cid := strings.TrimSpace(conversationID)
+	rid := strings.TrimSpace(requestID)
+	deletedID := ""
+	if rid != "" && cid != "" && s.db != nil {
+		if existing, err := s.db.FindAssistantByRequestID(cid, rid); err == nil && existing != nil {
+			if derr := s.db.DeleteMessage(cid, existing.ID); derr != nil && !errors.Is(derr, db.ErrNotFound) {
+				log.Printf("drop echoed assistant conv=%s req=%s: %v", cid, rid, derr)
+			} else {
+				deletedID = existing.ID
+			}
+		}
+	}
+	if deletedID != "" {
+		s.publishMessageDeleted(userID, cid, deletedID)
+	}
+	if emit != nil {
+		emit("meta", map[string]any{
+			"phase":           "assistant_cleared",
+			"agent_id":        agentID,
+			"conversation_id": cid,
+		})
+	}
+}
+
 func (s *Server) saveAssistant(userID, conversationID, agentID, text string, emit func(event string, data any)) *db.Message {
 	return s.saveAssistantThreaded(userID, conversationID, agentID, text, "", "", "", nil, emit)
 }
@@ -387,6 +417,10 @@ func (s *Server) saveAssistantThreaded(userID, conversationID, agentID, text, re
 	}
 	// Hard guard: never persist group silence tokens (even if caller forgot to skip).
 	if db.ContentIsGroupPass(text) {
+		return nil
+	}
+	if s.finalEchoesColleague(userID, conversationID, agentID, text) {
+		s.suppressEchoedAssistant(userID, conversationID, requestID, agentID, emit)
 		return nil
 	}
 	rid := strings.TrimSpace(requestID)

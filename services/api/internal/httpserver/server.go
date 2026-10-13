@@ -307,6 +307,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/routines/update", s.requireInternal(s.handleInternalUpdateRoutine))
 	mux.HandleFunc("POST /internal/routines/delete", s.requireInternal(s.handleInternalDeleteRoutine))
 	mux.HandleFunc("POST /internal/agents/clone", s.requireInternal(s.handleInternalCloneAgent))
+	mux.HandleFunc("POST /internal/agents/ask", s.requireInternal(s.handleInternalAskAgent))
 
 	// Registered host machines (ListMachines-like)
 	mux.HandleFunc("GET /v1/machines", s.requireAuth(s.handleListMachines))
@@ -1752,6 +1753,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
 		attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
 		s.attachPreferredMachine(payloadMap, uid, agentID)
+		s.attachPeerRoster(payloadMap, uid, agentID)
 		preps = append(preps, groupCandidatePrep{
 			index:      i,
 			agentID:    agentID,
@@ -1801,6 +1803,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 						"total":      waveTotal,
 						"forced":     forcedAgents[prep.agentID],
 					})
+					s.routeAskColleague(runCtx, prep.payloadMap)
 					assistantText, pendingSummary, runID, runSources, runUsage, runErr := s.proxyRuntimeRun(runCtx, agentEmit, prep.payloadMap, prep.recallCtx)
 					if pendingSummary != "" {
 						sumAt := userMsg.CreatedAt.Add(-time.Millisecond)
@@ -1975,6 +1978,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					attachUserTimezone(payloadMap, s.userSettingsOrDefault(uid))
 					attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(uid))
 					s.attachPreferredMachine(payloadMap, uid, agentID)
+					s.attachPeerRoster(payloadMap, uid, agentID)
 					secondPreps = append(secondPreps, groupCandidatePrep{
 						index:      i,
 						agentID:    agentID,

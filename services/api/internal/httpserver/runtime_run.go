@@ -107,6 +107,8 @@ func (s *Server) runAgentOnce(ctx context.Context, userID, agentID, content, tit
 	attachUserTimezone(payloadMap, s.userSettingsOrDefault(userID))
 	attachToolAllowlist(payloadMap, s.toolAllowlistOrEmpty(userID))
 	s.attachPreferredMachine(payloadMap, userID, agentID)
+	s.attachPeerRoster(payloadMap, userID, agentID)
+	s.routeAskColleague(ctx, payloadMap)
 	payload, _ := json.Marshal(payloadMap)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.runtimeURL+"/v1/runs", bytes.NewReader(payload))

@@ -44,11 +44,36 @@ export function speakerNameForMessage(
   message: UiMessage,
   channelId: string | undefined,
   agentNameById: Map<string, string>,
+  conversationAgentId?: string,
 ): string | undefined {
-  if (!channelId) return undefined;
   if (message.role !== "assistant") return undefined;
   const name = (message.agent_name || agentNameById.get(message.agent_id || "") || "").trim();
-  return name || undefined;
+  if (!name) return undefined;
+  if (channelId) return name;
+  const speakerId = (message.agent_id || "").trim();
+  const ownerId = (conversationAgentId || "").trim();
+  if (speakerId && ownerId && speakerId !== ownerId) return `来自 ${name}`;
+  return undefined;
+}
+
+export function speakerFaceForMessage(
+  message: UiMessage,
+  conversation: { channel_id?: string; agent_id?: string } | null | undefined,
+  agents: Agent[],
+): { id: string; name: string; shape?: string | null; color?: string | null } | undefined {
+  if (message.role !== "assistant") return undefined;
+  if (conversation?.channel_id) return undefined;
+  const speakerId = (message.agent_id || "").trim();
+  const ownerId = (conversation?.agent_id || "").trim();
+  if (!speakerId || !ownerId || speakerId === ownerId) return undefined;
+  const agent = agents.find((a) => a.id === speakerId);
+  const name = (agent?.name || message.agent_name || speakerId).trim();
+  return {
+    id: speakerId,
+    name,
+    shape: agent?.avatar_shape,
+    color: agent?.avatar_color,
+  };
 }
 
 export function memberAgents(activeChannel: Channel | null | undefined, agents: Agent[]): Agent[] | undefined {

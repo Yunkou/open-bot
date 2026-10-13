@@ -417,6 +417,25 @@ export async function sendUserTextImpl(
                 setRunLabel("正在思考…");
               }
             }
+            if (meta.phase === "assistant_cleared") {
+              const clearId = typeof meta.agent_id === "string" ? meta.agent_id : "";
+              d.patchConvMessages(streamConvId!, (prev) => {
+                const run = d.runsRef.current.get(streamConvId!);
+                const mappedId = clearId && run?.assistantIdsByAgent?.[clearId];
+                return prev.filter((m) => {
+                  const dropMapped = Boolean(mappedId && m.id === mappedId);
+                  const dropStreaming = Boolean(clearId) && m.agent_id === clearId && Boolean(m.streaming);
+                  const drop = dropMapped || dropStreaming;
+                  if (drop && run) {
+                    if (run.assistantId === m.id) run.assistantId = "";
+                    if (clearId && run.assistantIdsByAgent?.[clearId] === m.id) {
+                      delete run.assistantIdsByAgent[clearId];
+                    }
+                  }
+                  return !drop;
+                });
+              });
+            }
             if (meta.phase === "agent_skipped") {
               const skipId = typeof meta.agent_id === "string" ? meta.agent_id : "";
               // Server is authoritative: drop the in-flight bubble for this agent even if

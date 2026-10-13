@@ -652,7 +652,11 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "send_to_agent",
-            "description": "Send a message to another agent (or channel) via the agent bus.",
+            "description": (
+                "Send a message to another agent (or channel) via the agent bus. "
+                "This returns immediately and does not wait for a reply. "
+                "To get another assistant's answer in this same turn, use ask_agent."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -668,6 +672,36 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     "priority": {"type": "boolean"},
                 },
                 "required": ["body"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_agent",
+            "description": (
+                "Ask one other assistant in this account and wait for their answer in this turn. "
+                "Use only when the user names them, or the question fits a colleague's job description "
+                "in the system roster and not yours. Ask one colleague, once. "
+                "The colleague reply is already shown in this chat; do not paste or restate it. "
+                "If the result has needs_user, stop and wait for the user; "
+                "do not invent the missing details, restate the questions, or call ask_agent again. "
+                "If you have nothing new, answer in one short sentence that does not quote the reply. "
+                "Do not use this for group channels or to notify without waiting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "to_agent_id": {
+                        "type": "string",
+                        "description": "Colleague agent id from the roster",
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "The question for that colleague to answer",
+                    },
+                },
+                "required": ["to_agent_id", "question"],
             },
         },
     },
@@ -1155,6 +1189,23 @@ TOOL_DEFS: list[dict[str, Any]] = [
 ]
 # Append built-in utility tools (time / calculator / http_fetch).
 TOOL_DEFS = list(TOOL_DEFS) + list(BUILTIN_TOOL_DEFS) + list(ROUTINE_TOOL_DEFS) + list(AGENT_TOOL_DEFS)
+
+
+def iter_tool_defs(
+    *,
+    allow_ask_agent: bool = False,
+    extra_tools: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Tool list for one turn. ask_agent is omitted unless this turn may ask a colleague."""
+    tools: list[dict[str, Any]] = []
+    for tool in TOOL_DEFS:
+        name = str((tool.get("function") or {}).get("name") or "")
+        if name == "ask_agent" and not allow_ask_agent:
+            continue
+        tools.append(tool)
+    if extra_tools:
+        tools.extend(extra_tools)
+    return tools
 
 
 def openai_config(override: LLMOverride | None = None) -> tuple[str, str, str]:
@@ -1818,6 +1869,9 @@ async def run_tool_loop(
     override: LLMOverride | None = None,
     extra_tools: list[dict[str, Any]] | None = None,
     on_status: StatusCallback | None = None,
+    sources_out: list[dict[str, str]] | None = None,
+    allow_ask_agent: bool = False,
+    ask_routed: bool = False,
 ) -> tuple[str, list[str], Any | None]:
     """Non-stream tool loop; returns final text, tool names used, and usage_details.
 
@@ -1906,9 +1960,7 @@ async def run_tool_loop(
             if raw.strip() and not (final or "").strip():
                 final = REASONING_ONLY
         return final, used, usage_acc
-    tools = list(TOOL_DEFS)
-    if extra_tools:
-        tools.extend(extra_tools)
+    tools = iter_tool_defs(allow_ask_agent=allow_ask_agent, extra_tools=extra_tools)
     choice: str | None = "auto" if profile.tool_choice_auto else None
     # When upstream rejects tools+auto, keep running via XML/Hermes text tool calls
     # instead of silently chatting with a "tools enabled" system prompt (hallucinates).
@@ -2053,7 +2105,7 @@ async def run_tool_loop(
         # Keep the same run going. Do not classify the sentence.
         final = postprocess_text(strip_think(strip_tool_markup(content_str)), profile)
         reasoning_only = bool(content_str.strip()) and not (final or "").strip()
-        if not continued and turn_unfinished(used, msgs):
+        if not ask_routed and not continued and turn_unfinished(used, msgs):
             reasoning_only = False
             continued = True
             if on_status is not None:

@@ -430,7 +430,6 @@ func FilterMessageSourcesCited(sources []MessageSource, answer string, structure
 	return nil
 }
 
-
 // InjectCitationMarkers inserts [1][2]… after the first host/title mention for each source.
 // Idempotent when markers already exist. Skips code fences / inline code spans.
 func InjectCitationMarkers(answer string, sources []MessageSource) string {
@@ -833,6 +832,41 @@ func (d *DB) FindAssistantByRequestID(conversationID, requestID string) (*Messag
 		 ORDER BY created_at DESC
 		 LIMIT 1`,
 		conversationID, requestID,
+	)
+	var m Message
+	var sourcesRaw string
+	if err := row.Scan(
+		&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.ReplyToID, &m.ThreadRootID,
+		&m.CreatedAt, &m.AgentMessageID, &m.RequestID, &sourcesRaw,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	m.Sources = DecodeMessageSources(sourcesRaw)
+	return &m, nil
+}
+
+// FindUserMessageByRequestID returns the newest message with this request_id
+// in any conversation owned by the user. Used to make ask_agent idempotent.
+func (d *DB) FindUserMessageByRequestID(userID, requestID string) (*Message, error) {
+	userID = strings.TrimSpace(userID)
+	requestID = strings.TrimSpace(requestID)
+	if userID == "" || requestID == "" {
+		return nil, ErrNotFound
+	}
+	row := d.SQL.QueryRow(
+		`SELECT m.id, m.conversation_id, m.role, m.content, COALESCE(m.agent_id,''),
+		        COALESCE(m.reply_to_id,''), COALESCE(m.thread_root_id,''), m.created_at,
+		        COALESCE(m.agent_message_id, ''), COALESCE(m.request_id, ''),
+		        COALESCE(m.sources_json, '[]')
+		 FROM messages m
+		 JOIN conversations c ON c.id = m.conversation_id
+		 WHERE c.user_id = $1 AND m.request_id = $2
+		 ORDER BY m.created_at DESC
+		 LIMIT 1`,
+		userID, requestID,
 	)
 	var m Message
 	var sourcesRaw string

@@ -467,16 +467,24 @@ body,
 }
 
 
-/* Group chat: bot name above assistant bubble (DM omits this). */
+/* Group: member name. DM: 「来自」 when another bot spoke in this thread. */
 .msg-speaker-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   line-height: 1.2;
   color: var(--muted);
   padding: 0 4px 2px;
   max-width: 100%;
   overflow: hidden;
+  min-width: 0;
+}
+.msg-speaker-text {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
 .mention-kind-badge {
