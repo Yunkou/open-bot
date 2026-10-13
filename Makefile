@@ -24,6 +24,7 @@ endif
 
 
 # Single compose entry: deploy/compose.yaml (profiles: casdoor, langfuse)
+# core: postgres, redis, minio, markitdown (document parse, host :8010)
 COMPOSE ?= docker compose -f deploy/compose.yaml --project-directory deploy
 
 compose-up:

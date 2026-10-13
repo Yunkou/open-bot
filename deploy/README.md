@@ -4,7 +4,7 @@ Single Compose entry: **`compose.yaml`** (Compose Spec + profiles).
 
 ```bash
 # from repo root
-make compose-up            # core only: postgres / redis / minio
+make compose-up            # core only: postgres / redis / minio / markitdown
 make compose-all           # core + casdoor + langfuse
 make compose-casdoor       # + Casdoor IAM
 make compose-langfuse      # + Langfuse v4 (needs langfuse/.env)
@@ -28,9 +28,11 @@ Sandbox images (`sandbox/`, `sandbox-desktop/`) are Dockerfiles only — not par
 
 | Profile | Services | Host ports |
 |---------|----------|------------|
-| *(default / always)* | `postgres`, `redis`, `minio` | `5432`, `6379`, `9000`/`9001` |
+| *(default / always)* | `postgres`, `redis`, `minio`, `markitdown` | `5432`, `6379`, `9000`/`9001`, `8010` |
 | `casdoor` | `casdoor-postgres`, `casdoor` | `5434`, `8000` |
 | `langfuse` | `langfuse-postgres`, `langfuse-redis`, `langfuse-minio`, `clickhouse`, `langfuse-web`, `langfuse-worker` | `5433`, `6380`, `9090`/`9091`, `8123`, `3100`, `3030` |
+
+`markitdown` is built from `services/markitdown` (not a public image). `make dev-api` reaches it at `http://127.0.0.1:8010` (`DOC_PARSE_URL`). Port 8001 stays the agent runtime. See [docs/附件文档解析-MarkItDown.md](../docs/附件文档解析-MarkItDown.md).
 
 ## Keep beside compose
 

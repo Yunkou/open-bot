@@ -46,6 +46,9 @@ const ALLOWED_EXT = new Set([
   ".cfg",
   ".log",
   ".pdf",
+  ".docx",
+  ".xlsx",
+  ".pptx",
   ".png",
   ".jpg",
   ".jpeg",
@@ -77,7 +80,14 @@ export function attachmentAllowed(mime: string, name: string): boolean {
   const mt = (mime || "").split(";")[0].trim().toLowerCase();
   if (ALLOWED_EXT.has(extOf(name))) return true;
   if (mt.startsWith("text/")) return true;
-  if (mt === "application/json" || mt === "application/xml" || mt === "application/pdf")
+  if (
+    mt === "application/json" ||
+    mt === "application/xml" ||
+    mt === "application/pdf" ||
+    mt === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    mt === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    mt === "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  )
     return true;
   if (mt.startsWith("image/")) return true;
   if (mt === "application/javascript" || mt === "application/typescript") return true;
@@ -91,7 +101,7 @@ export function validateAttachment(file: PickedFile): string | null {
     return `文件超过 20MB 限制：${file.name}`;
   }
   if (!attachmentAllowed(file.mime, file.name)) {
-    return `不支持的文件类型：${file.name}（支持图片、文本、pdf、json、md、csv 与代码文件）`;
+    return `不支持的文件类型：${file.name}（支持图片、文本、pdf、docx、xlsx、pptx、json、md、csv 与代码文件）`;
   }
   return null;
 }

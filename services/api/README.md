@@ -20,6 +20,8 @@ go run ./cmd/api
 
 发送消息时，Go 会把当前会话 `messages` + `agent_id` + `content` 一并 POST 到 runtime `/v1/runs`。客户端断开或 cancel 会取消 runtime 请求，并尽量落库已生成的部分 assistant 文本（空取消写「（已停止）」）；`cancel` / 同会话新 send 会短暂等待上一轮 flush（keep-partial-next-turn）。
 
+附件里的 PDF/DOCX/XLSX/PPTX 在 `DOC_PARSE_URL` 指向 MarkItDown（本机 `http://127.0.0.1:8010`，compose 网络内 `http://markitdown:8010`）时抽成 Markdown 再写入 user 消息。变量为空则不请求，提示未配置解析服务。见 `docs/附件文档解析-MarkItDown.md`。
+
 ## A2A gateway
 
 - `GET /.well-known/agent-card.json`（`?agent_id=` 可选）

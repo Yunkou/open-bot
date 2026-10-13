@@ -16,6 +16,7 @@ import {
  * 助手头像 —— 对齐 Web `AgentAvatar`：robot-heads + presence 表情 + 在线绿点。
  *
  * 原生侧通过 Expo DOM（`'use dom'`）嵌入同一套 canvas 组件，避免再维护一套 SVG 剪影。
+ * Expo Go 没有 ExpoDomWebView 原生视图，因此用 react-native-webview。
  */
 export function AgentAvatar({
   id,
@@ -69,7 +70,6 @@ export function AgentAvatar({
         dom={{
           style: { width: size, height: size, backgroundColor: "transparent" },
           scrollEnabled: false,
-          // 列表里大量头像时走 RN WebView，避免默认 dom-webview 额外依赖差异
           useExpoDOMWebView: false,
         }}
       />
