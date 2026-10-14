@@ -299,6 +299,7 @@ func Listen(addr, runtimeURL string, database *db.DB) error {
 	mux.HandleFunc("POST /internal/gmail/send", s.requireInternal(s.handleInternalGmailSend))
 	mux.HandleFunc("POST /internal/routines/run", s.requireInternal(s.handleInternalRunRoutine))
 	mux.HandleFunc("POST /internal/conversation-tasks/enqueue", s.requireInternal(s.handleInternalEnqueueTask))
+	mux.HandleFunc("POST /internal/uploads/read", s.requireInternal(s.handleInternalReadUploads))
 	mux.HandleFunc("POST /internal/memory-recalls", s.requireInternal(s.handleInternalRecordMemoryRecall))
 	mux.HandleFunc("POST /internal/harness/entries", s.requireInternal(s.handleInternalHarnessEntry))
 	mux.HandleFunc("POST /internal/harness/threads", s.requireInternal(s.handleInternalHarnessThread))
@@ -1299,6 +1300,9 @@ type sendBody struct {
 	// WhenBusy: follow_up (default) | steer | reject | replace — used when a durable run is already active.
 	// replace = new-message supersede: abort old durable thread and start a fresh after_interrupt turn.
 	WhenBusy string `json:"when_busy"`
+	// Onboarding is the job card (or a custom answer on it). This turn stays
+	// with the current bot and does not ask a colleague.
+	Onboarding bool `json:"onboarding"`
 }
 
 type runtimeMsg struct {
@@ -1372,12 +1376,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		parseTimeout := resolveDocParseTimeout(parseTimeoutOverride)
-		built, berr := buildUserContentWithAttachments(r.Context(), content, uid, conv.ID, body.Attachments, parseTimeout)
+		built, extracts, berr := buildUserContentWithAttachments(r.Context(), content, uid, conv.ID, body.Attachments, parseTimeout)
 		if berr != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": berr.Error()})
 			return
 		}
 		runtimeContent = built
+		s.persistAttachmentExtracts(r.Context(), uid, conv.ID, extracts)
 	}
 
 	var replyParent *db.Message
@@ -1747,6 +1752,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		if afterInterrupt {
 			payloadMap["after_interrupt"] = true
 		}
+		if body.Onboarding {
+			payloadMap["onboarding"] = true
+		}
 		if replyToID != "" {
 			payloadMap["reply_to_id"] = replyToID
 		}
@@ -1975,6 +1983,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					}
 					if afterInterrupt {
 						payloadMap["after_interrupt"] = true
+					}
+					if body.Onboarding {
+						payloadMap["onboarding"] = true
 					}
 					if replyToID != "" {
 						payloadMap["reply_to_id"] = replyToID
