@@ -107,8 +107,14 @@ export function NewChatPopover({
       const el = anchorRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
+      const safeTop =
+        Number.parseFloat(
+          getComputedStyle(document.documentElement).getPropertyValue("--safe-top"),
+        ) || 0;
+      // Clamp with max panel height (content may be shorter; see dialog max-h).
+      const panelH = Math.min(640, window.innerHeight - 24 - safeTop);
       const left = Math.min(r.right + 12, window.innerWidth - 380);
-      const top = Math.max(12, Math.min(r.top - 4, window.innerHeight - 520));
+      const top = Math.max(12 + safeTop, Math.min(r.top - 4, window.innerHeight - panelH));
       setPos({ top, left: Math.max(12, left) });
     };
     place();
@@ -209,10 +215,13 @@ export function NewChatPopover({
       className={cn(
         "border-none p-0 text-inherit",
         sheetForm
-          ? "action-sheet-root pointer-events-auto z-60 flex max-h-none max-w-none flex-col justify-end bg-transparent"
-          : "pointer-events-auto fixed z-40 m-0 flex max-h-[min(640px,calc(100vh-24px))] w-[min(360px,calc(100vw-24px))] max-w-none flex-col gap-2 overflow-hidden rounded-2xl border border-border bg-(--bg-elevated) p-2.5 shadow-(--shadow-lg)",
-        sheetForm &&
-          "relative top-auto! right-auto! left-auto! m-0 max-h-[min(90dvh,90vh)] w-full! max-w-full! gap-0 rounded-t-2xl rounded-b-none px-3 pb-[calc(10px+var(--safe-bottom,0px))] pt-0",
+          ? // Full-bleed root (CSS): fixed inset-0 h-full. Do not add relative/max-h on
+            // <dialog> — UA height:fit-content + flex-1 min-h-0 collapses the sheet.
+            "action-sheet-root"
+          : // Popover: h-auto + max-h so height hugs content (web). Avoid forced h-[520px]
+            // empty gap. Collapse trap is flex-1 (basis 0%) + min-h-0 as sole child —
+            // use flex-auto on the inner chain instead (see below). --safe-top for titlebar.
+            "pointer-events-auto fixed z-40 m-0 flex h-auto max-h-[min(640px,calc(100vh-24px-var(--safe-top,0px)))] w-[min(360px,calc(100vw-24px))] max-w-none flex-col gap-2 overflow-hidden rounded-2xl border border-border bg-(--bg-elevated) p-2.5 shadow-(--shadow-lg)",
       )}
       style={panelStyle}
       aria-label="选择助手"
@@ -220,9 +229,13 @@ export function NewChatPopover({
       {sheetForm ? <button {...maskProps} /> : null}
       <div
         className={cn(
-          "flex min-h-0 flex-1 flex-col overflow-hidden",
-          sheetForm &&
-            "relative z-1 max-h-[min(90dvh,90vh)] w-full gap-0 bg-(--bg-elevated)",
+          "flex min-h-0 flex-col overflow-hidden",
+          sheetForm
+            ? // Sheet: flex-1 fills action-sheet-root (definite h-full); max-h keeps panel usable.
+              "relative z-1 max-h-[min(90dvh,90vh)] w-full flex-1 gap-0 rounded-t-2xl bg-(--bg-elevated) px-3 pb-[calc(10px+var(--safe-bottom,0px))] pt-0"
+            : // Popover: flex-auto (basis auto) so dialog fit-content gets content height.
+              // flex-1 (basis 0%) + min-h-0 collapsed desktop WebView; h-[520px] left web empty.
+              "max-h-full flex-auto",
         )}
       >
         {sheetForm ? (
@@ -310,8 +323,8 @@ export function NewChatPopover({
 
             <div
               className={cn(
-                "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain pb-1",
-                sheetForm && "min-h-0 flex-1 overflow-y-auto overscroll-contain",
+                "flex min-h-0 flex-col gap-0.5 overflow-y-auto overscroll-contain pb-1",
+                sheetForm ? "flex-1" : "flex-auto",
               )}
               role="listbox"
               aria-label="助手列表"
@@ -355,11 +368,16 @@ export function NewChatPopover({
         ) : mode === "bot" ? (
           <div
             className={cn(
-              "flex min-h-0 flex-1 flex-col gap-2.5 overflow-hidden",
-              sheetForm && "gap-0",
+              "flex min-h-0 flex-col gap-2.5 overflow-hidden",
+              sheetForm ? "flex-1 gap-0" : "flex-auto",
             )}
           >
-            <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto overscroll-contain px-0.5 py-1 pb-3 [-webkit-overflow-scrolling:touch]">
+            <div
+              className={cn(
+                "flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain px-0.5 py-1 pb-3 [-webkit-overflow-scrolling:touch]",
+                sheetForm ? "flex-1" : "flex-auto",
+              )}
+            >
               <div className="flex items-center gap-2">
                 <button type="button" className={cn(backClass, touchMin)} onClick={backToList}>
                   ← 返回
@@ -481,11 +499,16 @@ export function NewChatPopover({
         ) : (
           <div
             className={cn(
-              "flex min-h-0 flex-1 flex-col gap-2.5 overflow-hidden",
-              sheetForm && "gap-0",
+              "flex min-h-0 flex-col gap-2.5 overflow-hidden",
+              sheetForm ? "flex-1 gap-0" : "flex-auto",
             )}
           >
-            <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto overscroll-contain px-0.5 py-1 pb-3 [-webkit-overflow-scrolling:touch]">
+            <div
+              className={cn(
+                "flex min-h-0 flex-col gap-2.5 overflow-y-auto overscroll-contain px-0.5 py-1 pb-3 [-webkit-overflow-scrolling:touch]",
+                sheetForm ? "flex-1" : "flex-auto",
+              )}
+            >
               <div className="flex items-center gap-2">
                 <button type="button" className={cn(backClass, touchMin)} onClick={backToList}>
                   ← 返回

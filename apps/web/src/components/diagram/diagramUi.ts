@@ -143,7 +143,10 @@ export const diagramWarningClass = cn(
 );
 
 export const diagramFsBackdropClass = cn(
-  "fixed inset-0 z-[90] grid place-items-center bg-slate-900/55",
+  // h/w-full: native <dialog> UA is width/height:fit-content; with m-0 that
+  // pins the box top-left. Match dialog.modal-backdrop so inset-0 fills the
+  // viewport and grid place-items-center can center the shell.
+  "fixed inset-0 z-[90] grid h-full w-full place-items-center bg-slate-900/55",
 );
 
 export const diagramFsBackdropImageClass = "bg-black/[0.82]";
@@ -174,7 +177,8 @@ export const diagramFsBodyClass = (opts?: { source?: boolean; html?: boolean; im
   cn(
     "min-h-0 flex-1 overflow-auto overscroll-contain touch-pan-x touch-pan-y",
     opts?.html && "flex flex-col p-0",
-    opts?.image && "grid place-items-center bg-[#0a0a0a] p-4 touch-pan-x touch-pan-y",
+    opts?.image &&
+      "grid place-items-center bg-[#0a0a0a] p-4 select-none touch-pan-x touch-pan-y cursor-grab active:cursor-grabbing",
   );
 
 export const diagramBodyHtmlClass = cn(
@@ -215,7 +219,7 @@ export const diagramImageFailClass = cn(
   "[data-theme=dark]:text-[#a1a1aa]",
 );
 
+/** Fullscreen lightbox img — width/height set by ImageFullscreen (natural × scale). */
 export const diagramImageImgFsClass = cn(
-  "block max-h-full max-w-full cursor-default object-contain transition-transform duration-[50ms] ease-linear",
-  "motion-reduce:transition-none",
+  "block h-auto w-auto max-h-none max-w-none object-contain pointer-events-none",
 );
