@@ -43,19 +43,111 @@ fn command_ok(cmd: &mut Command) -> Result<(), String> {
     }
 }
 
+pub(super) fn name_matches_query(candidate: &str, query: &str) -> MatchKind {
+    if candidate.eq_ignore_ascii_case(query) {
+        return MatchKind::Exact;
+    }
+    // Unicode-aware contains (ASCII-only to_lowercase misses CJK display names).
+    if candidate.to_lowercase().contains(&query.to_lowercase())
+        || (!query.is_ascii() && candidate.contains(query))
+    {
+        return MatchKind::Fuzzy;
+    }
+    MatchKind::None
+}
+
+pub(super) enum MatchKind {
+    None,
+    Exact,
+    Fuzzy,
+}
+
+/// Folder stem plus CFBundle* / localized InfoPlist names (any locale).
+/// Lets `host_find_app("显示名")` hit `/Applications/Foo.app` without product-specific aliases.
+pub(super) fn app_match_names(app: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Some(stem) = app
+        .file_name()
+        .and_then(|s| s.to_str())
+        .and_then(|n| n.strip_suffix(".app"))
+    {
+        names.push(stem.to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for key in ["CFBundleName", "CFBundleDisplayName", "CFBundleExecutable"] {
+            if let Some(v) = defaults_read_info(app, key) {
+                if !names.iter().any(|n| n.eq_ignore_ascii_case(&v)) {
+                    names.push(v);
+                }
+            }
+        }
+        let resources = app.join("Contents").join("Resources");
+        if let Ok(rd) = fs::read_dir(&resources) {
+            for ent in rd.flatten() {
+                let p = ent.path();
+                if !p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|n| n.ends_with(".lproj"))
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let strings = p.join("InfoPlist.strings");
+                if !strings.is_file() {
+                    continue;
+                }
+                // Localized display names live in *.lproj/InfoPlist.strings (plutil, not defaults).
+                for key in ["CFBundleName", "CFBundleDisplayName"] {
+                    let output = Command::new("plutil")
+                        .args(["-extract", key, "raw"])
+                        .arg(&strings)
+                        .output();
+                    let Ok(output) = output else { continue };
+                    if !output.status.success() {
+                        continue;
+                    }
+                    let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if v.is_empty() {
+                        continue;
+                    }
+                    if !names.iter().any(|n| n == &v || n.eq_ignore_ascii_case(&v)) {
+                        names.push(v);
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
 fn consider_app(path: PathBuf, query: &str, exact: &mut Option<PathBuf>, fuzzy: &mut Option<PathBuf>) {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return;
     };
-    let Some(stem) = name.strip_suffix(".app") else {
-        return;
-    };
-    if stem.eq_ignore_ascii_case(query) {
-        *exact = Some(path);
+    if !name.ends_with(".app") {
         return;
     }
-    if fuzzy.is_none() && stem.to_lowercase().contains(&query.to_lowercase()) {
-        *fuzzy = Some(path);
+    let mut best = MatchKind::None;
+    for candidate in app_match_names(&path) {
+        match name_matches_query(&candidate, query) {
+            MatchKind::Exact => {
+                best = MatchKind::Exact;
+                break;
+            }
+            MatchKind::Fuzzy => best = MatchKind::Fuzzy,
+            MatchKind::None => {}
+        }
+    }
+    match best {
+        MatchKind::Exact => *exact = Some(path),
+        MatchKind::Fuzzy => {
+            if fuzzy.is_none() {
+                *fuzzy = Some(path);
+            }
+        }
+        MatchKind::None => {}
     }
 }
 
@@ -80,7 +172,65 @@ fn scan_apps(dir: &Path, query: &str, depth: u8, exact: &mut Option<PathBuf>, fu
     }
 }
 
-fn find_macos_app(query: &str) -> Option<PathBuf> {
+
+#[cfg(target_os = "macos")]
+fn defaults_read_info(app: &Path, key: &str) -> Option<String> {
+    let info = app.join("Contents").join("Info");
+    let output = Command::new("defaults")
+        .arg("read")
+        .arg(&info)
+        .arg(key)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// CFBundle* + localized names so callers can match `host_list_windows` owners
+/// (window owner / title may differ from the `.app` folder name).
+#[cfg(target_os = "macos")]
+fn macos_app_name_fields(app: &Path) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    if let Some(v) = defaults_read_info(app, "CFBundleName") {
+        m.insert("bundle_name".into(), json!(v));
+    }
+    if let Some(v) = defaults_read_info(app, "CFBundleDisplayName") {
+        m.insert("display_name".into(), json!(v));
+    }
+    if let Some(v) = defaults_read_info(app, "CFBundleExecutable") {
+        m.insert("executable_name".into(), json!(v));
+    }
+    let names = app_match_names(app);
+    if !names.is_empty() {
+        // Prefer a localized / non-folder display label when present.
+        if let Some(preferred) = names
+            .iter()
+            .find(|n| {
+                let stem = app
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.strip_suffix(".app"))
+                    .unwrap_or("");
+                !n.eq_ignore_ascii_case(stem)
+            })
+            .cloned()
+        {
+            m.entry("display_name".to_string())
+                .or_insert(json!(preferred));
+        }
+        m.insert("names".into(), json!(names));
+    }
+    m
+}
+
+pub(super) fn find_macos_app(query: &str) -> Option<PathBuf> {
     let query = query.trim().trim_end_matches(".app");
     let mut dirs = vec![
         PathBuf::from("/Applications"),
@@ -100,18 +250,24 @@ fn find_macos_app(query: &str) -> Option<PathBuf> {
     exact.or(fuzzy)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_find_app(name: String) -> Result<Value, String> {
     let name = validate_label(&name, 200)?;
     #[cfg(target_os = "macos")]
     {
         return Ok(match find_macos_app(&name) {
-            Some(app) => json!({
-                "ok": true,
-                "found": true,
-                "name": name,
-                "app": app.display().to_string()
-            }),
+            Some(app) => {
+                let mut out = json!({
+                    "ok": true,
+                    "found": true,
+                    "name": name,
+                    "app": app.display().to_string()
+                });
+                if let Some(obj) = out.as_object_mut() {
+                    obj.extend(macos_app_name_fields(&app));
+                }
+                out
+            }
             None => json!({ "ok": true, "found": false, "name": name }),
         });
     }
@@ -156,7 +312,7 @@ pub fn host_find_app(name: String) -> Result<Value, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_open(name: String) -> Result<Value, String> {
     let name = validate_label(&name, 200)?;
     #[cfg(target_os = "macos")]
@@ -166,12 +322,17 @@ pub fn host_open(name: String) -> Result<Value, String> {
         if let Some(app) = find_macos_app(&name) {
             cmd.arg(&app);
             command_ok(&mut cmd)?;
-            return Ok(json!({
+            let mut out = json!({
                 "ok": true,
                 "found": true,
                 "name": name,
-                "app": app.display().to_string()
-            }));
+                "app": app.display().to_string(),
+                "next": "host_list_windows again, match windows[].app/title to name/bundle_name/display_name, then host_screenshot(window_id=…). Do not use scope=main for a named-app capture."
+            });
+            if let Some(obj) = out.as_object_mut() {
+                obj.extend(macos_app_name_fields(&app));
+            }
+            return Ok(out);
         }
         cmd.arg(&name);
         command_ok(&mut cmd)?;
@@ -310,7 +471,7 @@ fn run_captured(command: &str) -> Result<Value, String> {
     }))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_shell(command: String, terminal: bool) -> Result<Value, String> {
     let command = validate_label(&command, 2000)?;
     if crate::host_ssh::is_remote_ssh_command(&command) {
@@ -333,7 +494,7 @@ fn trim_cmd_out(raw: &[u8]) -> String {
 }
 
 /// Best-effort computer / device display name for machine registration.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_device_name() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -389,7 +550,7 @@ fn extract_quoted_value(line: &str) -> Option<String> {
 
 /// Stable platform machine id for machine_key registration.
 /// macOS IOPlatformUUID / Windows MachineGuid / Linux /etc/machine-id (or dbus).
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_machine_id() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
@@ -466,8 +627,24 @@ fn screenshot_error(code: &str, error: &str) -> Value {
     json!({ "ok": false, "error": error, "code": code })
 }
 
-/// `screencapture` argv. `display` (1-based) wins over scope. Empty scope is main.
-fn screenshot_capture_args(scope: &str, display: Option<u32>, out_path: &str) -> Result<Vec<String>, String> {
+/// `screencapture` argv.
+/// `window_id` wins over `display` and scope. `display` (1-based) wins over scope. Empty scope is main.
+fn screenshot_capture_args(
+    scope: &str,
+    display: Option<u32>,
+    window_id: Option<u32>,
+    out_path: &str,
+) -> Result<Vec<String>, String> {
+    let mut args = vec!["-x".to_string(), "-t".to_string(), "jpg".to_string()];
+    if let Some(wid) = window_id {
+        if wid == 0 {
+            return Err("window_id 无效".into());
+        }
+        args.push("-l".to_string());
+        args.push(wid.to_string());
+        args.push(out_path.to_string());
+        return Ok(args);
+    }
     let scope = scope.trim().to_ascii_lowercase();
     if !scope.is_empty() && scope != "main" && scope != "all" {
         return Err("scope 只能是 main 或 all".into());
@@ -477,7 +654,6 @@ fn screenshot_capture_args(scope: &str, display: Option<u32>, out_path: &str) ->
             return Err("display 需为 1 到 16".into());
         }
     }
-    let mut args = vec!["-x".to_string(), "-t".to_string(), "jpg".to_string()];
     if let Some(d) = display {
         args.push("-D".to_string());
         args.push(d.to_string());
@@ -541,17 +717,59 @@ fn parse_display_index(display: Option<i64>) -> Result<Option<u32>, String> {
     Ok(Some(raw as u32))
 }
 
+fn parse_window_id(window_id: Option<i64>) -> Result<Option<u32>, String> {
+    let Some(raw) = window_id else {
+        return Ok(None);
+    };
+    if raw <= 0 || raw > u32::MAX as i64 {
+        return Err("window_id 无效。请用 host_list_windows 返回的 window_id".into());
+    }
+    Ok(Some(raw as u32))
+}
+
 #[cfg(target_os = "macos")]
 mod screen_access {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
+        fn CGRequestScreenCaptureAccess() -> bool;
     }
+
+    static SCREEN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
     pub fn screen_recording_allowed() -> bool {
         unsafe { CGPreflightScreenCaptureAccess() }
     }
+
+    /// Show the system Screen Recording prompt at most once per process.
+    pub fn request_screen_recording_once() {
+        if SCREEN_REQUESTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = unsafe { CGRequestScreenCaptureAccess() };
+    }
+
+    /// Preflight; if denied, Request once then Preflight again.
+    /// Returns (allowed, did_request_this_call).
+    pub fn ensure_screen_recording() -> (bool, bool) {
+        if screen_recording_allowed() {
+            return (true, false);
+        }
+        let already = SCREEN_REQUESTED.load(Ordering::SeqCst);
+        request_screen_recording_once();
+        let did_request = !already;
+        (screen_recording_allowed(), did_request)
+    }
 }
+
+/// Show the Screen Recording TCC prompt at most once per process (Settings / tcc_status).
+#[cfg(target_os = "macos")]
+pub fn request_screen_recording() {
+    screen_access::request_screen_recording_once();
+}
+
 
 #[cfg(target_os = "macos")]
 fn run_timed(cmd: &mut Command, timeout: Duration) -> Result<std::process::Output, String> {
@@ -621,13 +839,31 @@ fn jpeg_pixels(path: &Path) -> (Option<u32>, Option<u32>) {
 }
 
 #[cfg(target_os = "macos")]
-fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
-    if !screen_access::screen_recording_allowed() {
-        return Ok(screenshot_error(
-            "screen_recording_denied",
-            SCREEN_RECORDING_DENIED_MSG,
-        ));
+fn capture_screen(scope: &str, display: Option<u32>, window_id: Option<u32>) -> Result<Value, String> {
+    let (allowed, did_request) = screen_access::ensure_screen_recording();
+    if !allowed {
+        let msg = if did_request {
+            format!(
+                "{SCREEN_RECORDING_DENIED_MSG}若刚点允许仍失败请到系统设置打开并完全退出重开。"
+            )
+        } else {
+            SCREEN_RECORDING_DENIED_MSG.to_string()
+        };
+        return Ok(screenshot_error("screen_recording_denied", &msg));
     }
+    let window_bounds = if let Some(wid) = window_id {
+        match crate::host_input::mac_window_bounds(wid as i64) {
+            Some(b) => Some(b),
+            None => {
+                return Ok(screenshot_error(
+                    "window_not_found",
+                    "找不到这个窗口。请先 host_list_windows，再用返回的 window_id。",
+                ));
+            }
+        }
+    } else {
+        None
+    };
     let file_name = format!(
         "open-bot-shot-{}-{}.jpg",
         std::process::id(),
@@ -645,7 +881,7 @@ fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
         }
     }
     let _cleanup = ShotFile(path.clone());
-    let args = screenshot_capture_args(scope, display, &path_str)?;
+    let args = screenshot_capture_args(scope, display, window_id, &path_str)?;
     let mut cmd = Command::new("screencapture");
     cmd.args(&args);
     let output = run_timed(&mut cmd, Duration::from_secs(SCREENSHOT_TIMEOUT_SECS))?;
@@ -666,10 +902,12 @@ fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
         } else {
             stderr
         };
-        return Ok(screenshot_error(
-            "screenshot_failed",
-            &format!("截屏失败。若系统设置里尚未允许 Open Bot 的屏幕录制，请先授权再试。{detail}"),
-        ));
+        let msg = if window_id.is_some() {
+            format!("截取窗口失败。窗口可能已关闭，或系统设置里尚未允许 Open Bot 的屏幕录制。{detail}")
+        } else {
+            format!("截屏失败。若系统设置里尚未允许 Open Bot 的屏幕录制，请先授权再试。{detail}")
+        };
+        return Ok(screenshot_error("screenshot_failed", &msg));
     }
     shrink_jpeg(&path)?;
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
@@ -681,16 +919,19 @@ fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
     }
     let (width, height) = jpeg_pixels(&path);
     Ok(screenshot_body(
-        screenshot_scope_out(scope, display),
+        screenshot_scope_out(scope, display, window_id),
         display,
         width,
         height,
         &bytes,
+        window_bounds,
     ))
 }
 
-fn screenshot_scope_out(scope: &str, display: Option<u32>) -> &'static str {
-    if display.is_some() {
+fn screenshot_scope_out(scope: &str, display: Option<u32>, window_id: Option<u32>) -> &'static str {
+    if window_id.is_some() {
+        "window"
+    } else if display.is_some() {
         "display"
     } else if scope.trim().eq_ignore_ascii_case("all") {
         "all"
@@ -699,8 +940,24 @@ fn screenshot_scope_out(scope: &str, display: Option<u32>) -> &'static str {
     }
 }
 
-fn screenshot_body(scope_out: &str, display: Option<u32>, width: Option<u32>, height: Option<u32>, bytes: &[u8]) -> Value {
-    let frame = crate::host_input::bind_screenshot_frame(scope_out, display, width, height);
+fn screenshot_body(
+    scope_out: &str,
+    display: Option<u32>,
+    width: Option<u32>,
+    height: Option<u32>,
+    bytes: &[u8],
+    window_bounds: Option<(f64, f64, f64, f64)>,
+) -> Value {
+    let frame = match window_bounds {
+        Some(bounds) => crate::host_input::bind_screenshot_frame_at(
+            scope_out,
+            display,
+            width,
+            height,
+            Some(bounds),
+        ),
+        None => crate::host_input::bind_screenshot_frame(scope_out, display, width, height),
+    };
     json!({
         "ok": true,
         "mime": "image/jpeg",
@@ -723,45 +980,74 @@ fn screenshot_body(scope_out: &str, display: Option<u32>, width: Option<u32>, he
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn capture_screen_cross(scope: &str, display: Option<u32>) -> Result<Value, String> {
+fn capture_screen_cross(scope: &str, display: Option<u32>, window_id: Option<u32>) -> Result<Value, String> {
+    if let Some(wid) = window_id {
+        return match crate::host_input::capture_window_shot(wid as i64, SCREENSHOT_MAX_BYTES) {
+            Ok(shot) => Ok(screenshot_body(
+                "window",
+                None,
+                Some(shot.width),
+                Some(shot.height),
+                &shot.bytes,
+                Some((shot.origin_x, shot.origin_y, shot.width_pt, shot.height_pt)),
+            )),
+            Err(err) => Ok(screenshot_error(err.code, &err.message)),
+        };
+    }
     match crate::host_input::capture_shot(scope, display, SCREENSHOT_MAX_BYTES) {
         Ok(shot) => Ok(screenshot_body(
-            screenshot_scope_out(scope, display),
+            screenshot_scope_out(scope, display, None),
             display,
             Some(shot.width),
             Some(shot.height),
             &shot.bytes,
+            None,
         )),
         Err(err) => Ok(screenshot_error(err.code, &err.message)),
     }
 }
 
-/// Capture the desktop and return JPEG bytes the agent runtime attaches as vision.
-/// macOS uses `screencapture`. Windows uses GDI. Linux uses X11 `GetImage`.
-#[tauri::command]
-pub fn host_screenshot(scope: Option<String>, display: Option<i64>) -> Result<Value, String> {
-    let scope = scope.unwrap_or_else(|| "main".to_string());
-    let display = match parse_display_index(display) {
+/// Capture the desktop (or one window) and return JPEG bytes the agent runtime attaches as vision.
+/// macOS uses `screencapture` (`-l` for a CGWindowID). Windows uses GDI / window DC.
+/// Linux uses X11 `GetImage` on the root or the window drawable.
+#[tauri::command(rename_all = "snake_case")]
+pub fn host_screenshot(
+    scope: Option<String>,
+    display: Option<i64>,
+    window_id: Option<i64>,
+) -> Result<Value, String> {
+    let window_id = match parse_window_id(window_id) {
         Ok(v) => v,
-        Err(e) => return Ok(screenshot_error("invalid_display", &e)),
+        Err(e) => return Ok(screenshot_error("invalid_window", &e)),
     };
-    if screenshot_capture_args(&scope, display, "/tmp/open-bot-shot.jpg").is_err() {
+    // window_id wins over display and scope=all.
+    let (scope, display) = if window_id.is_some() {
+        ("main".to_string(), None)
+    } else {
+        let scope = scope.unwrap_or_else(|| "main".to_string());
+        let display = match parse_display_index(display) {
+            Ok(v) => v,
+            Err(e) => return Ok(screenshot_error("invalid_display", &e)),
+        };
+        (scope, display)
+    };
+    if screenshot_capture_args(&scope, display, window_id, "/tmp/open-bot-shot.jpg").is_err() {
         return Ok(screenshot_error(
             "invalid_scope",
-            "scope 只能是 main 或 all",
+            "scope 只能是 main 或 all；截窗口请传 window_id",
         ));
     }
     #[cfg(target_os = "macos")]
     {
-        return capture_screen(&scope, display);
+        return capture_screen(&scope, display, window_id);
     }
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        return capture_screen_cross(&scope, display);
+        return capture_screen_cross(&scope, display, window_id);
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (scope, display);
+        let _ = (scope, display, window_id);
         Ok(screenshot_error(
             "unsupported_platform",
             "当前系统暂不支持截屏（需要 macOS、Windows 或 Linux 桌面端）",
@@ -769,8 +1055,8 @@ pub fn host_screenshot(scope: Option<String>, display: Option<i64>) -> Result<Va
     }
 }
 
-/// Open the desktop privacy or input settings page. Settings UI only — not an agent tool.
-#[tauri::command]
+/// Open the desktop privacy or input settings page. May also fire a one-shot TCC Request; not an agent tool.
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_open_privacy(pane: String) -> Result<Value, String> {
     let pane = pane.trim().to_ascii_lowercase();
     match pane.as_str() {
@@ -780,11 +1066,14 @@ pub fn host_open_privacy(pane: String) -> Result<Value, String> {
     }
     #[cfg(target_os = "macos")]
     {
-        let (anchor, request_post) = match pane.as_str() {
-            "screen" | "screen_recording" | "screencapture" => ("Privacy_ScreenCapture", false),
-            "event" | "event_posting" | "post_event" => ("Privacy_Accessibility", true),
-            _ => ("Privacy_Accessibility", false),
+        let (anchor, request_screen, request_post) = match pane.as_str() {
+            "screen" | "screen_recording" | "screencapture" => ("Privacy_ScreenCapture", true, false),
+            "event" | "event_posting" | "post_event" => ("Privacy_Accessibility", false, true),
+            _ => ("Privacy_Accessibility", false, false),
         };
+        if request_screen {
+            screen_access::request_screen_recording_once();
+        }
         if request_post {
             crate::host_input::request_event_posting();
         }
@@ -807,9 +1096,11 @@ pub fn host_open_privacy(pane: String) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_base64, extract_quoted_value, parse_sips_pixels, screenshot_capture_args,
-        SCREEN_RECORDING_DENIED_MSG, HOST_SHELL_TIMEOUT_SECS,
+        app_match_names, encode_base64, extract_quoted_value, find_macos_app, name_matches_query,
+        parse_sips_pixels, screenshot_capture_args, MatchKind, HOST_SHELL_TIMEOUT_SECS,
+        SCREEN_RECORDING_DENIED_MSG,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn host_shell_timeout_is_120s_and_bounded() {
@@ -827,17 +1118,21 @@ mod tests {
 
     #[test]
     fn screenshot_args_main_display_and_all() {
-        let main = screenshot_capture_args("main", None, "/tmp/a.jpg").unwrap();
+        let main = screenshot_capture_args("main", None, None, "/tmp/a.jpg").unwrap();
         assert!(main.contains(&"-m".to_string()));
-        assert!(!main.iter().any(|a| a == "-D"));
+        assert!(!main.iter().any(|a| a == "-D" || a == "-l"));
         assert_eq!(main.last().map(String::as_str), Some("/tmp/a.jpg"));
-        let all = screenshot_capture_args("all", None, "/tmp/a.jpg").unwrap();
-        assert!(!all.iter().any(|a| a == "-m" || a == "-D"));
-        let display = screenshot_capture_args("main", Some(2), "/tmp/a.jpg").unwrap();
-        assert!(!display.iter().any(|a| a == "-m"));
+        let all = screenshot_capture_args("all", None, None, "/tmp/a.jpg").unwrap();
+        assert!(!all.iter().any(|a| a == "-m" || a == "-D" || a == "-l"));
+        let display = screenshot_capture_args("main", Some(2), None, "/tmp/a.jpg").unwrap();
+        assert!(!display.iter().any(|a| a == "-m" || a == "-l"));
         assert!(display.windows(2).any(|w| w[0] == "-D" && w[1] == "2"));
-        assert!(screenshot_capture_args("window", None, "/tmp/a.jpg").is_err());
-        assert!(screenshot_capture_args("main", Some(0), "/tmp/a.jpg").is_err());
+        let window = screenshot_capture_args("all", Some(2), Some(42), "/tmp/a.jpg").unwrap();
+        assert!(window.windows(2).any(|w| w[0] == "-l" && w[1] == "42"));
+        assert!(!window.iter().any(|a| a == "-m" || a == "-D"));
+        assert!(screenshot_capture_args("window", None, None, "/tmp/a.jpg").is_err());
+        assert!(screenshot_capture_args("main", Some(0), None, "/tmp/a.jpg").is_err());
+        assert!(screenshot_capture_args("main", None, Some(0), "/tmp/a.jpg").is_err());
     }
 
     #[test]
@@ -856,5 +1151,28 @@ mod tests {
         assert!(SCREEN_RECORDING_DENIED_MSG.contains("Contents/MacOS"));
         assert!(SCREEN_RECORDING_DENIED_MSG.contains("输入监控"));
         assert!(SCREEN_RECORDING_DENIED_MSG.contains("发送事件"));
+    }
+
+    #[test]
+    fn name_matches_query_ascii_and_cjk() {
+        assert!(matches!(name_matches_query("Lark", "lark"), MatchKind::Exact));
+        assert!(matches!(name_matches_query("飞书", "飞书"), MatchKind::Exact));
+        assert!(matches!(name_matches_query("MyLarkHelper", "lark"), MatchKind::Fuzzy));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn find_macos_app_matches_localized_display_name() {
+        let lark = PathBuf::from("/Applications/Lark.app");
+        if !lark.is_dir() {
+            return;
+        }
+        let names = app_match_names(&lark);
+        assert!(
+            names.iter().any(|n| n == "飞书"),
+            "expected localized 飞书 in {names:?}"
+        );
+        let found = find_macos_app("飞书").expect("飞书 should resolve via localized CFBundle name");
+        assert_eq!(found, lark);
     }
 }

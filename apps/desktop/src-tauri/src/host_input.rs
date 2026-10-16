@@ -11,7 +11,7 @@
 //! and UI Automation. Linux uses the X11 protocol (RandR, GetImage, XTest) and
 //! AT-SPI. Tool names stay the same; only the backend changes.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -288,18 +288,49 @@ fn finite(n: f64, fallback: f64) -> f64 {
     if n.is_finite() { n } else { fallback }
 }
 
-/// Record the screenshot the model is about to see. `scope` is `main`, `display`, or `all`.
+/// Record the screenshot the model is about to see. `scope` is `main`, `display`, `all`, or `window`.
+/// Pass `window_bounds` as (origin_x, origin_y, width_pt, height_pt) for `scope=window`.
 pub fn bind_screenshot_frame(
     scope: &str,
     display: Option<u32>,
     image_w: Option<u32>,
     image_h: Option<u32>,
 ) -> FrameMeta {
+    bind_screenshot_frame_at(scope, display, image_w, image_h, None)
+}
+
+/// Like [`bind_screenshot_frame`], but binds a window origin when `window_bounds` is set.
+pub fn bind_screenshot_frame_at(
+    scope: &str,
+    display: Option<u32>,
+    image_w: Option<u32>,
+    image_h: Option<u32>,
+    window_bounds: Option<(f64, f64, f64, f64)>,
+) -> FrameMeta {
     let (iw, ih) = match (image_w, image_h) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
         _ => (0, 0),
     };
-    let geom = capture_geom(scope, display, iw, ih);
+    let geom = if let Some((ox, oy, wp, hp)) = window_bounds {
+        let actionable = iw > 0 && ih > 0 && wp > 1.0 && hp > 1.0;
+        let scale = if actionable && wp > 1.0 {
+            iw as f64 / wp
+        } else {
+            1.0
+        };
+        DisplayGeom {
+            image_width: iw,
+            image_height: ih,
+            origin_x: ox,
+            origin_y: oy,
+            width_pt: wp,
+            height_pt: hp,
+            scale: if scale.is_finite() && scale > 0.0 { scale } else { 1.0 },
+            actionable,
+        }
+    } else {
+        capture_geom(scope, display, iw, ih)
+    };
     let scale = finite(geom.scale, 1.0);
     let (frame_id, _) = remember_frame(geom.clone());
     FrameMeta {
@@ -361,6 +392,18 @@ pub struct CapturedShot {
     pub height: u32,
 }
 
+/// Window capture: JPEG pixels plus screen-point bounds for [`bind_screenshot_frame_at`].
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub struct CapturedWindowShot {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub origin_x: f64,
+    pub origin_y: f64,
+    pub width_pt: f64,
+    pub height_pt: f64,
+}
+
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub struct ShotError {
     pub code: &'static str,
@@ -377,6 +420,25 @@ pub fn capture_shot(scope: &str, display: Option<u32>, max_bytes: usize) -> Resu
     {
         win::capture_shot(scope, display, max_bytes)
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub fn capture_window_shot(window_id: i64, max_bytes: usize) -> Result<CapturedWindowShot, ShotError> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::capture_window_shot(window_id, max_bytes)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        win::capture_window_shot(window_id, max_bytes)
+    }
+}
+
+
+/// Look up on-screen window bounds (points) by `host_list_windows` window_id.
+#[cfg(target_os = "macos")]
+pub fn mac_window_bounds(window_id: i64) -> Option<(f64, f64, f64, f64)> {
+    mac::window_bounds(window_id)
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -805,15 +867,15 @@ fn click_count(raw: Option<i64>) -> Result<i32, Value> {
     Ok(n as i32)
 }
 
-/// Ask macOS to show the one-time event-posting prompt. Settings UI only.
+/// Ask macOS to show the event-posting prompt once per process (Settings UI or first click).
 pub fn request_event_posting() {
     #[cfg(target_os = "macos")]
-    unsafe {
-        mac::CGRequestPostEventAccess();
+    {
+        mac::request_posting_once();
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_tcc_status() -> Result<Value, String> {
     #[cfg(target_os = "macos")]
     {
@@ -833,7 +895,7 @@ pub fn host_tcc_status() -> Result<Value, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_list_windows(frame_id: Option<String>) -> Result<Value, String> {
     let frame_id = opt_str(&frame_id);
     #[cfg(target_os = "macos")]
@@ -856,7 +918,7 @@ pub fn host_list_windows(frame_id: Option<String>) -> Result<Value, String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_ax(
     frame_id: Option<String>,
     app: Option<String>,
@@ -914,7 +976,7 @@ pub fn host_ax(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_click(
     frame_id: Option<String>,
     x: Option<f64>,
@@ -962,7 +1024,7 @@ pub fn host_click(
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_type(
     frame_id: Option<String>,
     text: Option<String>,
@@ -1002,7 +1064,7 @@ pub fn host_type(
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_key(
     frame_id: Option<String>,
     key: Option<String>,
@@ -1046,7 +1108,7 @@ pub fn host_key(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_scroll(
     frame_id: Option<String>,
     x: Option<f64>,
@@ -1090,7 +1152,7 @@ pub fn host_scroll(
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_mouse_move(
     frame_id: Option<String>,
     x: Option<f64>,
@@ -1129,7 +1191,7 @@ pub fn host_mouse_move(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn host_drag(
     frame_id: Option<String>,
     x: Option<f64>,
@@ -1305,6 +1367,19 @@ mod mac {
         pub fn CFBooleanGetValue(b: *const c_void) -> bool;
 
         pub fn AXIsProcessTrusted() -> bool;
+        pub fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+        pub static kAXTrustedCheckOptionPrompt: CFStringRef;
+        pub static kCFBooleanTrue: *const c_void;
+        pub static kCFTypeDictionaryKeyCallBacks: u8;
+        pub static kCFTypeDictionaryValueCallBacks: u8;
+        pub fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            num_values: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> CFDictionaryRef;
         pub fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
         pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
         pub fn AXUIElementCopyAttributeValue(
@@ -1429,20 +1504,146 @@ mod mac {
         })
     }
 
+    fn code_identity() -> Value {
+        use std::process::Command;
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let mut identifier = "com.openbot.desktop".to_string();
+        let mut cdhash = String::new();
+        let mut signature = String::new();
+        let mut team = String::new();
+        if !exe.is_empty() {
+            if let Ok(output) = Command::new("codesign")
+                .args(["-dv", "--verbose=4", &exe])
+                .output()
+            {
+                // codesign -dv writes details to stderr
+                let text = String::from_utf8_lossy(&output.stderr);
+                for line in text.lines() {
+                    if let Some(v) = line.strip_prefix("Identifier=") {
+                        identifier = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("CDHash=") {
+                        cdhash = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("Signature=") {
+                        signature = v.to_string();
+                    } else if let Some(v) = line.strip_prefix("TeamIdentifier=") {
+                        team = v.to_string();
+                    }
+                }
+            }
+        }
+        json!({
+            "executable": exe,
+            "identifier": identifier,
+            "cdhash": cdhash,
+            "signature": signature,
+            "team_identifier": team,
+            "hint": "权限必须授给正在运行的这个身份（看 identifier + cdhash）。adhoc 每次重新打包 CDHash 会变；请只打开「应用程序」里的 Open Bot.app，在系统设置里勾选名为 Open Bot、标识 com.openbot.desktop 的那一项，然后完全退出再开。不要给 Terminal、Cursor、cargo run 或 make dev-desktop 产生的二进制授权。",
+        })
+    }
+
+    fn open_privacy_anchor(anchor: &str) {
+        use std::process::Command;
+        let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
+        let _ = Command::new("open").arg(url).status();
+    }
+
+    static TCC_SETTINGS_OPENED: AtomicBool = AtomicBool::new(false);
+
+    /// Preflight all three buckets. If any is denied, fire one-shot Request/prompt,
+    /// Preflight again, and (once per process) open the matching System Settings pane.
     pub fn tcc_status() -> Value {
-        let screen = unsafe { CGPreflightScreenCaptureAccess() };
-        let accessibility = unsafe { AXIsProcessTrusted() };
-        let posting = unsafe { CGPreflightPostEventAccess() };
+        let mut screen = unsafe { CGPreflightScreenCaptureAccess() };
+        let mut accessibility = unsafe { AXIsProcessTrusted() };
+        let mut posting = unsafe { CGPreflightPostEventAccess() };
+        let mut requested = json!({
+            "screen_recording": false,
+            "accessibility": false,
+            "event_posting": false,
+        });
+
+        if !screen {
+            crate::host_cmd::request_screen_recording();
+            requested["screen_recording"] = json!(true);
+            screen = unsafe { CGPreflightScreenCaptureAccess() };
+        }
+        if !accessibility {
+            let already = ACCESSIBILITY_PROMPTED.load(Ordering::SeqCst);
+            prompt_accessibility_once();
+            requested["accessibility"] = json!(!already);
+            accessibility = unsafe { AXIsProcessTrusted() };
+        }
+        if !posting {
+            let already = POSTING_REQUESTED.load(Ordering::SeqCst);
+            request_posting_once();
+            requested["event_posting"] = json!(!already);
+            posting = unsafe { CGPreflightPostEventAccess() };
+        }
+
+        let any_denied = !screen || !accessibility || !posting;
+        let mut opened_settings = false;
+        if any_denied && !TCC_SETTINGS_OPENED.swap(true, Ordering::SeqCst) {
+            opened_settings = true;
+            // Prefer the first missing bucket's pane.
+            if !screen {
+                open_privacy_anchor("Privacy_ScreenCapture");
+            } else {
+                open_privacy_anchor("Privacy_Accessibility");
+            }
+        }
+
         json!({
             "ok": true,
             "platform": "macos",
             "screen_recording": tcc_bucket(screen, "系统设置 → 隐私与安全性 → 屏幕录制"),
             "accessibility": tcc_bucket(accessibility, "系统设置 → 隐私与安全性 → 辅助功能"),
             "event_posting": tcc_bucket(posting, "系统设置 → 隐私与安全性 → 辅助功能（发送事件）"),
+            "identity": code_identity(),
+            "requested": requested,
+            "opened_settings": opened_settings,
         })
     }
 
+    static POSTING_REQUESTED: AtomicBool = AtomicBool::new(false);
+    static ACCESSIBILITY_PROMPTED: AtomicBool = AtomicBool::new(false);
+
+    pub fn request_posting_once() {
+        if POSTING_REQUESTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        unsafe { CGRequestPostEventAccess() };
+    }
+
+    fn prompt_accessibility_once() {
+        if ACCESSIBILITY_PROMPTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        unsafe {
+            let key = kAXTrustedCheckOptionPrompt as *const c_void;
+            let value = kCFBooleanTrue;
+            let keys = [key];
+            let values = [value];
+            let options = CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::addr_of!(kCFTypeDictionaryKeyCallBacks) as *const c_void,
+                std::ptr::addr_of!(kCFTypeDictionaryValueCallBacks) as *const c_void,
+            );
+            let _ = AXIsProcessTrustedWithOptions(options);
+            if !options.is_null() {
+                CFRelease(options);
+            }
+        }
+    }
+
     fn ensure_posting() -> Result<(), Value> {
+        if unsafe { CGPreflightPostEventAccess() } {
+            return Ok(());
+        }
+        request_posting_once();
         if unsafe { CGPreflightPostEventAccess() } {
             return Ok(());
         }
@@ -1450,6 +1651,10 @@ mod mac {
     }
 
     fn ensure_accessibility() -> Result<(), Value> {
+        if unsafe { AXIsProcessTrusted() } {
+            return Ok(());
+        }
+        prompt_accessibility_once();
         if unsafe { AXIsProcessTrusted() } {
             return Ok(());
         }
@@ -2077,6 +2282,18 @@ mod mac {
             }
         }
         out
+    }
+
+
+    /// Screen-point bounds for a CGWindowID from `host_list_windows`.
+    pub fn window_bounds(window_id: i64) -> Option<(f64, f64, f64, f64)> {
+        if window_id <= 0 {
+            return None;
+        }
+        copy_windows()
+            .into_iter()
+            .find(|w| w.window_id == window_id)
+            .map(|w| (w.x, w.y, w.w, w.h))
     }
 
     pub fn list_windows(frame_id: String) -> Value {

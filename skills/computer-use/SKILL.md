@@ -30,7 +30,7 @@ description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_
 
 - 已连接的 **macOS、Windows 或 Linux 桌面**（`list_machines` 看 platform / connected）。手机和浏览器不能截用户电脑的屏幕。
 - 在 Mac 上，权限授给从 DMG 拖进「应用程序」的已安装 **Open Bot**。不要让用户直接运行 `Contents/MacOS/open-bot-desktop`。
-- 三个权限桶（`host_tcc_status` 一次看齐，名字在三个系统上一样）。被拒就告诉用户原因，**不要反复重试**：
+- 三个权限桶（`host_tcc_status` 一次看齐，名字在三个系统上一样）。macOS 上 `host_tcc_status` 会顺带触发一次系统授权框，并在仍缺权限时打开对应的系统设置页；结果里的 `identity`（`identifier` / `cdhash` / `executable`）是**正在跑的那个二进制**。若系统设置里已勾选「Open Bot」但 `granted` 仍是 false，多半是授权给了旧构建或 `make dev-desktop` / `cargo run` 的另一个身份（adhoc 每次打包 CDHash 会变）——请用户只保留「应用程序」里的 **Open Bot.app**（`com.openbot.desktop`），删掉列表里重复的 Open Bot 项后重新勾选，然后**完全退出并重开** Open Bot，**不要反复重试截屏**：
 
 | 桶 | 干什么 | macOS | Windows | Linux |
 |----|--------|-------|---------|-------|
@@ -48,18 +48,28 @@ description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_
 
 - `x`、`y` 是**这张图的像素**，左上角 `(0, 0)`，范围是 `width` × `height`（模型看见的 JPEG，不是屏幕点）。
 - 把同一个 `frame_id` 传给后续动作。**不要乘 `scale`，也不要加 `origin`。**
-- `scope=all` 的图 `actionable=false`，不能用来点击。先对单个显示器截（默认主屏，或 `display` 从 1 起）。
+- `scope=all` 的图 `actionable=false`，不能用来点击。先对单个显示器截（默认主屏，或 `display` 从 1 起），或传 `window_id` 截单个窗口。
+- `window_id`（来自 `host_list_windows`）优先于 `display` / `scope`；结果 `scope=window` 且可点击，原点是该窗口边界。
 - 画面过几分钟过期（`stale_frame` / `missing_frame`）。过期或对不上就重新截，再用新的 `frame_id`。不要拿旧坐标点新画面。
 
 ## 标准流程
 
 ### 1. 看屏幕
 
-`host_screenshot`（默认主屏幕）。图像附在这次工具结果上，下一轮你能看见画面；同一张图也会自动出现在对话气泡里给用户看。根据画面回答，不要说自己看不到图。
+`host_screenshot`：用户要看**某个 App / 某个窗口**时（例如「去某 App」「截 VLC」「截这个窗口」）：
+
+1. 若还没打开：`host_find_app` → `host_open`。
+2. **打开后再** `host_list_windows`（open 之前的列表没有新窗口，不能复用）。
+3. 在列表里用 **不区分大小写的包含匹配** 找 `windows[].app` / `title`：窗口 owner / title 可能和 `.app` 或展示名不同；同时对照用户说的名字 **以及** `host_find_app` / `host_open` 返回的 `bundle_name` / `display_name` / `executable_name` / `names`（含本地化显示名）。不要在文案里发明 App 别名。
+4. 对上了再 `host_screenshot(window_id=…)`。
+
+**禁止**在「去某 App / 截某 App」场景只用 `scope=main/all` 充数——那是整屏桌面，不是该 App。只有用户明确要整屏桌面时才用默认主屏或 `scope=all`。列表里暂时没有目标窗口：再说一声在等窗口，或再 list 一次，不要拿整屏截图假装成功。
+
+图像附在这次工具结果上，下一轮你能看见画面；同一张图也会自动出现在对话气泡里给用户看。根据画面回答，不要说自己看不到图。
 
 记下 `frame_id`。需要结构化目标时：
 
-- `host_list_windows`（可带这个 `frame_id`）：应用名、标题、`pid`、`window_id`，以及这张图上的矩形。标题为空通常是还没开屏幕录制。
+- `host_list_windows`（可带这个 `frame_id`）：应用名、标题、`pid`、`window_id`，以及这张图上的矩形。标题为空通常是还没开屏幕录制。再用同一个 `window_id` 调 `host_screenshot` 可只看该窗口。
 - `host_ax`：读辅助功能树，拿 `element_ref`。可指定 `app` / `pid` / `window_id`；省略则看前台。`max_depth` 默认 2（最大 3），`limit` 默认 60。也可以带 `frame_id` 和像素 `x,y` 做命中测试。
 
 菜单栏不在这棵树里。菜单用 `host_key` 快捷键。

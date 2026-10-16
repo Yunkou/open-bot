@@ -1103,7 +1103,9 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "Check whether a named desktop app is installed on a connected computer without opening it. "
                 "Pass the app name the user said (微信, Safari, VLC, Visual Studio Code). "
                 "On Mac this resolves the .app under ~/Applications, /Applications, and /System/Applications. "
-                "Result includes found (boolean) and app (bundle/path when found). "
+                "Result includes found (boolean), app (bundle/path when found), and on Mac bundle_name / "
+                "display_name / executable_name / names for matching host_list_windows owners "
+                "(window owner/title and localized display names may differ from the .app folder). "
                 "Use this — not host_open, host_shell, or mdfind — for install / “is it installed?” checks. "
                 "To open the app, call host_open separately. "
                 "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
@@ -1129,7 +1131,9 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "Open a named desktop app on a connected computer. "
                 "Pass the app name the user said (微信, Safari, VLC, Visual Studio Code). "
                 "On Mac this resolves the .app under ~/Applications, /Applications, and /System/Applications, then launches it. "
-                "A result that includes app is the bundle that was opened. "
+                "A result that includes app is the bundle that was opened; bundle_name / display_name / executable_name / names help match "
+                "host_list_windows (window owner/title may differ from the .app / display name). "
+                "After open, call host_list_windows again then host_screenshot(window_id=…) for a named-app view — not scope=main. "
                 "Use this — not host_shell or mdfind — for “open X”. "
                 "To only check whether an app is installed without launching, call host_find_app instead. "
                 "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
@@ -1152,17 +1156,24 @@ TOOL_DEFS: list[dict[str, Any]] = [
         "function": {
             "name": "host_screenshot",
             "description": (
-                "Capture the screen of a connected desktop (macOS, Windows, or Linux) and attach the image "
-                "to this tool result so you can see it; the same image is also shown to the user in chat. "
+                "Capture the screen or one window of a connected desktop (macOS, Windows, or Linux) and attach "
+                "the image to this tool result so you can see it; the same image is also shown to the user in chat. "
                 "Prefer this over host_shell screencapture, grim, or xdotool. "
-                "macOS uses screencapture; Windows uses GDI on the interactive desktop; Linux uses X11 GetImage "
+                "macOS uses screencapture (-l for a window); Windows uses GDI / window DC; Linux uses X11 GetImage "
                 "(XWayland counts). Wayland without XWayland cannot capture. "
                 "scope main (default) is the main display; all captures every display; "
-                "display is a 1-based index and overrides scope. "
-                "The result includes frame_id, width, height, and scale. "
+                "display is a 1-based index and overrides scope; "
+                "window_id from host_list_windows captures that window and wins over display/scope. "
+                "For a named app (e.g. “go to <app>” / “screenshot VLC”): host_list_windows AFTER host_open, "
+                "match windows[].app/title with case-insensitive substring against the user name AND "
+                "bundle_name/display_name/executable_name from find/open (owner/title may differ from .app / display name), "
+                "then pass window_id. Never invent app aliases in tool prose. "
+                "Do NOT use scope=main/all as a stand-in for a named-app capture. "
+                "The result includes frame_id, width, height, scale, and actionable. "
+                "Window shots have scope=window and are clickable (origin is the window bounds). "
                 "Later clicks, scrolls, and mouse moves use image pixels in that width×height "
                 "(top-left is 0,0) plus the same frame_id. Do not multiply by scale and do not add origin. "
-                "scope=all is not clickable; screenshot one display first. Frames expire after a few minutes. "
+                "scope=all is not clickable; screenshot one display or one window first. Frames expire after a few minutes. "
                 "Describe what is on screen from the attached image. "
                 "If screen recording was denied: macOS 系统设置 → 隐私与安全性 → 屏幕录制; "
                 "Windows has no separate toggle (Open Bot must be on the unlocked interactive desktop); "
@@ -1176,11 +1187,18 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     "scope": {
                         "type": "string",
                         "enum": ["main", "all"],
-                        "description": "main (default) or all displays",
+                        "description": "main (default) or all displays. Ignored when window_id is set.",
                     },
                     "display": {
                         "type": "integer",
-                        "description": "1-based display index. Overrides scope.",
+                        "description": "1-based display index. Overrides scope. Ignored when window_id is set.",
+                    },
+                    "window_id": {
+                        "type": "integer",
+                        "description": (
+                            "Window id from host_list_windows. Captures that window only; "
+                            "wins over display and scope."
+                        ),
                     },
                 },
                 "required": [],
@@ -1212,6 +1230,10 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "description": (
                 "List on-screen windows on a connected desktop (macOS, Windows, or Linux): app, title, pid, window_id, bounds. "
                 "Pass frame_id from host_screenshot to also get x,y,width,height in that image's pixels. "
+                "After host_open, call this again before host_screenshot(window_id=…). "
+                "Match app/title with case-insensitive substring against the user name AND "
+                "bundle_name/display_name/executable_name from find/open "
+                "(window owner/title may differ from .app / display name). Never invent app aliases. "
                 "Read-only. macOS can post background input to pid; Windows PostMessage and Linux XSendEvent are best-effort. "
                 "Empty titles on macOS usually mean Screen Recording is not granted."
             ),
