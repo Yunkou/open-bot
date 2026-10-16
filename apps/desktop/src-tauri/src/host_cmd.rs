@@ -101,6 +101,62 @@ fn find_macos_app(query: &str) -> Option<PathBuf> {
 }
 
 #[tauri::command]
+pub fn host_find_app(name: String) -> Result<Value, String> {
+    let name = validate_label(&name, 200)?;
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(match find_macos_app(&name) {
+            Some(app) => json!({
+                "ok": true,
+                "found": true,
+                "name": name,
+                "app": app.display().to_string()
+            }),
+            None => json!({ "ok": true, "found": false, "name": name }),
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let found = Command::new("where")
+            .arg(&name)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.lines().next().map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty());
+        return Ok(match found {
+            Some(path) => json!({ "ok": true, "found": true, "name": name, "app": path }),
+            None => json!({ "ok": true, "found": false, "name": name }),
+        });
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let found = Command::new("which")
+            .arg(&name)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.lines().next().map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty());
+        return Ok(match found {
+            Some(path) => json!({ "ok": true, "found": true, "name": name, "app": path }),
+            None => json!({ "ok": true, "found": false, "name": name }),
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        let _ = name;
+        Err("当前系统不能查找软件".into())
+    }
+}
+
+#[tauri::command]
 pub fn host_open(name: String) -> Result<Value, String> {
     let name = validate_label(&name, 200)?;
     #[cfg(target_os = "macos")]
@@ -110,7 +166,12 @@ pub fn host_open(name: String) -> Result<Value, String> {
         if let Some(app) = find_macos_app(&name) {
             cmd.arg(&app);
             command_ok(&mut cmd)?;
-            return Ok(json!({ "ok": true, "name": name, "app": app.display().to_string() }));
+            return Ok(json!({
+                "ok": true,
+                "found": true,
+                "name": name,
+                "app": app.display().to_string()
+            }));
         }
         cmd.arg(&name);
         command_ok(&mut cmd)?;

@@ -80,6 +80,9 @@ async function runOp(req: HostExecRequest): Promise<Record<string, unknown>> {
   if (req.op === "move") {
     return (await invoke("host_move", { path, dest: req.dest || "" })) as Record<string, unknown>;
   }
+  if (req.op === "find_app") {
+    return (await invoke("host_find_app", { name: path })) as Record<string, unknown>;
+  }
   if (req.op === "open") return (await invoke("host_open", { name: path })) as Record<string, unknown>;
   if (req.op === "screenshot") {
     const scope = path === "all" ? "all" : "main";

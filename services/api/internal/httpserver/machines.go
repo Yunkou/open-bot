@@ -228,7 +228,7 @@ func (s *Server) handleHostExecWS(w http.ResponseWriter, r *http.Request) {
 
 func supportedHostOp(op string) bool {
 	switch op {
-	case "ls", "read", "write", "delete", "move", "open", "shell", "screenshot",
+	case "ls", "read", "write", "delete", "move", "open", "find_app", "shell", "screenshot",
 		"click", "type", "key", "scroll", "mouse_move", "drag",
 		"list_windows", "ax", "tcc_status",
 		"ssh_ls", "ssh_read", "ssh_write", "ssh_delete", "ssh_exec":
@@ -281,6 +281,8 @@ func hostActivityLabel(label, op, path, dest string) string {
 		action = "删除文件"
 	case "move":
 		action = "移动文件"
+	case "find_app":
+		action = "检查软件"
 	case "open":
 		action = "打开软件"
 	case "screenshot":
@@ -401,7 +403,7 @@ func (s *Server) handleInternalHostExec(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command too long"})
 		return
 	}
-	if op == "open" && len(strings.TrimSpace(body.Path)) > 200 {
+	if (op == "open" || op == "find_app") && len(strings.TrimSpace(body.Path)) > 200 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "app name too long"})
 		return
 	}

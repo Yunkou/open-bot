@@ -31,6 +31,7 @@ from .host_vision import (
     split_host_image,
     tool_result_message,
 )
+from .present_image import append_present_markdown, present_vision_for_chat
 from .model_compat import (
     adapt_chat_payload,
     is_prompt_cache_reject,
@@ -1097,13 +1098,40 @@ TOOL_DEFS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "host_find_app",
+            "description": (
+                "Check whether a named desktop app is installed on a connected computer without opening it. "
+                "Pass the app name the user said (微信, Safari, VLC, Visual Studio Code). "
+                "On Mac this resolves the .app under ~/Applications, /Applications, and /System/Applications. "
+                "Result includes found (boolean) and app (bundle/path when found). "
+                "Use this — not host_open, host_shell, or mdfind — for install / “is it installed?” checks. "
+                "To open the app, call host_open separately. "
+                "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "machine_id": {"type": "string"},
+                    "name": {
+                        "type": "string",
+                        "description": "Application name the user said, for example 微信, VLC, or Terminal",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "host_open",
             "description": (
-                "Check whether a named desktop app is installed, and open it, on a connected computer. "
+                "Open a named desktop app on a connected computer. "
                 "Pass the app name the user said (微信, Safari, VLC, Visual Studio Code). "
-                "On Mac this resolves the .app by name under ~/Applications, /Applications, and "
-                "/System/Applications, then opens it; a result that includes app is the bundle that was found. "
-                "Use this — not host_shell or mdfind — for “is X installed?” and “open X”. "
+                "On Mac this resolves the .app under ~/Applications, /Applications, and /System/Applications, then launches it. "
+                "A result that includes app is the bundle that was opened. "
+                "Use this — not host_shell or mdfind — for “open X”. "
+                "To only check whether an app is installed without launching, call host_find_app instead. "
                 "Pass machine_id when the user named a computer; otherwise omit it to use the current session computer."
             ),
             "parameters": {
@@ -1125,7 +1153,8 @@ TOOL_DEFS: list[dict[str, Any]] = [
             "name": "host_screenshot",
             "description": (
                 "Capture the screen of a connected desktop (macOS, Windows, or Linux) and attach the image "
-                "to this tool result so you can see it. Prefer this over host_shell screencapture, grim, or xdotool. "
+                "to this tool result so you can see it; the same image is also shown to the user in chat. "
+                "Prefer this over host_shell screencapture, grim, or xdotool. "
                 "macOS uses screencapture; Windows uses GDI on the interactive desktop; Linux uses X11 GetImage "
                 "(XWayland counts). Wayland without XWayland cannot capture. "
                 "scope main (default) is the main display; all captures every display; "
@@ -1393,7 +1422,7 @@ TOOL_DEFS: list[dict[str, Any]] = [
                 "Run one local command on a connected computer. "
                 "For how to use it, load_skill host-shell "
                 "(file summaries: host-file-query; remote SSH: host-ssh). "
-                "To see if a desktop app is installed or to open it by name, call host_open first. "
+                "To see if a desktop app is installed, call host_find_app; to open it by name, call host_open. "
                 "Do not search apps with mdfind and kMDItemKind == \"Application\": "
                 "Spotlight Kind is localized (on zh_CN it is 「应用程序」), "
                 "so an empty mdfind result does not mean the app is not installed. "
@@ -2237,6 +2266,8 @@ async def run_tool_loop(
     sources_out: list[dict[str, str]] | None = None,
     allow_ask_agent: bool = False,
     ask_routed: bool = False,
+    user_id: str = "",
+    conversation_id: str = "",
 ) -> tuple[str, list[str], Any | None]:
     """Non-stream tool loop; returns final text, tool names used, and usage_details.
 
@@ -2250,6 +2281,7 @@ async def run_tool_loop(
     from .langfuse_trace import merge_usage_details, parse_usage_details
 
     used: list[str] = []
+    present_images: list[str] = []
     msgs: list[dict[str, Any]] = list(messages)
     final = ""
     usage_acc: dict[str, int] | None = None
@@ -2324,7 +2356,7 @@ async def run_tool_loop(
             final = sanitize_fake_tool_narration(final)
             if raw.strip() and not (final or "").strip():
                 final = REASONING_ONLY
-        return final, used, usage_acc
+        return append_present_markdown(final, present_images), used, usage_acc
     tools = iter_tool_defs(allow_ask_agent=allow_ask_agent, extra_tools=extra_tools)
     choice: str | None = "auto" if profile.tool_choice_auto else None
     # When upstream rejects tools+auto, keep running via XML/Hermes text tool calls
@@ -2443,6 +2475,18 @@ async def run_tool_loop(
                         ensure_ascii=False,
                     )
                 result, vision = observe_tool_result(name, result)
+                if vision and user_id and conversation_id:
+                    fname = "screenshot.jpg" if name == "host_screenshot" else ""
+                    alt = "屏幕截图" if name == "host_screenshot" else ""
+                    md = present_vision_for_chat(
+                        vision,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        filename=fname,
+                        alt=alt,
+                    )
+                    if md:
+                        present_images.append(md)
                 if sources_out is not None:
                     merged = merge_sources(
                         sources_out, extract_from_tool(name, args, result)
@@ -2571,7 +2615,7 @@ async def run_tool_loop(
 
     deferred_reply = await _defer_if_unfinished()
     if deferred_reply:
-        return deferred_reply, used, usage_acc
+        return append_present_markdown(deferred_reply, present_images), used, usage_acc
 
     if not final and msgs and not reasoning_only:
         data = await _complete(tools_arg=None, tool_choice_arg=None)
@@ -2590,6 +2634,7 @@ async def run_tool_loop(
         final = tool_result_fallback(msgs) if used else REASONING_ONLY
     elif used and not (final or "").strip():
         final = tool_result_fallback(msgs)
+    final = append_present_markdown(final, present_images)
     return final, used, usage_acc
 
 

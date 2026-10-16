@@ -1241,6 +1241,7 @@ async def openai_path(
             "host_write",
             "host_delete",
             "host_move",
+            "host_find_app",
             "host_open",
             "host_screenshot",
             "host_click",
@@ -1330,6 +1331,10 @@ async def openai_path(
                                 ensure_ascii=False,
                             )
                         dest = str(display)
+                elif name in ("host_open", "host_find_app"):
+                    path = str(args.get("name") or args.get("path") or "").strip()
+                    dest = ""
+                    cu_args = None
                 elif is_computer_tool(name):
                     try:
                         path, dest, cu_args = prepare_host_computer(name, args)
@@ -1684,6 +1689,8 @@ async def openai_path(
                     sources_out=sources_acc,
                     allow_ask_agent=allow_ask_agent,
                     ask_routed=bool(getattr(turn, "ask_routed", False)),
+                    user_id=str(user_id or ""),
+                    conversation_id=str(conversation_id or ""),
                 )
             )
             try:

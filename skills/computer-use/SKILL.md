@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_screenshot, host_click, host_type, host_key, host_scroll, host_list_windows, and host_ax. Use when a task needs seeing or clicking in an app without an API/CLI. Check-if-installed and open-by-name use host_open (resolves .app on Mac); do not mdfind by English kMDItemKind.
+description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_screenshot, host_click, host_type, host_key, host_scroll, host_list_windows, and host_ax. Use when a task needs seeing or clicking in an app without an API/CLI. Check-if-installed: host_find_app. Open-by-name: host_open (resolves .app on Mac). Do not mdfind by English kMDItemKind.
 ---
 
 # Computer Use（本机 GUI 自动化）
@@ -11,8 +11,9 @@ description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_
 
 | 任务 | 优先用 |
 |------|--------|
-| 打开 App / 是否已安装 | `host_open`（按名字解析 `.app`） |
-| 看屏幕 | `host_screenshot`（图像附在工具结果里） |
+| 是否已安装 | `host_find_app`（只解析，不启动） |
+| 打开 App | `host_open`（按名字解析 `.app` 并启动） |
+| 看屏幕 | `host_screenshot`（图像附在工具结果里，并自动显示在对话里给用户看） |
 | 点、输入、按键、滚动、拖拽 | `host_click` / `host_type` / `host_key` / `host_scroll` / `host_drag` / `host_mouse_move` |
 | 窗口与控件 | `host_list_windows` / `host_ax`（返回 `element_ref`） |
 | 权限是否开了 | `host_tcc_status` |
@@ -21,7 +22,7 @@ description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_
 | 网页内容 | `http_fetch`；需要登录/交互时用 Playwright 脚本（见 `dogfood`） |
 | 备忘录 / 提醒事项 / 短信 | `apple-notes` / `apple-reminders` / `imessage` |
 
-查或打开 App 用 `host_open`，不要 `mdfind 'kMDItemKind == "Application"'`（Kind 随语言本地化，简体中文是「应用程序」；空结果不等于没安装）。
+查 App 是否安装用 `host_find_app`；要打开用 `host_open`。不要 `mdfind 'kMDItemKind == "Application"'`（Kind 随语言本地化，简体中文是「应用程序」；空结果不等于没安装）。
 
 只有原生 App 没有别的接口（设置面板、某些客户端按钮、原生对话框）时才用本 skill。
 
@@ -54,7 +55,7 @@ description: Drive a connected desktop GUI (macOS, Windows, or Linux) with host_
 
 ### 1. 看屏幕
 
-`host_screenshot`（默认主屏幕）。图像附在这次工具结果上，下一轮你能看见画面。根据画面回答，不要说自己看不到图。
+`host_screenshot`（默认主屏幕）。图像附在这次工具结果上，下一轮你能看见画面；同一张图也会自动出现在对话气泡里给用户看。根据画面回答，不要说自己看不到图。
 
 记下 `frame_id`。需要结构化目标时：
 
