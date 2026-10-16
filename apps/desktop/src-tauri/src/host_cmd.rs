@@ -399,7 +399,7 @@ const SCREENSHOT_MAX_BYTES: usize = 1_200_000;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const SCREENSHOT_TIMEOUT_SECS: u64 = 20;
 
-const SCREEN_RECORDING_DENIED_MSG: &str = "没有屏幕录制权限。请到「系统设置 → 隐私与安全性 → 屏幕录制」允许 Open Bot，然后重试。桌面设置里也可以打开这一页。若还要让助手操作界面，请同时允许「辅助功能」。";
+const SCREEN_RECORDING_DENIED_MSG: &str = "没有屏幕录制权限。请到「系统设置 → 隐私与安全性 → 屏幕录制」允许已安装的 Open Bot，然后重试。请打开 DMG 或「应用程序」里的 Open Bot，不要直接运行 Contents/MacOS 里的二进制。桌面设置里也可以打开这一页。若还要让助手操作界面，请同时允许「辅助功能」和发送事件；若系统列出「输入监控」或「事件发布」，也允许 Open Bot。";
 
 fn screenshot_error(code: &str, error: &str) -> Value {
     json!({ "ok": false, "error": error, "code": code })
@@ -619,14 +619,28 @@ fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
         ));
     }
     let (width, height) = jpeg_pixels(&path);
-    let scope_out = if display.is_some() {
+    Ok(screenshot_body(
+        screenshot_scope_out(scope, display),
+        display,
+        width,
+        height,
+        &bytes,
+    ))
+}
+
+fn screenshot_scope_out(scope: &str, display: Option<u32>) -> &'static str {
+    if display.is_some() {
         "display"
     } else if scope.trim().eq_ignore_ascii_case("all") {
         "all"
     } else {
         "main"
-    };
-    Ok(json!({
+    }
+}
+
+fn screenshot_body(scope_out: &str, display: Option<u32>, width: Option<u32>, height: Option<u32>, bytes: &[u8]) -> Value {
+    let frame = crate::host_input::bind_screenshot_frame(scope_out, display, width, height);
+    json!({
         "ok": true,
         "mime": "image/jpeg",
         "width": width,
@@ -634,12 +648,35 @@ fn capture_screen(scope: &str, display: Option<u32>) -> Result<Value, String> {
         "scope": scope_out,
         "display": display,
         "bytes": bytes.len(),
-        "image_base64": encode_base64(&bytes),
-    }))
+        "frame_id": frame.frame_id,
+        "scale": frame.scale,
+        "coord_space": "image_pixels",
+        "actionable": frame.actionable,
+        "expires_in_sec": frame.expires_in_sec,
+        "origin_x": frame.origin_x,
+        "origin_y": frame.origin_y,
+        "width_pt": frame.width_pt,
+        "height_pt": frame.height_pt,
+        "image_base64": encode_base64(bytes),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn capture_screen_cross(scope: &str, display: Option<u32>) -> Result<Value, String> {
+    match crate::host_input::capture_shot(scope, display, SCREENSHOT_MAX_BYTES) {
+        Ok(shot) => Ok(screenshot_body(
+            screenshot_scope_out(scope, display),
+            display,
+            Some(shot.width),
+            Some(shot.height),
+            &shot.bytes,
+        )),
+        Err(err) => Ok(screenshot_error(err.code, &err.message)),
+    }
 }
 
 /// Capture the desktop and return JPEG bytes the agent runtime attaches as vision.
-/// macOS uses `screencapture` (Screen Recording TCC on this app). Other desktops error.
+/// macOS uses `screencapture`. Windows uses GDI. Linux uses X11 `GetImage`.
 #[tauri::command]
 pub fn host_screenshot(scope: Option<String>, display: Option<i64>) -> Result<Value, String> {
     let scope = scope.unwrap_or_else(|| "main".to_string());
@@ -657,37 +694,52 @@ pub fn host_screenshot(scope: Option<String>, display: Option<i64>) -> Result<Va
     {
         return capture_screen(&scope, display);
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        return capture_screen_cross(&scope, display);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (scope, display);
         Ok(screenshot_error(
             "unsupported_platform",
-            "当前系统暂不支持截屏（仅 macOS 桌面端）",
+            "当前系统暂不支持截屏（需要 macOS、Windows 或 Linux 桌面端）",
         ))
     }
 }
 
-/// Open the macOS Privacy pane. Settings UI only — not an agent tool.
+/// Open the desktop privacy or input settings page. Settings UI only — not an agent tool.
 #[tauri::command]
 pub fn host_open_privacy(pane: String) -> Result<Value, String> {
     let pane = pane.trim().to_ascii_lowercase();
-    let anchor = match pane.as_str() {
-        "accessibility" | "assistive" => "Privacy_Accessibility",
-        "screen" | "screen_recording" | "screencapture" => "Privacy_ScreenCapture",
+    match pane.as_str() {
+        "accessibility" | "assistive" | "screen" | "screen_recording" | "screencapture" | "event"
+        | "event_posting" | "post_event" => {}
         _ => return Err("未知的隐私设置页".into()),
-    };
+    }
     #[cfg(target_os = "macos")]
     {
+        let (anchor, request_post) = match pane.as_str() {
+            "screen" | "screen_recording" | "screencapture" => ("Privacy_ScreenCapture", false),
+            "event" | "event_posting" | "post_event" => ("Privacy_Accessibility", true),
+            _ => ("Privacy_Accessibility", false),
+        };
+        if request_post {
+            crate::host_input::request_event_posting();
+        }
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
         let mut cmd = Command::new("open");
         cmd.arg(&url);
         command_ok(&mut cmd)?;
         return Ok(json!({ "ok": true, "pane": pane }));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        let _ = anchor;
-        Err("请在 macOS「系统设置 → 隐私与安全性」里授权屏幕录制和辅助功能".into())
+        return crate::host_input::open_platform_privacy(&pane);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err("请在 macOS、Windows 或 Linux 桌面端授权屏幕录制、辅助功能和键鼠发送".into())
     }
 }
 
@@ -740,5 +792,8 @@ mod tests {
     fn screen_recording_denied_message_names_the_pane() {
         assert!(SCREEN_RECORDING_DENIED_MSG.contains("屏幕录制"));
         assert!(SCREEN_RECORDING_DENIED_MSG.contains("辅助功能"));
+        assert!(SCREEN_RECORDING_DENIED_MSG.contains("Contents/MacOS"));
+        assert!(SCREEN_RECORDING_DENIED_MSG.contains("输入监控"));
+        assert!(SCREEN_RECORDING_DENIED_MSG.contains("发送事件"));
     }
 }

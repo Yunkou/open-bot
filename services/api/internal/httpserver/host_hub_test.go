@@ -17,6 +17,15 @@ func TestHostSSHOps(t *testing.T) {
 	if !supportedHostOp("screenshot") || !hostExecAllowsEmptyPath("screenshot") {
 		t.Fatal("screenshot op")
 	}
+	if !supportedHostOp("click") || !supportedHostOp("type") || !supportedHostOp("tcc_status") {
+		t.Fatal("computer use ops")
+	}
+	if hostExecAllowsEmptyPath("click") || !hostExecAllowsEmptyPath("tcc_status") || !hostExecAllowsEmptyPath("ax") {
+		t.Fatal("computer use empty path")
+	}
+	if !hostOpNeedsConfirm("click") || !hostOpNeedsConfirm("drag") || hostOpNeedsConfirm("ax") {
+		t.Fatal("computer use confirm")
+	}
 	if hostExecAllowsEmptyPath("open") {
 		t.Fatal("open still needs a name")
 	}
@@ -105,6 +114,25 @@ func TestHistoryForRuntimeIncludesHostConfirm(t *testing.T) {
 	}
 	if !strings.Contains(out[1].Content, "host_delete") {
 		t.Fatalf("note should remind retry tool: %#v", out[1])
+	}
+}
+
+func TestHistoryForRuntimeHostConfirmNonDeleteOmitsDeleteRetry(t *testing.T) {
+	msgs := []db.Message{
+		{Role: "user", Content: "发这封邮件"},
+		{Role: "host_confirm", Content: `{"req_id":"2","op":"email_send","path":"","status":"denied"}`},
+		{Role: "assistant", Content: "发信被拒绝了"},
+		{Role: "user", Content: "再试一次"},
+	}
+	out := historyForRuntime(msgs, "", nil)
+	if len(out) != 4 {
+		t.Fatalf("len=%d %#v", len(out), out)
+	}
+	if out[1].Role != "system" || !strings.Contains(out[1].Content, "已拒绝") {
+		t.Fatalf("missing confirm note: %#v", out[1])
+	}
+	if strings.Contains(out[1].Content, "host_delete") {
+		t.Fatalf("non-delete confirm must not nudge host_delete: %#v", out[1])
 	}
 }
 

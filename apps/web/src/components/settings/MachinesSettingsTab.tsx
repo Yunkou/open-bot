@@ -1,6 +1,10 @@
 import { useState, type KeyboardEvent } from "react";
 import type { Machine } from "../../api";
-import { openDesktopPrivacyPane, shouldShowDesktopCapturePermissions } from "../../lib/desktopPrivacy";
+import {
+  DESKTOP_CAPTURE_PERMISSION_HINT,
+  openDesktopPrivacyPane,
+  shouldShowDesktopCapturePermissions,
+} from "../../lib/desktopPrivacy";
 import {
   type ClientContext,
   isLoginOnlyMachine,
@@ -77,7 +81,7 @@ function DesktopCapturePermissions({ clientEnv }: { clientEnv: ClientContext }) 
   const [msg, setMsg] = useState("");
   if (!shouldShowDesktopCapturePermissions(clientEnv)) return null;
 
-  const open = (pane: "screen" | "accessibility") => {
+  const open = (pane: "screen" | "accessibility" | "event_posting") => {
     setBusy(true);
     setMsg("");
     void openDesktopPrivacyPane(pane)
@@ -88,12 +92,15 @@ function DesktopCapturePermissions({ clientEnv }: { clientEnv: ClientContext }) 
   };
 
   return (
-    <SettingsSection title="屏幕录制与辅助功能">
+    <SettingsSection title="屏幕录制、辅助功能与发送事件">
       <SettingsCard padded>
         <FieldGroup>
           <FieldDescription>
-            助手要看到这台 Mac 的画面，需要在「系统设置 → 隐私与安全性 → 屏幕录制」里允许 Open Bot。
-            通过辅助功能点按钮、读控件时，还要允许「辅助功能」。授权后回到对话里再试一次。手机和浏览器不能截这台电脑的屏幕。
+            {clientEnv.platform === "windows"
+              ? "Windows 没有单独的屏幕录制开关。请确认 Open Bot 跑在已登录并解锁的桌面里。读控件用 UI Automation；目标窗口以管理员运行时，Open Bot 也要管理员。键鼠若被拦住，通常是 UIPI。授权或确认会话后回到对话里再试一次。手机和浏览器不能截这台电脑的屏幕。"
+              : clientEnv.platform === "linux"
+                ? "Linux 截屏和键鼠走 X11（含 XWayland）。辅助功能需要安装 at-spi2-core 并打开辅助功能。原生 Wayland 且没有 XWayland 时，目前不能截屏或发送键鼠。授权或确认会话后回到对话里再试一次。手机和浏览器不能截这台电脑的屏幕。"
+                : DESKTOP_CAPTURE_PERMISSION_HINT}
           </FieldDescription>
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => open("screen")}>
@@ -107,6 +114,15 @@ function DesktopCapturePermissions({ clientEnv }: { clientEnv: ClientContext }) 
               onClick={() => open("accessibility")}
             >
               打开「辅助功能」
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => open("event_posting")}
+            >
+              打开「发送事件」
             </Button>
           </div>
           {msg ? <FieldDescription>{msg}</FieldDescription> : null}
